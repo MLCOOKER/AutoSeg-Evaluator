@@ -1,0 +1,144 @@
+"""Dose-Volume Histogram (DVH) metrics — thin wrapper around dicompylercore.
+
+For each (RTSTRUCT, RTDOSE, ROI number) triple this module computes the
+user-requested Dmean / Dmax / Dmin plus arbitrary D@volume% and V@dose(Gy)
+points. Values are returned in Gy (doses) and cc (volumes).
+
+``dicompylercore`` does the heavy lifting (dose-grid → mask resampling,
+DVH curve construction, statistic extraction). All errors are surfaced as
+``DVHError`` so the worker can write a clean error row instead of crashing
+the batch.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Any
+
+
+class DVHError(Exception):
+    """Raised when DVH computation fails for a specific structure/dose pair."""
+
+
+@dataclass
+class DVHConfig:
+    include_dmean: bool = True
+    include_dmax: bool = True
+    include_dmin: bool = False
+    d_at_volumes_pct: list[float] = field(default_factory=list)
+    v_at_doses_gy: list[float] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DVHConfig":
+        return cls(
+            include_dmean=bool(data.get("include_dmean", True)),
+            include_dmax=bool(data.get("include_dmax", True)),
+            include_dmin=bool(data.get("include_dmin", False)),
+            d_at_volumes_pct=[float(x) for x in data.get("d_at_volumes_pct", []) or []],
+            v_at_doses_gy=[float(x) for x in data.get("v_at_doses_gy", []) or []],
+        )
+
+    def any_enabled(self) -> bool:
+        return (
+            self.include_dmean
+            or self.include_dmax
+            or self.include_dmin
+            or bool(self.d_at_volumes_pct)
+            or bool(self.v_at_doses_gy)
+        )
+
+    def output_keys(self) -> list[str]:
+        """Names of every output metric this config produces, in display order."""
+        keys: list[str] = []
+        if self.include_dmin:
+            keys.append("dmin_gy")
+        if self.include_dmean:
+            keys.append("dmean_gy")
+        if self.include_dmax:
+            keys.append("dmax_gy")
+        for v in self.d_at_volumes_pct:
+            keys.append(f"d{_fmt_num(v)}_gy")
+        for d in self.v_at_doses_gy:
+            keys.append(f"v{_fmt_num(d)}gy_cc")
+        return keys
+
+
+def compute_dvh_metrics(
+    rtstruct_ds,
+    rtdose_ds,
+    roi_number: int,
+    config: DVHConfig,
+) -> dict[str, float]:
+    """Return the DVH metrics for one structure against one dose grid.
+
+    Parameters
+    ----------
+    rtstruct_ds:
+        A pydicom Dataset of the RTSTRUCT containing the ROI.
+    rtdose_ds:
+        A pydicom Dataset of the RTDOSE the structure is evaluated against.
+    roi_number:
+        ROINumber within the RTSTRUCT's StructureSetROISequence.
+    config:
+        Which metrics to extract.
+
+    Raises
+    ------
+    DVHError
+        If dicompylercore can't compute a DVH for the structure (e.g. the
+        structure has no contours, lies outside the dose grid, etc.).
+    """
+    if not config.any_enabled():
+        return {}
+    try:
+        from dicompylercore import dvhcalc
+    except ImportError as exc:  # pragma: no cover — only triggered without dicompyler-core
+        raise DVHError(f"dicompyler-core not installed: {exc}") from exc
+
+    try:
+        dvh = dvhcalc.get_dvh(rtstruct_ds, rtdose_ds, roi_number, calculate_full_volume=True)
+    except Exception as exc:  # noqa: BLE001 — surface anything as a clean DVHError
+        raise DVHError(f"dvhcalc.get_dvh failed: {exc}") from exc
+    if dvh is None or getattr(dvh, "volume", 0) == 0:
+        raise DVHError(f"No DVH curve for ROI #{roi_number} (empty or outside dose grid).")
+
+    out: dict[str, float] = {}
+    # dicompylercore stores doses in the dose grid's native units (typically Gy).
+    if config.include_dmin:
+        out["dmin_gy"] = _safe(dvh.min)
+    if config.include_dmean:
+        out["dmean_gy"] = _safe(dvh.mean)
+    if config.include_dmax:
+        out["dmax_gy"] = _safe(dvh.max)
+
+    for v_pct in config.d_at_volumes_pct:
+        key = f"d{_fmt_num(v_pct)}_gy"
+        out[key] = _statistic_value(dvh, f"D{_fmt_num(v_pct)}%")
+    for d_gy in config.v_at_doses_gy:
+        key = f"v{_fmt_num(d_gy)}gy_cc"
+        out[key] = _statistic_value(dvh, f"V{_fmt_num(d_gy)}Gy")
+    return out
+
+
+def _safe(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def _statistic_value(dvh, expression: str) -> float:
+    """Pull a single DVH point (e.g. ``D95%`` or ``V20Gy``) via dvh.statistic()."""
+    try:
+        stat = dvh.statistic(expression)
+    except Exception:  # noqa: BLE001 — dvh.statistic raises various ValueError subclasses
+        return math.nan
+    return _safe(getattr(stat, "value", stat))
+
+
+def _fmt_num(value: float) -> str:
+    """Format a number for inclusion in a metric key — drops trailing ``.0``."""
+    if isinstance(value, (int, float)) and float(value).is_integer():
+        return str(int(value))
+    return str(value)

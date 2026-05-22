@@ -1,0 +1,50 @@
+cff-version: 1.2.0
+message: "If you use AutoSeg Evaluator in your research, please cite the associated paper and software."
+title: "AutoSeg Evaluator"
+abstract: "A GUI tool for segmentation quality assessment in radiotherapy, supporting validated geometric and dosimetric metrics for evaluating auto-contouring systems."
+type: software
+authors:
+  - family-names: Rusanov
+    given-names: Branimir
+    email: branimir.rusanov@research.uwa.edu.au
+    affiliation: "University of Western Australia"
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+  - family-names: Rowshanfarzad
+    given-names: Pejman
+    affiliation: "University of Western Australia"
+  - family-names: Barry
+    given-names: Nathaniel
+    affiliation: "University of Western Australia"
+  - family-names: Ebert
+    given-names: Martin A
+    affiliation: "University of Western Australia"
+  - family-names: Kendrick
+    given-names: Jake
+    affiliation: "University of Western Australia"
+version: "2.0.0a1"
+license: Apache-2.0
+repository-code: "https://github.com/branrusanov/autoseg-evaluator"
+url: "https://zenodo.org/records/17383138"
+keywords:
+  - radiotherapy
+  - auto-contouring
+  - dicom
+  - segmentation
+  - quality-assurance
+  - medical-imaging
+preferred-citation:
+  type: article
+  title: "AutoSeg Evaluator: An Efficient GUI Tool for Segmentation Quality Assessment"
+  authors:
+    - family-names: Rusanov
+      given-names: Branimir
+    - family-names: Rowshanfarzad
+      given-names: Pejman
+    - family-names: Barry
+      given-names: Nathaniel
+    - family-names: Ebert
+      given-names: Martin A
+    - family-names: Kendrick
+      given-names: Jake
+  journal: "Physics in Medicine and Biology"
+  year: 2025

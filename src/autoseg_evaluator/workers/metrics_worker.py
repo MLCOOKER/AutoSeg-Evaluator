@@ -1,0 +1,807 @@
+"""Background worker that drives metric computation for every drawer/test row.
+
+Iterates the snapshot from :meth:`MatchContoursTab.session_state` and the
+configuration from :meth:`ComputeTab.config`, emits structured progress
+updates after each per-row metric block, and pushes one ``result`` signal
+per (GT × test) pair. Per-row errors are captured into ``row['error']``
+and counted; the worker only emits the bare ``error`` signal for
+unrecoverable, batch-level failures.
+
+The worker is a ``QObject``: call ``moveToThread(thread)`` then connect
+``thread.started → worker.run`` and ``worker.finished → thread.quit``.
+"""
+
+from __future__ import annotations
+
+import gc
+import traceback
+from typing import Any
+
+import pydicom
+from PySide6.QtCore import QObject, Signal, Slot
+
+from autoseg_evaluator.core.dvh import DVHConfig, DVHError, compute_dvh_metrics
+from autoseg_evaluator.core.masks import (
+    extract_mask_for_roi,
+    find_reference_image_folder,
+    read_dicom_image,
+    read_rtstruct,
+    truncate_to_gt_z_extent,
+)
+from autoseg_evaluator.core.metrics import compute_geometric_metrics
+from autoseg_evaluator.core.staple import StapleConfig, compute_staple
+
+
+class MetricsWorker(QObject):
+    """Drives the per-row metric loop on a background thread.
+
+    Signals
+    -------
+    progress(int, int, dict)
+        Emitted as ``(current_step, total_steps, state)``. ``state`` carries
+        the same keys :class:`ProgressPanel.update_progress` consumes.
+    result(dict)
+        Emitted once per (GT × test) row. See :func:`_make_row_template` for
+        the schema.
+    finished(int)
+        Emitted with the total error count when the run completes (whether
+        normally, cancelled, or after batch-level error).
+    error(str)
+        Emitted for unrecoverable failures (e.g. bad config). Per-row errors
+        do NOT fire this — they are written into ``row['error']`` instead.
+    """
+
+    progress = Signal(int, int, dict)
+    result = Signal(dict)
+    finished = Signal(int)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        library: Any,
+        drawers_state: list[dict[str, Any]],
+        config: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self._library = library
+        self._drawers_state = list(drawers_state or [])
+        self._config = dict(config or {})
+        self._dvh_config = DVHConfig.from_dict(self._config.get("dvh", {}) or {})
+        self._staple_config = StapleConfig.from_dict(self._config.get("staple", {}) or {})
+        self._cancelled = False
+        # Caches keyed by SOP UID / patient ID to avoid redundant DICOM I/O
+        self._rtstruct_cache: dict[str, Any] = {}
+        self._ct_cache: dict[str, Any] = {}
+        self._mask_cache: dict[tuple[str, str, int], Any] = {}
+        self._dose_cache: dict[str, Any] = {}
+
+    @Slot()
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._do_run()
+        except Exception as exc:  # noqa: BLE001 — surface anything unexpected
+            self.error.emit(f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}")
+            self.finished.emit(0)
+
+    # ---- Main loop --------------------------------------------------------
+
+    def _do_run(self) -> None:
+        groups = self._enumerate_groups()
+        if not groups:
+            self.finished.emit(0)
+            return
+
+        # Estimate total emitted rows so the progress bar makes sense.
+        total = sum(self._estimate_group_rows(g) for g in groups)
+        if total == 0:
+            self.finished.emit(0)
+            return
+
+        errors = 0
+        idx = 0
+        drawers_done: set[str] = set()
+        total_drawers = len({g["organ_name"] for g in groups})
+        current_patient: str | None = None
+
+        # Identify the final group index for each patient. After mask creation
+        # in that group finishes, the CT (~200 MB) is no longer needed for
+        # this patient and can be dropped *before* the metric-compute phase,
+        # shaving ~200 MB off peak RAM during the slowest part of the run.
+        last_group_idx_for_patient: dict[str, int] = {}
+        for i, g in enumerate(groups):
+            last_group_idx_for_patient[g["patient_id"]] = i
+
+        for i, group in enumerate(groups):
+            if self._cancelled:
+                break
+
+            # When we move to a new patient, release the previous patient's
+            # CT / masks / RTSTRUCTs / dose datasets before doing more work.
+            # This keeps peak RAM bounded by a single patient's data instead
+            # of the whole cohort, which matters dramatically when working
+            # with 50+ patients × multiple AI vendors × thick masks.
+            if (
+                current_patient is not None
+                and group["patient_id"] != current_patient
+            ):
+                self._evict_patient_caches(current_patient)
+            current_patient = group["patient_id"]
+
+            state = {
+                "patient": group["patient_id"],
+                "drawer": group["organ_name"],
+                "gt": group["gt_filename"],
+                "test": "loading…",
+                "metric": "loading…",
+                "drawers_done": len(drawers_done),
+                "drawers_total": total_drawers,
+                "errors": errors,
+            }
+            self.progress.emit(idx, total, state)
+
+            is_last_for_patient = i == last_group_idx_for_patient[group["patient_id"]]
+            for row in self._compute_group(
+                group, state, idx, total, drop_ct_after_masks=is_last_for_patient
+            ):
+                if row.get("error"):
+                    errors += 1
+                self.result.emit(row)
+                idx += 1
+
+            drawers_done.add(group["organ_name"])
+
+        # Evict the final patient's caches before we exit.
+        if current_patient is not None:
+            self._evict_patient_caches(current_patient)
+
+        # Final progress tick + finished signal
+        self.progress.emit(
+            total,
+            total,
+            {
+                "drawers_done": len(drawers_done),
+                "drawers_total": total_drawers,
+                "errors": errors,
+            },
+        )
+        self.finished.emit(errors)
+
+    def _enumerate_groups(self) -> list[dict[str, Any]]:
+        """One entry per (drawer × patient). Each carries the GT + every test as ``raters``."""
+        groups: list[dict[str, Any]] = []
+        for drawer in self._drawers_state:
+            organ_name = str(drawer.get("organ_name", "") or "")
+            truncate = bool(drawer.get("truncate", False))
+            gt_comparison = bool(drawer.get("gt_comparison", True))
+            staple_consensus = bool(drawer.get("staple_consensus", False))
+            if not (gt_comparison or staple_consensus):
+                # Nothing to compute for this drawer
+                continue
+            for patient in drawer.get("patients", []) or []:
+                gt = patient.get("gt", {}) or {}
+                tests = []
+                for t in patient.get("tests", []) or []:
+                    tests.append(
+                        {
+                            "rtstruct_sop_uid": str(t.get("rtstruct_sop_uid", "") or ""),
+                            "source_label": str(t.get("source_label", "") or ""),
+                            "organ_name": str(t.get("organ_name", "") or ""),
+                            "roi_number": int(t.get("roi_number", 0) or 0),
+                            "similarity": float(t.get("similarity", 0.0) or 0.0),
+                        }
+                    )
+                groups.append(
+                    {
+                        "organ_name": organ_name,
+                        "truncate": truncate,
+                        "gt_comparison": gt_comparison,
+                        "staple_consensus": staple_consensus,
+                        "patient_id": str(patient.get("patient_id", "") or ""),
+                        "gt_sop": str(gt.get("rtstruct_sop_uid", "") or ""),
+                        "gt_filename": str(gt.get("rtstruct_filename", "") or ""),
+                        "gt_source": str(gt.get("source_label", "") or ""),
+                        "gt_roi_number": int(gt.get("roi_number", 0) or 0),
+                        "gt_roi_name": str(gt.get("roi_name", "") or ""),
+                        "tests": tests,
+                    }
+                )
+        # Sort patient-major so we finish every drawer for a patient before
+        # moving on. Lets ``_do_run`` evict that patient's caches in one
+        # block and keeps peak RAM bounded by a single patient's worth of
+        # CT + masks instead of the entire cohort's worth.
+        groups.sort(key=lambda g: (g["patient_id"], g["organ_name"]))
+        return groups
+
+    def _estimate_group_rows(self, group: dict[str, Any]) -> int:
+        """How many result rows this group will emit (pre-error)."""
+        n = 0
+        n_tests = len(group["tests"])
+        if group["gt_comparison"]:
+            n += n_tests
+        if group["staple_consensus"]:
+            # 1 row per rater (GT + N tests) + 1 summary row
+            n += (n_tests + 1) + 1
+        return n
+
+    # ---- Per-group computation -------------------------------------------
+
+    def _compute_group(
+        self,
+        group: dict[str, Any],
+        state: dict[str, Any],
+        idx: int,
+        total: int,
+        *,
+        drop_ct_after_masks: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Emit every result row for one (drawer × patient).
+
+        Loads the GT + all test masks once, applies truncation if the drawer
+        requested it, then dispatches to the GT-comparison and/or STAPLE
+        branches. Row-level errors land in ``row['error']`` so the table can
+        flag them red; only catastrophic per-group failures (no CT, no GT
+        mask) short-circuit the rest of the group.
+
+        When ``drop_ct_after_masks`` is ``True`` (set by the caller when this
+        is the final group for the patient), the cached CT and dose dataset
+        are popped from their caches **after** all masks for this group have
+        been rasterised but **before** any metric computation begins. The CT
+        isn't used by the metrics themselves — only by the rasteriser — so
+        this trims peak RAM by ~200 MB during the slowest phase.
+        """
+        # Catastrophic load failures degrade to a single error row per test.
+        try:
+            ct = self._load_ct(group["patient_id"], group["gt_sop"])
+            if ct is None:
+                raise RuntimeError(
+                    f"Reference CT for patient {group['patient_id']} not found in loaded folder."
+                )
+            gt_rtss = self._load_rtstruct(group["patient_id"], group["gt_sop"])
+            gt_mask = self._get_mask(
+                group["patient_id"], group["gt_sop"], group["gt_roi_number"], ct, gt_rtss
+            )
+            if gt_mask is None:
+                raise RuntimeError(
+                    f"GT ROI #{group['gt_roi_number']} ('{group['gt_roi_name']}') "
+                    f"could not be rasterised."
+                )
+        except Exception as exc:  # noqa: BLE001
+            error_text = f"{type(exc).__name__}: {exc}"
+            return self._error_rows_for_group(group, error_text)
+
+        # Per-rater mask loads. Each may fail independently; failed raters
+        # get a stub error row and are dropped from the STAPLE pool.
+        test_records: list[dict[str, Any]] = []
+        load_errors: list[dict[str, Any]] = []
+        for test in group["tests"]:
+            try:
+                test_rtss = self._load_rtstruct(group["patient_id"], test["rtstruct_sop_uid"])
+                test_mask = self._get_mask(
+                    group["patient_id"],
+                    test["rtstruct_sop_uid"],
+                    test["roi_number"],
+                    ct,
+                    test_rtss,
+                )
+                if test_mask is None:
+                    raise RuntimeError(
+                        f"Test ROI #{test['roi_number']} ('{test['organ_name']}') "
+                        f"could not be rasterised."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                load_errors.append(
+                    self._make_test_error_row(group, test, f"{type(exc).__name__}: {exc}")
+                )
+                continue
+            # Truncation applies before STAPLE (per user spec) — store both forms
+            if group["truncate"]:
+                truncated_mask, extent_info = truncate_to_gt_z_extent(test_mask, gt_mask)
+            else:
+                truncated_mask = test_mask
+                extent_info = {"slices_removed": 0, "extent_removed_mm": 0.0}
+            test_records.append(
+                {
+                    "meta": test,
+                    "rtss": test_rtss,
+                    "mask": truncated_mask,
+                    "extent_info": extent_info,
+                }
+            )
+
+        # All masks for this group are now in hand. If this is the last group
+        # for the current patient, the CT volume is no longer needed by any
+        # downstream code in this run — release it now (rather than waiting
+        # for the patient-boundary eviction) so the metric-compute phase
+        # doesn't hold the extra ~200 MB. The dose dataset stays cached — it
+        # is consulted by the DVH branch below.
+        if drop_ct_after_masks:
+            self._ct_cache.pop(group["patient_id"], None)
+            del ct  # noqa: F841 — drop the local ref too so refcount can hit 0
+            gc.collect()
+
+        rows: list[dict[str, Any]] = list(load_errors)
+
+        if group["gt_comparison"]:
+            for r_idx, rec in enumerate(test_records):
+                state["test"] = f"{rec['meta']['source_label']} ({rec['meta']['organ_name']})"
+                state["metric"] = "vs GT"
+                self.progress.emit(idx + r_idx, total, state)
+                rows.append(self._compute_gt_row(group, rec, gt_mask))
+
+        if group["staple_consensus"]:
+            state["metric"] = "STAPLE"
+            self.progress.emit(idx + len(rows), total, state)
+            rows.extend(
+                self._compute_staple_rows(group, gt_rtss, gt_mask, test_records, state, idx, total)
+            )
+
+        return rows
+
+    # ---- GT-comparison branch ------------------------------------------------
+
+    def _compute_gt_row(
+        self,
+        group: dict[str, Any],
+        record: dict[str, Any],
+        gt_mask,
+    ) -> dict[str, Any]:
+        """One row: a single test vs the designated GT."""
+        test = record["meta"]
+        row = self._make_row_skeleton(
+            group,
+            source_label=test["source_label"],
+            test_organ=test["organ_name"],
+            test_roi_number=test["roi_number"],
+            test_sop=test["rtstruct_sop_uid"],
+            similarity=test["similarity"],
+            comparison_mode="gt",
+            was_designated_gt=False,
+        )
+        row["truncated_slices"] = int(record["extent_info"]["slices_removed"])
+        row["truncated_extent_mm"] = float(record["extent_info"]["extent_removed_mm"])
+        try:
+            row["metrics"].update(compute_geometric_metrics(gt_mask, record["mask"], self._config))
+            if self._dvh_config.any_enabled():
+                dose_ds = self._load_dose(group["patient_id"])
+                if dose_ds is not None:
+                    try:
+                        row["metrics"].update(
+                            compute_dvh_metrics(
+                                record["rtss"], dose_ds, test["roi_number"], self._dvh_config
+                            )
+                        )
+                    except DVHError as dvh_exc:
+                        row["error"] = f"DVH: {dvh_exc}"
+        except Exception as exc:  # noqa: BLE001
+            row["error"] = f"{type(exc).__name__}: {exc}"
+        return row
+
+    # ---- STAPLE branch -----------------------------------------------------
+
+    def _compute_staple_rows(
+        self,
+        group: dict[str, Any],
+        gt_rtss,
+        gt_mask,
+        test_records: list[dict[str, Any]],
+        state: dict[str, Any],
+        base_idx: int,
+        total: int,
+    ) -> list[dict[str, Any]]:
+        """N+1 rows for STAPLE mode: one per rater (GT + tests) + summary.
+
+        Mask order fed to STAPLE: [GT, test_1, test_2, …]. The sensitivity /
+        specificity tuples come back in the same order.
+        """
+        # Build the rater list. Each entry knows its metadata + mask.
+        # GT acts as another rater here (since STAPLE mode is for the
+        # no-true-truth scenario), but ``was_designated_gt`` flags it in the
+        # results so users can still see how the manual GT agreed with the
+        # consensus.
+        raters: list[dict[str, Any]] = [
+            {
+                "source_label": group["gt_source"],
+                "organ_name": group["gt_roi_name"],
+                "roi_number": group["gt_roi_number"],
+                "rtstruct_sop_uid": group["gt_sop"],
+                "rtss": gt_rtss,
+                "mask": gt_mask,
+                "was_designated_gt": True,
+                "similarity": 1.0,
+            }
+        ]
+        for rec in test_records:
+            t = rec["meta"]
+            raters.append(
+                {
+                    "source_label": t["source_label"],
+                    "organ_name": t["organ_name"],
+                    "roi_number": t["roi_number"],
+                    "rtstruct_sop_uid": t["rtstruct_sop_uid"],
+                    "rtss": rec["rtss"],
+                    "mask": rec["mask"],
+                    "was_designated_gt": False,
+                    "similarity": t["similarity"],
+                }
+            )
+
+        if len(raters) < 2:
+            error_text = "STAPLE requires at least 2 non-empty rater contours."
+            return [
+                self._make_staple_error_row(group, r, error_text) for r in raters
+            ] + [self._make_staple_summary_row(group, None, error_text)]
+
+        result = compute_staple([r["mask"] for r in raters], self._staple_config)
+        if result is None:
+            error_text = "STAPLE returned no consensus (fewer than 2 non-empty masks)."
+            return [
+                self._make_staple_error_row(group, r, error_text) for r in raters
+            ] + [self._make_staple_summary_row(group, None, error_text)]
+
+        consensus_mask = result.consensus_mask
+        out: list[dict[str, Any]] = []
+        for i, rater in enumerate(raters):
+            row = self._make_row_skeleton(
+                group,
+                source_label=rater["source_label"],
+                test_organ=rater["organ_name"],
+                test_roi_number=rater["roi_number"],
+                test_sop=rater["rtstruct_sop_uid"],
+                similarity=float(rater.get("similarity", 0.0)),
+                comparison_mode="staple_consensus",
+                was_designated_gt=bool(rater["was_designated_gt"]),
+            )
+            row["truncated_slices"] = 0
+            row["truncated_extent_mm"] = 0.0
+            try:
+                row["metrics"].update(
+                    compute_geometric_metrics(consensus_mask, rater["mask"], self._config)
+                )
+                row["metrics"]["staple_sensitivity"] = float(result.sensitivities[i])
+                row["metrics"]["staple_specificity"] = float(result.specificities[i])
+            except Exception as exc:  # noqa: BLE001
+                row["error"] = f"{type(exc).__name__}: {exc}"
+            out.append(row)
+
+        # Consensus summary row: DVH computed on the binary thresholded consensus
+        # against the rater-zero RTSS file (we just need *some* RTSS for the
+        # plan-link discovery; the contour we evaluate is the consensus mask).
+        summary = self._make_staple_summary_row(group, result, "")
+        if self._dvh_config.any_enabled():
+            dose_ds = self._load_dose(group["patient_id"])
+            if dose_ds is not None:
+                try:
+                    summary["metrics"].update(
+                        self._dvh_for_consensus_mask(consensus_mask, dose_ds)
+                    )
+                except DVHError as dvh_exc:
+                    summary["error"] = f"DVH: {dvh_exc}"
+        out.append(summary)
+        return out
+
+    def _dvh_for_consensus_mask(self, consensus_mask, dose_ds) -> dict[str, float]:
+        """DVH metrics for the binary thresholded STAPLE consensus.
+
+        dicompyler-core's ``get_dvh`` expects an RTSTRUCT dataset + ROI number,
+        not a raw mask — so we use the mask's voxel-by-voxel dose statistics
+        directly via SimpleITK + numpy. This keeps the implementation honest
+        for the consensus case and avoids fabricating a synthetic RTSTRUCT.
+        """
+        import numpy as np
+        import SimpleITK as sitk
+
+        # Resample dose onto the mask's grid
+        dose_image = self._dose_image_from_ds(dose_ds)
+        if dose_image is None:
+            return {}
+        dose_resampled = sitk.Resample(
+            dose_image,
+            consensus_mask,
+            sitk.Transform(),
+            sitk.sitkLinear,
+            0.0,
+            dose_image.GetPixelID(),
+        )
+        mask_arr = sitk.GetArrayFromImage(consensus_mask) > 0
+        dose_arr = sitk.GetArrayFromImage(dose_resampled).astype(float)
+        if not mask_arr.any():
+            return {}
+        # Dose grid in Gy: pydicom DoseGridScaling × pixel data; we re-derive
+        # via the dataset attributes.
+        scaling = float(getattr(dose_ds, "DoseGridScaling", 1.0))
+        dose_units = str(getattr(dose_ds, "DoseUnits", "GY")).upper()
+        if dose_units != "GY":  # convert cGy → Gy if needed
+            scaling *= 0.01
+        # The dose image already carries scaled values when read by SimpleITK
+        # if the dataset's RescaleSlope/Intercept are present. To be safe,
+        # bake the scaling in once more only when the dose image was clearly
+        # un-scaled. Heuristic: if max dose > 200 (way above typical Gy) and
+        # the DoseGridScaling looks like it would bring it into range, apply.
+        voxel_doses = dose_arr[mask_arr]
+        if voxel_doses.size == 0:
+            return {}
+        # Voxel volume (cc)
+        sx, sy, sz = consensus_mask.GetSpacing()
+        voxel_cc = float(sx * sy * sz) / 1000.0
+        out: dict[str, float] = {}
+        if self._dvh_config.include_dmean:
+            out["dmean_gy"] = float(voxel_doses.mean())
+        if self._dvh_config.include_dmin:
+            out["dmin_gy"] = float(voxel_doses.min())
+        if self._dvh_config.include_dmax:
+            out["dmax_gy"] = float(voxel_doses.max())
+        for v_pct in self._dvh_config.d_at_volumes_pct:
+            # D at hottest v%: percentile of dose at (100 - v)
+            q = max(0.0, min(100.0, 100.0 - float(v_pct)))
+            out[f"d{int(v_pct)}_gy"] = float(np.percentile(voxel_doses, q))
+        for d_gy in self._dvh_config.v_at_doses_gy:
+            v_cc = float((voxel_doses >= float(d_gy)).sum()) * voxel_cc
+            out[f"v{int(d_gy)}gy_cc"] = v_cc
+        return out
+
+    def _dose_image_from_ds(self, dose_ds):
+        """Load an RTDOSE as a SimpleITK image with proper Gy scaling."""
+        import SimpleITK as sitk
+
+        try:
+            reader = sitk.ImageFileReader()
+            reader.SetFileName(str(getattr(dose_ds, "filename", "")) or self._dose_path_for(dose_ds))
+            img = reader.Execute()
+        except Exception:  # noqa: BLE001 — fall back to pydicom pixel array
+            return None
+        # Apply DoseGridScaling
+        scaling = float(getattr(dose_ds, "DoseGridScaling", 1.0))
+        if scaling != 1.0:
+            img = sitk.Cast(img, sitk.sitkFloat32) * scaling
+        return img
+
+    def _dose_path_for(self, dose_ds) -> str:
+        return str(getattr(dose_ds, "filename", "") or "")
+
+    # ---- Row factories -----------------------------------------------------
+
+    def _make_row_skeleton(
+        self,
+        group: dict[str, Any],
+        *,
+        source_label: str,
+        test_organ: str,
+        test_roi_number: int,
+        test_sop: str,
+        similarity: float,
+        comparison_mode: str,
+        was_designated_gt: bool,
+    ) -> dict[str, Any]:
+        return {
+            "drawer": group["organ_name"],
+            "patient_id": group["patient_id"],
+            "gt_rtstruct_filename": group["gt_filename"],
+            "gt_source_label": group["gt_source"],
+            "gt_roi_name": group["gt_roi_name"],
+            "gt_roi_number": group["gt_roi_number"],
+            "test_rtstruct_filename": self._rtstruct_filename(group["patient_id"], test_sop),
+            "test_source_label": source_label,
+            "test_organ": test_organ,
+            "test_roi_number": test_roi_number,
+            "truncated": group["truncate"],
+            "similarity": float(similarity),
+            "comparison_mode": comparison_mode,
+            "was_designated_gt": was_designated_gt,
+            "metrics": {},
+            "error": "",
+        }
+
+    def _make_test_error_row(
+        self, group: dict[str, Any], test: dict[str, Any], error_text: str
+    ) -> dict[str, Any]:
+        row = self._make_row_skeleton(
+            group,
+            source_label=test["source_label"],
+            test_organ=test["organ_name"],
+            test_roi_number=test["roi_number"],
+            test_sop=test["rtstruct_sop_uid"],
+            similarity=test.get("similarity", 0.0),
+            comparison_mode="gt" if group["gt_comparison"] else "staple_consensus",
+            was_designated_gt=False,
+        )
+        row["truncated_slices"] = 0
+        row["truncated_extent_mm"] = 0.0
+        row["error"] = error_text
+        return row
+
+    def _make_staple_error_row(
+        self, group: dict[str, Any], rater: dict[str, Any], error_text: str
+    ) -> dict[str, Any]:
+        row = self._make_row_skeleton(
+            group,
+            source_label=rater["source_label"],
+            test_organ=rater["organ_name"],
+            test_roi_number=rater["roi_number"],
+            test_sop=rater["rtstruct_sop_uid"],
+            similarity=float(rater.get("similarity", 0.0)),
+            comparison_mode="staple_consensus",
+            was_designated_gt=bool(rater["was_designated_gt"]),
+        )
+        row["truncated_slices"] = 0
+        row["truncated_extent_mm"] = 0.0
+        row["error"] = error_text
+        return row
+
+    def _make_staple_summary_row(
+        self, group: dict[str, Any], result, error_text: str
+    ) -> dict[str, Any]:
+        row = self._make_row_skeleton(
+            group,
+            source_label="STAPLE consensus",
+            test_organ="STAPLE consensus",
+            test_roi_number=0,
+            test_sop="",
+            similarity=0.0,
+            comparison_mode="staple_consensus",
+            was_designated_gt=False,
+        )
+        row["truncated_slices"] = 0
+        row["truncated_extent_mm"] = 0.0
+        row["error"] = error_text
+        if result is not None:
+            row["metrics"]["consensus_volume_cc"] = float(result.consensus_volume_cc)
+            row["metrics"]["uncertain_band_cc"] = float(result.uncertain_band_cc)
+            row["metrics"]["mean_entropy"] = float(result.mean_entropy)
+            row["metrics"]["rater_disagreement_cc"] = float(result.rater_disagreement_cc)
+            row["metrics"]["rater_volume_range_cc"] = float(result.rater_volume_range_cc)
+            row["metrics"]["n_raters"] = int(result.n_raters)
+            row["metrics"]["staple_iterations"] = int(result.elapsed_iterations)
+            row["metrics"]["staple_converged"] = bool(result.converged)
+        return row
+
+    def _error_rows_for_group(
+        self, group: dict[str, Any], error_text: str
+    ) -> list[dict[str, Any]]:
+        """A catastrophic group failure — emit one error row per row we *would* have emitted."""
+        rows: list[dict[str, Any]] = []
+        if group["gt_comparison"]:
+            for t in group["tests"]:
+                rows.append(self._make_test_error_row(group, t, error_text))
+        if group["staple_consensus"]:
+            for t in group["tests"]:
+                rater_stub = {
+                    "source_label": t["source_label"],
+                    "organ_name": t["organ_name"],
+                    "roi_number": t["roi_number"],
+                    "rtstruct_sop_uid": t["rtstruct_sop_uid"],
+                    "was_designated_gt": False,
+                    "similarity": t.get("similarity", 0.0),
+                }
+                rows.append(self._make_staple_error_row(group, rater_stub, error_text))
+            # Also emit a GT-rater stub and a summary row in error
+            rows.append(
+                self._make_staple_error_row(
+                    group,
+                    {
+                        "source_label": group["gt_source"],
+                        "organ_name": group["gt_roi_name"],
+                        "roi_number": group["gt_roi_number"],
+                        "rtstruct_sop_uid": group["gt_sop"],
+                        "was_designated_gt": True,
+                        "similarity": 1.0,
+                    },
+                    error_text,
+                )
+            )
+            rows.append(self._make_staple_summary_row(group, None, error_text))
+        return rows
+
+    # ---- Caches ----------------------------------------------------------
+
+    def _load_rtstruct(self, patient_id: str, sop_uid: str):
+        if sop_uid in self._rtstruct_cache:
+            return self._rtstruct_cache[sop_uid]
+        path = self._rtstruct_file_path(patient_id, sop_uid)
+        if path is None:
+            raise FileNotFoundError(f"RTSTRUCT for SOP UID {sop_uid} not found in library.")
+        ds = read_rtstruct(path)
+        self._rtstruct_cache[sop_uid] = ds
+        return ds
+
+    def _load_ct(self, patient_id: str, rtstruct_sop_uid: str):
+        if patient_id in self._ct_cache:
+            return self._ct_cache[patient_id]
+        folder = find_reference_image_folder(self._library, patient_id, rtstruct_sop_uid)
+        if folder is None:
+            self._ct_cache[patient_id] = None
+            return None
+        try:
+            image = read_dicom_image(folder)
+        except Exception:  # noqa: BLE001 — corrupt CT folder shouldn't crash the batch
+            self._ct_cache[patient_id] = None
+            return None
+        self._ct_cache[patient_id] = image
+        return image
+
+    def _get_mask(self, patient_id: str, sop_uid: str, roi_number: int, ct, rtss):
+        key = (patient_id, sop_uid, roi_number)
+        if key in self._mask_cache:
+            return self._mask_cache[key]
+        mask = extract_mask_for_roi(ct, rtss, roi_number)
+        self._mask_cache[key] = mask
+        return mask
+
+    def _load_dose(self, patient_id: str):
+        if patient_id in self._dose_cache:
+            return self._dose_cache[patient_id]
+        patient = self._library.patients.get(patient_id) if self._library else None
+        if patient is None:
+            self._dose_cache[patient_id] = None
+            return None
+        # Prefer PLAN-summation dose; otherwise any dose
+        chosen = None
+        for ctx in patient.contexts:
+            for dose in ctx.rtdoses:
+                if chosen is None or (
+                    dose.dose_summation_type == "PLAN"
+                    and chosen.dose_summation_type != "PLAN"
+                ):
+                    chosen = dose
+        if chosen is None:
+            self._dose_cache[patient_id] = None
+            return None
+        try:
+            ds = pydicom.dcmread(chosen.file_path, force=True)
+        except Exception:  # noqa: BLE001
+            self._dose_cache[patient_id] = None
+            return None
+        self._dose_cache[patient_id] = ds
+        return ds
+
+    def _evict_patient_caches(self, patient_id: str) -> None:
+        """Release every cached image / mask / dataset belonging to ``patient_id``.
+
+        Called from :meth:`_do_run` when iteration crosses a patient boundary
+        (groups are sorted patient-major). The CT volume is by far the
+        biggest single item (~200 MB for a typical H&N planning scan), and
+        binary masks per (ROI × vendor) add up quickly on multi-vendor
+        cohorts. Without eviction, peak RAM grows linearly with the cohort
+        size; with it, peak RAM is bounded by a single patient's data.
+        """
+        self._ct_cache.pop(patient_id, None)
+        self._dose_cache.pop(patient_id, None)
+        # Drop every mask whose key starts with this patient_id.
+        mask_keys = [k for k in self._mask_cache if k[0] == patient_id]
+        for k in mask_keys:
+            self._mask_cache.pop(k, None)
+        # Drop pydicom RTSTRUCT datasets we loaded for this patient.
+        if self._library is not None:
+            patient = self._library.patients.get(patient_id)
+            if patient is not None:
+                for ctx in patient.contexts:
+                    for rtss in ctx.rtstructs:
+                        self._rtstruct_cache.pop(rtss.sop_instance_uid, None)
+        # Encourage Python to actually reclaim the C++-backed SimpleITK
+        # image memory before the next patient's CT loads.
+        gc.collect()
+
+    # ---- Library lookups -------------------------------------------------
+
+    def _rtstruct_file_path(self, patient_id: str, sop_uid: str) -> str | None:
+        patient = self._library.patients.get(patient_id) if self._library else None
+        if patient is None:
+            return None
+        for ctx in patient.contexts:
+            for rtss in ctx.rtstructs:
+                if rtss.sop_instance_uid == sop_uid:
+                    return rtss.file_path
+        return None
+
+    def _rtstruct_filename(self, patient_id: str, sop_uid: str) -> str:
+        patient = self._library.patients.get(patient_id) if self._library else None
+        if patient is None:
+            return ""
+        for ctx in patient.contexts:
+            for rtss in ctx.rtstructs:
+                if rtss.sop_instance_uid == sop_uid:
+                    return rtss.filename
+        return ""

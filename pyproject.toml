@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoseg-evaluator"
+version = "2.0.0a1"
+description = "GUI tool for segmentation quality assessment in radiotherapy"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Branimir Rusanov", email = "branimir.rusanov@research.uwa.edu.au" },
+]
+keywords = [
+    "radiotherapy",
+    "autocontouring",
+    "dicom",
+    "segmentation",
+    "medical-imaging",
+    "dvh",
+    "quality-assurance",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "PySide6>=6.6",
+    "qt-material>=2.14",
+    "pydicom>=2.4",
+    "SimpleITK>=2.3",
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "scikit-image>=0.22",
+    "matplotlib>=3.8",
+    "dicompyler-core>=0.5.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+    "ruff>=0.4",
+    "pyinstaller>=6.5",
+]
+
+[project.scripts]
+autoseg-evaluator = "autoseg_evaluator.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/branrusanov/autoseg-evaluator"
+Documentation = "https://github.com/branrusanov/autoseg-evaluator/tree/main/docs"
+Repository = "https://github.com/branrusanov/autoseg-evaluator"
+"Bug Tracker" = "https://github.com/branrusanov/autoseg-evaluator/issues"
+Citation = "https://zenodo.org/records/17383138"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+autoseg_evaluator = ["resources/**/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
