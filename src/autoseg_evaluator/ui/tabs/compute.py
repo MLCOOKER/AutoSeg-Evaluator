@@ -36,6 +36,36 @@ from PySide6.QtWidgets import (
 from autoseg_evaluator.ui.widgets.progress_panel import ProgressPanel
 
 
+class _NoScrollSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox that ignores mouse-wheel events.
+
+    Without this, the spinbox eats wheel events even when the user is
+    scrolling the surrounding tab — silently mutating STAPLE parameters
+    they didn't intend to change. Click-to-focus + arrow keys + typing
+    still work normally.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Prevent the spinbox from grabbing focus on scroll-by — only on
+        # explicit click or keyboard tab navigation.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        # Let the wheel event propagate to the parent scroll area instead
+        # of being consumed by the spinbox.
+        event.ignore()
+
+
+# STAPLE parameter defaults — also surfaced in the UI labels so the user
+# can recover them after experimenting, and used by the "Reset" button.
+_STAPLE_DEFAULTS = {
+    "max_iterations": 30,
+    "confidence_weight": 1.0,
+    "bbox_padding_voxels": 5,
+}
+
+
 _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
     (
         "dice",
@@ -213,7 +243,7 @@ class ComputeTab(QWidget):
         tol_form = QFormLayout()
         tol_form.setContentsMargins(0, 0, 0, 0)
         tol_form.setSpacing(6)
-        self._sd_tau_spin = QDoubleSpinBox(box)
+        self._sd_tau_spin = _NoScrollSpinBox(box)
         self._sd_tau_spin.setRange(0.0, 100.0)
         self._sd_tau_spin.setSingleStep(0.1)
         self._sd_tau_spin.setDecimals(2)
@@ -221,7 +251,7 @@ class ComputeTab(QWidget):
         self._sd_tau_spin.valueChanged.connect(self._emit_config_changed)
         tol_form.addRow("Surface Dice τ:", self._sd_tau_spin)
 
-        self._apl_tau_spin = QDoubleSpinBox(box)
+        self._apl_tau_spin = _NoScrollSpinBox(box)
         self._apl_tau_spin.setRange(0.0, 100.0)
         self._apl_tau_spin.setSingleStep(0.1)
         self._apl_tau_spin.setDecimals(2)
@@ -318,45 +348,69 @@ class ComputeTab(QWidget):
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(6)
 
-        self._staple_max_iter_spin = QDoubleSpinBox(box)
+        self._staple_max_iter_spin = _NoScrollSpinBox(box)
         self._staple_max_iter_spin.setDecimals(0)
         self._staple_max_iter_spin.setRange(1, 500)
         self._staple_max_iter_spin.setSingleStep(5)
-        self._staple_max_iter_spin.setValue(30)
+        self._staple_max_iter_spin.setValue(_STAPLE_DEFAULTS["max_iterations"])
         self._staple_max_iter_spin.setToolTip(
             "Maximum EM iterations. STAPLE typically converges in 10–30 for clinical "
             "OARs; values below ~5 risk premature termination."
         )
         self._staple_max_iter_spin.valueChanged.connect(self._emit_config_changed)
-        layout.addRow("Max iterations:", self._staple_max_iter_spin)
+        layout.addRow(
+            f"Max iterations (default {_STAPLE_DEFAULTS['max_iterations']}):",
+            self._staple_max_iter_spin,
+        )
 
-        self._staple_conf_spin = QDoubleSpinBox(box)
+        self._staple_conf_spin = _NoScrollSpinBox(box)
         self._staple_conf_spin.setDecimals(2)
         self._staple_conf_spin.setRange(0.1, 5.0)
         self._staple_conf_spin.setSingleStep(0.1)
-        self._staple_conf_spin.setValue(1.0)
+        self._staple_conf_spin.setValue(_STAPLE_DEFAULTS["confidence_weight"])
         self._staple_conf_spin.setToolTip(
             "Multiplier on STAPLE's auto-estimated foreground prior. The ITK "
             "docstring recommends leaving this at 1.0 unless you have a specific "
             "reason to bias the EM toward foreground (>1) or background (<1)."
         )
         self._staple_conf_spin.valueChanged.connect(self._emit_config_changed)
-        layout.addRow("Confidence weight:", self._staple_conf_spin)
+        layout.addRow(
+            f"Confidence weight (default {_STAPLE_DEFAULTS['confidence_weight']:.1f}):",
+            self._staple_conf_spin,
+        )
 
-        self._staple_bbox_pad_spin = QDoubleSpinBox(box)
+        self._staple_bbox_pad_spin = _NoScrollSpinBox(box)
         self._staple_bbox_pad_spin.setDecimals(0)
         self._staple_bbox_pad_spin.setRange(0, 50)
         self._staple_bbox_pad_spin.setSingleStep(1)
-        self._staple_bbox_pad_spin.setValue(5)
+        self._staple_bbox_pad_spin.setValue(_STAPLE_DEFAULTS["bbox_padding_voxels"])
         self._staple_bbox_pad_spin.setToolTip(
             "Voxel padding around the rater union before running STAPLE. The crop "
             "rescales the foreground prior away from whole-image bias — the "
             "documented workaround for STAPLE's small-structure shrinkage."
         )
         self._staple_bbox_pad_spin.valueChanged.connect(self._emit_config_changed)
-        layout.addRow("Bounding-box padding (vox):", self._staple_bbox_pad_spin)
+        layout.addRow(
+            f"Bounding-box padding vox (default {_STAPLE_DEFAULTS['bbox_padding_voxels']}):",
+            self._staple_bbox_pad_spin,
+        )
+
+        reset_btn = QPushButton("Reset to defaults", box)
+        reset_btn.setToolTip(
+            "Restore STAPLE parameters to the values most consensus-contour "
+            "studies cite (max_iterations=30, confidence_weight=1.0, "
+            "bbox_padding_voxels=5)."
+        )
+        reset_btn.clicked.connect(self._reset_staple_defaults)
+        layout.addRow("", reset_btn)
 
         return box
+
+    def _reset_staple_defaults(self) -> None:
+        """Restore the STAPLE spinboxes to their published defaults."""
+        self._staple_max_iter_spin.setValue(_STAPLE_DEFAULTS["max_iterations"])
+        self._staple_conf_spin.setValue(_STAPLE_DEFAULTS["confidence_weight"])
+        self._staple_bbox_pad_spin.setValue(_STAPLE_DEFAULTS["bbox_padding_voxels"])
 
     # ---- Settings round-trip ---------------------------------------------
 
