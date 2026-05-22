@@ -109,6 +109,7 @@ class OrganDrawer(CollapsibleBox):
     truncateChanged = Signal(bool)
     gtComparisonChanged = Signal(bool)
     stapleConsensusChanged = Signal(bool)
+    stapleIncludeGtChanged = Signal(bool)
     visualizeRequested = Signal(str)
     removePatientRequested = Signal(str)
     removeTestRequested = Signal(str, str, int)
@@ -187,6 +188,21 @@ class OrganDrawer(CollapsibleBox):
 
     def set_staple_consensus(self, enabled: bool) -> None:
         self._staple_check.setChecked(enabled)
+
+    def staple_include_gt(self) -> bool:
+        """Whether the designated GT is fed into the STAPLE consensus pool.
+
+        ``True`` (default) — GT is one of N raters; matches the "no true truth"
+        framing where the manual contour is just another opinion.
+
+        ``False`` — STAPLE consensus is built from test contours only; the
+        GT is then evaluated against that AI-only consensus, answering the
+        question "how does the manual contour agree with the AI ensemble?"
+        """
+        return self._staple_include_gt_check.isChecked()
+
+    def set_staple_include_gt(self, include: bool) -> None:
+        self._staple_include_gt_check.setChecked(include)
 
     def add_patient(self, subsection: PatientSubsection) -> None:
         """Append a patient sub-section to the drawer."""
@@ -327,12 +343,29 @@ class OrganDrawer(CollapsibleBox):
         self._staple_check = QCheckBox("vs STAPLE", header)
         self._staple_check.setToolTip(
             "Also compute metrics against a STAPLE consensus contour derived "
-            "from every contour in the drawer (GT + tests, treated as raters). "
-            "Adds per-rater STAPLE sensitivity/specificity columns and a "
-            "consensus-uncertainty summary row per patient."
+            "from contours in the drawer. Adds per-rater STAPLE sensitivity/"
+            "specificity columns and a consensus-uncertainty summary row per "
+            "patient. Use the 'GT in pool' sub-toggle to control whether the "
+            "designated GT contributes to the consensus."
         )
         self._staple_check.toggled.connect(self.stapleConsensusChanged)
+        self._staple_check.toggled.connect(
+            lambda checked: self._staple_include_gt_check.setEnabled(checked)
+        )
         layout.addWidget(self._staple_check)
+
+        self._staple_include_gt_check = QCheckBox("GT in pool", header)
+        self._staple_include_gt_check.setChecked(True)
+        self._staple_include_gt_check.setEnabled(False)  # only meaningful when STAPLE is on
+        self._staple_include_gt_check.setToolTip(
+            "When ON (default): the designated GT is one of N raters fed into "
+            "STAPLE — matches the 'no true truth' framing (Warfield 2004). "
+            "When OFF: STAPLE consensus is built from test contours only, and "
+            "the GT is evaluated against that AI-only consensus — answers "
+            "'how does the manual contour agree with the AI ensemble?'."
+        )
+        self._staple_include_gt_check.toggled.connect(self.stapleIncludeGtChanged)
+        layout.addWidget(self._staple_include_gt_check)
 
         self._remove_btn = QToolButton(header)
         self._remove_btn.setText("✕")

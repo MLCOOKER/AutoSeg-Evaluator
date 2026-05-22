@@ -29,25 +29,41 @@ def _cube(shape_xyz, lo_xyz, hi_xyz, spacing=(1.0, 1.0, 1.0)) -> sitk.Image:
 
 def test_staple_config_defaults():
     cfg = StapleConfig()
-    assert cfg.max_iterations == 30
+    # MICCAI consensus pipeline defaults: 100 iterations, adaptive bbox
+    # targeting [0.10, 0.50] foreground-to-bbox ratio.
+    assert cfg.max_iterations == 100
     assert cfg.confidence_weight == 1.0
-    assert cfg.bbox_padding_voxels == 5
+    assert cfg.target_fg_ratio_min == 0.10
+    assert cfg.target_fg_ratio_max == 0.50
+    assert cfg.bbox_padding_min_voxels == 2
+    assert cfg.bbox_padding_max_voxels == 25
 
 
 def test_staple_config_from_dict_round_trip():
     cfg = StapleConfig.from_dict(
-        {"max_iterations": 50, "confidence_weight": 0.8, "bbox_padding_voxels": 10}
+        {
+            "max_iterations": 50,
+            "confidence_weight": 0.8,
+            "target_fg_ratio_min": 0.15,
+            "target_fg_ratio_max": 0.45,
+            "bbox_padding_min_voxels": 3,
+            "bbox_padding_max_voxels": 20,
+        }
     )
     assert cfg.max_iterations == 50
     assert cfg.confidence_weight == 0.8
-    assert cfg.bbox_padding_voxels == 10
+    assert cfg.target_fg_ratio_min == 0.15
+    assert cfg.target_fg_ratio_max == 0.45
+    assert cfg.bbox_padding_min_voxels == 3
+    assert cfg.bbox_padding_max_voxels == 20
 
 
 def test_staple_config_from_dict_handles_partial_input():
-    cfg = StapleConfig.from_dict({"max_iterations": 100})
-    assert cfg.max_iterations == 100
+    cfg = StapleConfig.from_dict({"max_iterations": 200})
+    assert cfg.max_iterations == 200
     assert cfg.confidence_weight == 1.0
-    assert cfg.bbox_padding_voxels == 5
+    assert cfg.target_fg_ratio_min == 0.10
+    assert cfg.target_fg_ratio_max == 0.50
 
 
 # ---- Degenerate inputs ---------------------------------------------------
@@ -189,7 +205,12 @@ def test_staple_bbox_crop_keeps_small_structures_visible():
     a = _cube((60, 60, 60), (28, 28, 28), (31, 31, 31))
     b = _cube((60, 60, 60), (28, 28, 28), (31, 31, 31))
     c = _cube((60, 60, 60), (28, 28, 28), (31, 31, 31))
-    result = compute_staple([a, b, c], StapleConfig(bbox_padding_voxels=5))
+    result = compute_staple([a, b, c])  # adaptive padding by default
     assert result is not None
     # The consensus should be non-empty
     assert result.consensus_volume_cc > 0.0
+    # The adaptive sizer should have selected enough padding to bring the
+    # foreground ratio into the target band — well below the 0.50 ceiling.
+    assert result.bbox_fg_ratio <= 0.50
+    # And it should have used SOME padding (not zero) since the cube is small.
+    assert result.bbox_padding_used >= 2

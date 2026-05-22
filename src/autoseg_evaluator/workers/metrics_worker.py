@@ -178,6 +178,9 @@ class MetricsWorker(QObject):
             truncate = bool(drawer.get("truncate", False))
             gt_comparison = bool(drawer.get("gt_comparison", True))
             staple_consensus = bool(drawer.get("staple_consensus", False))
+            # Default True for backward compatibility with sessions saved
+            # before the per-drawer GT-pool toggle existed.
+            staple_include_gt = bool(drawer.get("staple_include_gt", True))
             if not (gt_comparison or staple_consensus):
                 # Nothing to compute for this drawer
                 continue
@@ -200,6 +203,7 @@ class MetricsWorker(QObject):
                         "truncate": truncate,
                         "gt_comparison": gt_comparison,
                         "staple_consensus": staple_consensus,
+                        "staple_include_gt": staple_include_gt,
                         "patient_id": str(patient.get("patient_id", "") or ""),
                         "gt_sop": str(gt.get("rtstruct_sop_uid", "") or ""),
                         "gt_filename": str(gt.get("rtstruct_filename", "") or ""),
@@ -441,23 +445,25 @@ class MetricsWorker(QObject):
         Mask order fed to STAPLE: [GT, test_1, test_2, …]. The sensitivity /
         specificity tuples come back in the same order.
         """
-        # Build the rater list. Each entry knows its metadata + mask.
-        # GT acts as another rater here (since STAPLE mode is for the
-        # no-true-truth scenario), but ``was_designated_gt`` flags it in the
-        # results so users can still see how the manual GT agreed with the
-        # consensus.
-        raters: list[dict[str, Any]] = [
-            {
-                "source_label": group["gt_source"],
-                "organ_name": group["gt_roi_name"],
-                "roi_number": group["gt_roi_number"],
-                "rtstruct_sop_uid": group["gt_sop"],
-                "rtss": gt_rtss,
-                "mask": gt_mask,
-                "was_designated_gt": True,
-                "similarity": 1.0,
-            }
-        ]
+        # Build the rater list. Each entry knows its metadata + mask. When
+        # ``staple_include_gt`` is True (default), the GT is one of N
+        # raters fed into STAPLE — matches the "no true truth" framing
+        # (Warfield 2004). When False, STAPLE consensus is built from
+        # tests alone and the GT is *still* evaluated against that
+        # AI-only consensus on a separate row, answering "how does the
+        # manual contour agree with the AI ensemble?".
+        gt_rater = {
+            "source_label": group["gt_source"],
+            "organ_name": group["gt_roi_name"],
+            "roi_number": group["gt_roi_number"],
+            "rtstruct_sop_uid": group["gt_sop"],
+            "rtss": gt_rtss,
+            "mask": gt_mask,
+            "was_designated_gt": True,
+            "similarity": 1.0,
+            "in_pool": bool(group.get("staple_include_gt", True)),
+        }
+        raters: list[dict[str, Any]] = [gt_rater]
         for rec in test_records:
             t = rec["meta"]
             raters.append(
@@ -470,16 +476,22 @@ class MetricsWorker(QObject):
                     "mask": rec["mask"],
                     "was_designated_gt": False,
                     "similarity": t["similarity"],
+                    "in_pool": True,
                 }
             )
 
-        if len(raters) < 2:
-            error_text = "STAPLE requires at least 2 non-empty rater contours."
+        # The pool fed to STAPLE — may exclude the GT depending on the toggle.
+        staple_pool = [r for r in raters if r["in_pool"]]
+        if len(staple_pool) < 2:
+            error_text = (
+                "STAPLE requires at least 2 non-empty rater contours in the pool. "
+                "Hint: with 'GT in pool' off, you need at least 2 test contours."
+            )
             return [
                 self._make_staple_error_row(group, r, error_text) for r in raters
             ] + [self._make_staple_summary_row(group, None, error_text)]
 
-        result = compute_staple([r["mask"] for r in raters], self._staple_config)
+        result = compute_staple([r["mask"] for r in staple_pool], self._staple_config)
         if result is None:
             error_text = "STAPLE returned no consensus (fewer than 2 non-empty masks)."
             return [
@@ -487,8 +499,23 @@ class MetricsWorker(QObject):
             ] + [self._make_staple_summary_row(group, None, error_text)]
 
         consensus_mask = result.consensus_mask
+        # The reference these rows are compared against is the STAPLE
+        # consensus — NOT the originally-designated manual GT. Reflect
+        # that in the "GT" metadata columns so the user reading the
+        # results table isn't misled about what the comparison was
+        # against. Mode also encodes the GT-in-pool choice for clarity.
+        include_gt = bool(group.get("staple_include_gt", True))
+        staple_mode_label = (
+            "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
+        )
+
+        # ``result.sensitivities`` / ``.specificities`` are aligned to the
+        # ``staple_pool`` indices, NOT the full ``raters`` list. Build a
+        # lookup so raters outside the pool can still appear in results
+        # (with empty sens/spec) compared against the consensus.
+        pool_idx_by_id = {id(r): i for i, r in enumerate(staple_pool)}
         out: list[dict[str, Any]] = []
-        for i, rater in enumerate(raters):
+        for rater in raters:
             row = self._make_row_skeleton(
                 group,
                 source_label=rater["source_label"],
@@ -496,17 +523,29 @@ class MetricsWorker(QObject):
                 test_roi_number=rater["roi_number"],
                 test_sop=rater["rtstruct_sop_uid"],
                 similarity=float(rater.get("similarity", 0.0)),
-                comparison_mode="staple_consensus",
+                comparison_mode=staple_mode_label,
                 was_designated_gt=bool(rater["was_designated_gt"]),
             )
+            # Override GT metadata: the reference is the STAPLE consensus,
+            # not the manual GT — no file, no ROI number, but keep the
+            # organ name so the row still reads naturally.
+            row["gt_source_label"] = "STAPLE consensus"
+            row["gt_rtstruct_filename"] = ""
+            row["gt_roi_name"] = group["organ_name"]
+            row["gt_roi_number"] = 0
             row["truncated_slices"] = 0
             row["truncated_extent_mm"] = 0.0
             try:
                 row["metrics"].update(
                     compute_geometric_metrics(consensus_mask, rater["mask"], self._config)
                 )
-                row["metrics"]["staple_sensitivity"] = float(result.sensitivities[i])
-                row["metrics"]["staple_specificity"] = float(result.specificities[i])
+                pool_idx = pool_idx_by_id.get(id(rater))
+                if pool_idx is not None:
+                    row["metrics"]["staple_sensitivity"] = float(result.sensitivities[pool_idx])
+                    row["metrics"]["staple_specificity"] = float(result.specificities[pool_idx])
+                # else: GT excluded from pool — sens/spec stay empty since the
+                # EM never saw this rater's mask. Geometric vs consensus still
+                # populated so the user can quantify GT-vs-AI-ensemble agreement.
             except Exception as exc:  # noqa: BLE001
                 row["error"] = f"{type(exc).__name__}: {exc}"
             out.append(row)
@@ -642,6 +681,16 @@ class MetricsWorker(QObject):
     def _make_test_error_row(
         self, group: dict[str, Any], test: dict[str, Any], error_text: str
     ) -> dict[str, Any]:
+        # Used when a test mask couldn't be loaded — the error short-circuits
+        # before we know which comparison mode actually ran. Prefer gt
+        # labelling when both modes are on (gt is the user's primary).
+        if group["gt_comparison"]:
+            mode_label = "gt"
+        else:
+            include_gt = bool(group.get("staple_include_gt", True))
+            mode_label = (
+                "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
+            )
         row = self._make_row_skeleton(
             group,
             source_label=test["source_label"],
@@ -649,7 +698,7 @@ class MetricsWorker(QObject):
             test_roi_number=test["roi_number"],
             test_sop=test["rtstruct_sop_uid"],
             similarity=test.get("similarity", 0.0),
-            comparison_mode="gt" if group["gt_comparison"] else "staple_consensus",
+            comparison_mode=mode_label,
             was_designated_gt=False,
         )
         row["truncated_slices"] = 0
@@ -660,6 +709,10 @@ class MetricsWorker(QObject):
     def _make_staple_error_row(
         self, group: dict[str, Any], rater: dict[str, Any], error_text: str
     ) -> dict[str, Any]:
+        include_gt = bool(group.get("staple_include_gt", True))
+        mode_label = (
+            "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
+        )
         row = self._make_row_skeleton(
             group,
             source_label=rater["source_label"],
@@ -667,9 +720,13 @@ class MetricsWorker(QObject):
             test_roi_number=rater["roi_number"],
             test_sop=rater["rtstruct_sop_uid"],
             similarity=float(rater.get("similarity", 0.0)),
-            comparison_mode="staple_consensus",
+            comparison_mode=mode_label,
             was_designated_gt=bool(rater["was_designated_gt"]),
         )
+        row["gt_source_label"] = "STAPLE consensus"
+        row["gt_rtstruct_filename"] = ""
+        row["gt_roi_name"] = group["organ_name"]
+        row["gt_roi_number"] = 0
         row["truncated_slices"] = 0
         row["truncated_extent_mm"] = 0.0
         row["error"] = error_text
@@ -678,6 +735,10 @@ class MetricsWorker(QObject):
     def _make_staple_summary_row(
         self, group: dict[str, Any], result, error_text: str
     ) -> dict[str, Any]:
+        include_gt = bool(group.get("staple_include_gt", True))
+        mode_label = (
+            "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
+        )
         row = self._make_row_skeleton(
             group,
             source_label="STAPLE consensus",
@@ -685,9 +746,14 @@ class MetricsWorker(QObject):
             test_roi_number=0,
             test_sop="",
             similarity=0.0,
-            comparison_mode="staple_consensus",
+            comparison_mode=mode_label,
             was_designated_gt=False,
         )
+        # Summary row IS the consensus — the "GT" columns mirror that.
+        row["gt_source_label"] = "STAPLE consensus"
+        row["gt_rtstruct_filename"] = ""
+        row["gt_roi_name"] = group["organ_name"]
+        row["gt_roi_number"] = 0
         row["truncated_slices"] = 0
         row["truncated_extent_mm"] = 0.0
         row["error"] = error_text
@@ -700,6 +766,8 @@ class MetricsWorker(QObject):
             row["metrics"]["n_raters"] = int(result.n_raters)
             row["metrics"]["staple_iterations"] = int(result.elapsed_iterations)
             row["metrics"]["staple_converged"] = bool(result.converged)
+            row["metrics"]["staple_bbox_padding"] = int(result.bbox_padding_used)
+            row["metrics"]["staple_bbox_fg_ratio"] = float(result.bbox_fg_ratio)
         return row
 
     def _error_rows_for_group(

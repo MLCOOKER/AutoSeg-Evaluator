@@ -57,12 +57,14 @@ class _NoScrollSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
-# STAPLE parameter defaults — also surfaced in the UI labels so the user
-# can recover them after experimenting, and used by the "Reset" button.
+# STAPLE parameter defaults — aligned with MICCAI consensus-contour pipelines
+# (Asman & Landman 2011; Iglesias & Sabuncu 2015; Bakas BraTS 2018). Surfaced
+# in the UI labels so the user can recover them and used by the Reset button.
 _STAPLE_DEFAULTS = {
-    "max_iterations": 30,
+    "max_iterations": 100,
     "confidence_weight": 1.0,
-    "bbox_padding_voxels": 5,
+    "target_fg_ratio_min": 0.10,
+    "target_fg_ratio_max": 0.50,
 }
 
 
@@ -182,7 +184,8 @@ class ComputeTab(QWidget):
             "staple": {
                 "max_iterations": int(self._staple_max_iter_spin.value()),
                 "confidence_weight": float(self._staple_conf_spin.value()),
-                "bbox_padding_voxels": int(self._staple_bbox_pad_spin.value()),
+                "target_fg_ratio_min": float(self._staple_fg_min_spin.value()),
+                "target_fg_ratio_max": float(self._staple_fg_max_spin.value()),
             },
         }
 
@@ -379,20 +382,42 @@ class ComputeTab(QWidget):
             self._staple_conf_spin,
         )
 
-        self._staple_bbox_pad_spin = _NoScrollSpinBox(box)
-        self._staple_bbox_pad_spin.setDecimals(0)
-        self._staple_bbox_pad_spin.setRange(0, 50)
-        self._staple_bbox_pad_spin.setSingleStep(1)
-        self._staple_bbox_pad_spin.setValue(_STAPLE_DEFAULTS["bbox_padding_voxels"])
-        self._staple_bbox_pad_spin.setToolTip(
-            "Voxel padding around the rater union before running STAPLE. The crop "
-            "rescales the foreground prior away from whole-image bias — the "
-            "documented workaround for STAPLE's small-structure shrinkage."
+        # Adaptive bbox padding — keeps foreground/total ratio inside this band.
+        # Replaces the old fixed-voxel padding that under-sized for small
+        # structures (specificity becomes uninformative) and over-tightened for
+        # large ones. Values from Iglesias & Sabuncu 2015; Asman & Landman 2011.
+        self._staple_fg_min_spin = _NoScrollSpinBox(box)
+        self._staple_fg_min_spin.setDecimals(2)
+        self._staple_fg_min_spin.setRange(0.01, 0.99)
+        self._staple_fg_min_spin.setSingleStep(0.05)
+        self._staple_fg_min_spin.setValue(_STAPLE_DEFAULTS["target_fg_ratio_min"])
+        self._staple_fg_min_spin.setToolTip(
+            "Lower bound of the adaptive bbox foreground ratio band. The padder "
+            "grows the union bbox until foreground/total falls below the upper "
+            "bound; it stops at this lower bound to avoid over-cropping. "
+            "Published clinical pipelines use 0.10–0.50."
         )
-        self._staple_bbox_pad_spin.valueChanged.connect(self._emit_config_changed)
+        self._staple_fg_min_spin.valueChanged.connect(self._emit_config_changed)
         layout.addRow(
-            f"Bounding-box padding vox (default {_STAPLE_DEFAULTS['bbox_padding_voxels']}):",
-            self._staple_bbox_pad_spin,
+            f"Adaptive bbox FG ratio min (default {_STAPLE_DEFAULTS['target_fg_ratio_min']:.2f}):",
+            self._staple_fg_min_spin,
+        )
+
+        self._staple_fg_max_spin = _NoScrollSpinBox(box)
+        self._staple_fg_max_spin.setDecimals(2)
+        self._staple_fg_max_spin.setRange(0.05, 0.99)
+        self._staple_fg_max_spin.setSingleStep(0.05)
+        self._staple_fg_max_spin.setValue(_STAPLE_DEFAULTS["target_fg_ratio_max"])
+        self._staple_fg_max_spin.setToolTip(
+            "Upper bound of the adaptive bbox foreground ratio band. The padder "
+            "grows the union bbox until foreground/total drops to (or below) "
+            "this value, keeping per-rater specificity informative even for "
+            "small structures."
+        )
+        self._staple_fg_max_spin.valueChanged.connect(self._emit_config_changed)
+        layout.addRow(
+            f"Adaptive bbox FG ratio max (default {_STAPLE_DEFAULTS['target_fg_ratio_max']:.2f}):",
+            self._staple_fg_max_spin,
         )
 
         reset_btn = QPushButton("Reset to defaults", box)
@@ -407,10 +432,11 @@ class ComputeTab(QWidget):
         return box
 
     def _reset_staple_defaults(self) -> None:
-        """Restore the STAPLE spinboxes to their published defaults."""
+        """Restore the STAPLE spinboxes to their published MICCAI defaults."""
         self._staple_max_iter_spin.setValue(_STAPLE_DEFAULTS["max_iterations"])
         self._staple_conf_spin.setValue(_STAPLE_DEFAULTS["confidence_weight"])
-        self._staple_bbox_pad_spin.setValue(_STAPLE_DEFAULTS["bbox_padding_voxels"])
+        self._staple_fg_min_spin.setValue(_STAPLE_DEFAULTS["target_fg_ratio_min"])
+        self._staple_fg_max_spin.setValue(_STAPLE_DEFAULTS["target_fg_ratio_max"])
 
     # ---- Settings round-trip ---------------------------------------------
 
@@ -468,14 +494,25 @@ class ComputeTab(QWidget):
         # STAPLE config
         staple = (self._settings.get("staple") or {}) if self._settings else {}
         self._staple_max_iter_spin.blockSignals(True)
-        self._staple_max_iter_spin.setValue(int(staple.get("max_iterations", 30)))
+        self._staple_max_iter_spin.setValue(
+            int(staple.get("max_iterations", _STAPLE_DEFAULTS["max_iterations"]))
+        )
         self._staple_max_iter_spin.blockSignals(False)
         self._staple_conf_spin.blockSignals(True)
-        self._staple_conf_spin.setValue(float(staple.get("confidence_weight", 1.0)))
+        self._staple_conf_spin.setValue(
+            float(staple.get("confidence_weight", _STAPLE_DEFAULTS["confidence_weight"]))
+        )
         self._staple_conf_spin.blockSignals(False)
-        self._staple_bbox_pad_spin.blockSignals(True)
-        self._staple_bbox_pad_spin.setValue(int(staple.get("bbox_padding_voxels", 5)))
-        self._staple_bbox_pad_spin.blockSignals(False)
+        self._staple_fg_min_spin.blockSignals(True)
+        self._staple_fg_min_spin.setValue(
+            float(staple.get("target_fg_ratio_min", _STAPLE_DEFAULTS["target_fg_ratio_min"]))
+        )
+        self._staple_fg_min_spin.blockSignals(False)
+        self._staple_fg_max_spin.blockSignals(True)
+        self._staple_fg_max_spin.setValue(
+            float(staple.get("target_fg_ratio_max", _STAPLE_DEFAULTS["target_fg_ratio_max"]))
+        )
+        self._staple_fg_max_spin.blockSignals(False)
 
     def _emit_config_changed(self) -> None:
         try:

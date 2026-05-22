@@ -58,10 +58,6 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
     "com_dx_mm",
     "com_dy_mm",
     "com_dz_mm",
-    # DVH (static built-ins)
-    "dmin_gy",
-    "dmean_gy",
-    "dmax_gy",
     # STAPLE per-rater
     "staple_sensitivity",
     "staple_specificity",
@@ -74,6 +70,14 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
     "n_raters",
     "staple_iterations",
     "staple_converged",
+    "staple_bbox_padding",
+    "staple_bbox_fg_ratio",
+    # DVH (static built-ins) — kept at the very right so all dose-related
+    # columns cluster together and dynamic D{X}/V{X} columns naturally
+    # follow without being separated from Dmin/Dmean/Dmax by other metrics.
+    "dmin_gy",
+    "dmean_gy",
+    "dmax_gy",
 ]
 
 
@@ -116,6 +120,8 @@ _METRIC_LABELS: dict[str, str] = {
     "n_raters": "N raters",
     "staple_iterations": "STAPLE iterations",
     "staple_converged": "STAPLE converged",
+    "staple_bbox_padding": "STAPLE bbox padding (vox)",
+    "staple_bbox_fg_ratio": "STAPLE bbox FG ratio",
 }
 
 

@@ -167,6 +167,7 @@ class MatchContoursTab(QWidget):
                     "truncate": drawer.truncate_enabled(),
                     "gt_comparison": drawer.gt_comparison_enabled(),
                     "staple_consensus": drawer.staple_consensus_enabled(),
+                    "staple_include_gt": drawer.staple_include_gt(),
                     "expanded": drawer.isExpanded(),
                     "patients": patients,
                 }
@@ -201,6 +202,7 @@ class MatchContoursTab(QWidget):
             drawer.set_truncate(bool(d.get("truncate", False)))
             drawer.set_gt_comparison(bool(d.get("gt_comparison", True)))
             drawer.set_staple_consensus(bool(d.get("staple_consensus", False)))
+            drawer.set_staple_include_gt(bool(d.get("staple_include_gt", True)))
 
             for p in d.get("patients", []) or []:
                 patient_id = str(p.get("patient_id", "") or "")
