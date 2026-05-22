@@ -326,6 +326,14 @@ class MetricsWorker(QObject):
         rows: list[dict[str, Any]] = list(load_errors)
 
         if group["gt_comparison"]:
+            # If DVH is requested, emit a GT-vs-dose row first so the user
+            # can read the dose received by the manual contour alongside
+            # each AI vendor's. Geometric columns stay empty (GT vs itself
+            # is trivially perfect — no point in 1.0/0/0 noise).
+            if self._dvh_config.any_enabled():
+                gt_dvh_row = self._compute_gt_dvh_row(group, gt_rtss)
+                if gt_dvh_row is not None:
+                    rows.append(gt_dvh_row)
             for r_idx, rec in enumerate(test_records):
                 state["test"] = f"{rec['meta']['source_label']} ({rec['meta']['organ_name']})"
                 state["metric"] = "vs GT"
@@ -378,6 +386,42 @@ class MetricsWorker(QObject):
                         row["error"] = f"DVH: {dvh_exc}"
         except Exception as exc:  # noqa: BLE001
             row["error"] = f"{type(exc).__name__}: {exc}"
+        return row
+
+    def _compute_gt_dvh_row(
+        self,
+        group: dict[str, Any],
+        gt_rtss,
+    ) -> dict[str, Any] | None:
+        """Emit a row carrying the GT contour's own dose statistics.
+
+        Used when DVH metrics are enabled so the user can compare the dose
+        delivered to the manual GT against the dose delivered to each AI
+        contour. Geometric/COM/STAPLE columns are left blank — comparing
+        GT vs itself is degenerate. Returns ``None`` if no dose is
+        available for the patient (silently skipped).
+        """
+        dose_ds = self._load_dose(group["patient_id"])
+        if dose_ds is None:
+            return None
+        row = self._make_row_skeleton(
+            group,
+            source_label=group["gt_source"],
+            test_organ=group["gt_roi_name"],
+            test_roi_number=group["gt_roi_number"],
+            test_sop=group["gt_sop"],
+            similarity=1.0,
+            comparison_mode="gt_dose",
+            was_designated_gt=True,
+        )
+        try:
+            row["metrics"].update(
+                compute_dvh_metrics(
+                    gt_rtss, dose_ds, group["gt_roi_number"], self._dvh_config
+                )
+            )
+        except DVHError as exc:
+            row["error"] = f"DVH: {exc}"
         return row
 
     # ---- STAPLE branch -----------------------------------------------------
