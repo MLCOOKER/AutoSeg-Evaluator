@@ -112,9 +112,15 @@ def compute_dvh_metrics(
     if config.include_dmax:
         out["dmax_gy"] = _safe(dvh.max)
 
+    # dicompyler-core 0.5.6's ``DVH.statistic`` rejects ``D{X}%`` syntax
+    # (``%`` isn't a valid attribute char and the method bails with
+    # AttributeError). The bare-number form ``D{X}`` is interpreted as
+    # percentage and returns the dose to the hottest X% — which is what
+    # we want. ``V{X}Gy`` still needs its unit suffix because the
+    # alternative ``V{X}cc`` / ``V{X}%`` mean different things.
     for v_pct in config.d_at_volumes_pct:
         key = f"d{_fmt_num(v_pct)}_gy"
-        out[key] = _statistic_value(dvh, f"D{_fmt_num(v_pct)}%")
+        out[key] = _statistic_value(dvh, f"D{_fmt_num(v_pct)}")
     for d_gy in config.v_at_doses_gy:
         key = f"v{_fmt_num(d_gy)}gy_cc"
         out[key] = _statistic_value(dvh, f"V{_fmt_num(d_gy)}Gy")
