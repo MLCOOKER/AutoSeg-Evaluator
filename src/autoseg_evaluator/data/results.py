@@ -125,13 +125,29 @@ _METRIC_LABELS: dict[str, str] = {
 }
 
 
-def metric_display_label(key: str) -> str:
+def metric_display_label(
+    key: str,
+    *,
+    sd_tau_mm: float | None = None,
+    apl_tau_mm: float | None = None,
+) -> str:
     """Return the user-facing column header for a metric key (with units).
 
     Handles the canonical static labels (above), plus dynamic DVH metrics
     matching ``d{X}_gy`` → ``D{X} (Gy)`` and ``v{X}gy_cc`` → ``V{X}Gy (cc)``.
     Anything else falls through as-is so non-standard keys are still visible.
+
+    When ``sd_tau_mm`` / ``apl_tau_mm`` are supplied, the Surface Dice and
+    APL headers are decorated with the tolerance value so two CSVs
+    computed at different tolerances can't be silently mixed up (e.g.
+    ``Surface Dice @ 3.00 mm`` vs ``Surface Dice @ 5.00 mm``).
     """
+    if key == "surface_dice" and sd_tau_mm is not None:
+        return f"Surface Dice @ {sd_tau_mm:.2f} mm"
+    if key == "apl_mean" and apl_tau_mm is not None:
+        return f"Mean APL @ {apl_tau_mm:.2f} mm"
+    if key == "apl_total" and apl_tau_mm is not None:
+        return f"Total APL @ {apl_tau_mm:.2f} mm"
     if key in _METRIC_LABELS:
         return _METRIC_LABELS[key]
     if key.startswith("d") and key.endswith("_gy"):
@@ -174,6 +190,25 @@ class ResultsManager:
 
     def __init__(self) -> None:
         self._rows: list[dict[str, Any]] = []
+        # Tolerance values that produced this batch of results — surfaced
+        # in the Surface Dice / APL column headers so two CSVs computed
+        # at different tolerances can't be silently merged in Excel.
+        self._sd_tau_mm: float | None = None
+        self._apl_tau_mm: float | None = None
+
+    def set_tolerances(self, sd_tau_mm: float | None, apl_tau_mm: float | None) -> None:
+        """Record the τ values active for the *next* batch of rows added.
+
+        Called by MainWindow when a Compute run starts. The values are
+        forwarded into :func:`metric_display_label` whenever headers are
+        rendered (UI + CSV export), so the heading reads e.g.
+        ``Surface Dice @ 3.00 mm`` instead of ambiguously ``Surface Dice``.
+        """
+        self._sd_tau_mm = sd_tau_mm
+        self._apl_tau_mm = apl_tau_mm
+
+    def tolerances(self) -> tuple[float | None, float | None]:
+        return (self._sd_tau_mm, self._apl_tau_mm)
 
     def add_row(self, row: dict[str, Any]) -> None:
         self._rows.append(dict(row))
@@ -184,6 +219,9 @@ class ResultsManager:
 
     def clear(self) -> None:
         self._rows.clear()
+        # Tolerances are batch-scoped — drop them when the batch is cleared.
+        self._sd_tau_mm = None
+        self._apl_tau_mm = None
 
     def rows(self) -> list[dict[str, Any]]:
         """Snapshot of all rows in insertion order (callers receive a copy)."""
@@ -220,7 +258,12 @@ class ResultsManager:
         metrics = self.metric_columns()
         meta_keys = [k for k, _label in META_COLUMNS]
         meta_labels = [label for _k, label in META_COLUMNS]
-        headers = meta_labels + [metric_display_label(k) for k in metrics]
+        headers = meta_labels + [
+            metric_display_label(
+                k, sd_tau_mm=self._sd_tau_mm, apl_tau_mm=self._apl_tau_mm
+            )
+            for k in metrics
+        ]
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

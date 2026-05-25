@@ -170,7 +170,11 @@ class ResultsTab(QWidget):
         metric_cols = self._results_mgr.metric_columns()
         meta_keys = [k for k, _ in META_COLUMNS]
         meta_labels = [label for _, label in META_COLUMNS]
-        headers = meta_labels + [metric_display_label(k) for k in metric_cols]
+        sd_tau, apl_tau = self._results_mgr.tolerances()
+        headers = meta_labels + [
+            metric_display_label(k, sd_tau_mm=sd_tau, apl_tau_mm=apl_tau)
+            for k in metric_cols
+        ]
 
         # Re-build with sorting disabled to keep insertion order stable
         was_sorted = self._table.isSortingEnabled()

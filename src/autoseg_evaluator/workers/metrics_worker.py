@@ -282,6 +282,13 @@ class MetricsWorker(QObject):
         test_records: list[dict[str, Any]] = []
         load_errors: list[dict[str, Any]] = []
         for test in group["tests"]:
+            if self._cancelled:
+                # Bail mid-group when cancelled. Whatever masks loaded so far
+                # stay in the local list — they aren't emitted as rows
+                # because we short-circuit before the metric-compute phase
+                # below. The outer ``_do_run`` loop will see ``_cancelled``
+                # on its next iteration and stop dispatching new groups.
+                return list(load_errors)
             try:
                 test_rtss = self._load_rtstruct(group["patient_id"], test["rtstruct_sop_uid"])
                 test_mask = self._get_mask(
@@ -335,16 +342,22 @@ class MetricsWorker(QObject):
             # each AI vendor's. Geometric columns stay empty (GT vs itself
             # is trivially perfect — no point in 1.0/0/0 noise).
             if self._dvh_config.any_enabled():
+                if self._cancelled:
+                    return rows
                 gt_dvh_row = self._compute_gt_dvh_row(group, gt_rtss)
                 if gt_dvh_row is not None:
                     rows.append(gt_dvh_row)
             for r_idx, rec in enumerate(test_records):
+                if self._cancelled:
+                    return rows
                 state["test"] = f"{rec['meta']['source_label']} ({rec['meta']['organ_name']})"
                 state["metric"] = "vs GT"
                 self.progress.emit(idx + r_idx, total, state)
                 rows.append(self._compute_gt_row(group, rec, gt_mask))
 
         if group["staple_consensus"]:
+            if self._cancelled:
+                return rows
             state["metric"] = "STAPLE"
             self.progress.emit(idx + len(rows), total, state)
             rows.extend(
@@ -528,6 +541,8 @@ class MetricsWorker(QObject):
         pool_idx_by_id = {id(r): i for i, r in enumerate(staple_pool)}
         out: list[dict[str, Any]] = []
         for rater in raters:
+            if self._cancelled:
+                return out
             row = self._make_row_skeleton(
                 group,
                 source_label=rater["source_label"],

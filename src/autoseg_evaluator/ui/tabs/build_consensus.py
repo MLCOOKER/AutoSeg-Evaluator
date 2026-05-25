@@ -36,29 +36,32 @@ is disallowed (handled by Match Contours).
 
 from __future__ import annotations
 
-import time
-from collections import defaultdict
-from typing import Any
-
 import csv
+import gc
+from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -76,6 +79,7 @@ from autoseg_evaluator.core.masks import (
 )
 from autoseg_evaluator.core.matching import ReplacementRule, similarity
 from autoseg_evaluator.core.metrics import compute_geometric_metrics
+from autoseg_evaluator.data.results import metric_display_label
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
     OrganEntry,
@@ -292,7 +296,11 @@ class BuildConsensusTab(QWidget):
             )
         )
         self._groups_list = QListWidget(group_pane)
-        self._groups_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # ExtendedSelection so the user can Ctrl/Shift-click multiple groups
+        # to compute inter-observer metrics across several patients at once.
+        # The drawer-preview panel still tracks the *current* item (the last
+        # one clicked) so single-group browsing still works.
+        self._groups_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._groups_list.currentItemChanged.connect(self._on_group_selected)
         group_layout.addWidget(self._groups_list, stretch=1)
         self._splitter.addWidget(group_pane)
@@ -353,31 +361,40 @@ class BuildConsensusTab(QWidget):
 
         footer.addSpacing(12)
 
-        self._auto_btn = QPushButton("Re-run auto-match for selected group", self)
-        self._auto_btn.setToolTip(
-            "Re-applies the Levenshtein + cosine matcher to regroup ROIs across "
-            "the selected group's RTSSes. Useful after editing replacement rules."
+        self._inter_manual_btn = QPushButton(
+            "Compute inter-observer variability for group(s)…", self
         )
-        self._auto_btn.clicked.connect(self._on_auto_match_clicked)
-        footer.addWidget(self._auto_btn)
-
-        self._inter_manual_btn = QPushButton("Show inter-manual metrics for selected group…", self)
         self._inter_manual_btn.setToolTip(
-            "Compute pairwise Dice, Hausdorff, mean surface distance, and "
-            "volume difference between every pair of raters for every "
-            "matched organ in the selected group, then open a popup table. "
-            "Useful for quantifying inter-observer agreement before the "
-            "consensus is generated (ICRU Report 91)."
+            "Select one or more groups on the left (Ctrl/Shift-click), then "
+            "click this to compute pairwise geometric metrics between every "
+            "pair of raters for every matched organ in each selected group. "
+            "Choose which metrics to compute + tolerance values in the "
+            "settings dialog that opens first. Useful for quantifying "
+            "inter-observer agreement before the consensus is generated "
+            "(ICRU Report 91)."
         )
         self._inter_manual_btn.clicked.connect(self._on_inter_manual_clicked)
         footer.addWidget(self._inter_manual_btn)
 
         footer.addStretch(1)
+        self._generate_selected_btn = QPushButton(
+            "Generate Consensus GT for SELECTED groups", self
+        )
+        self._generate_selected_btn.setToolTip(
+            "Register a synthetic STAPLE-consensus RTSS for ONLY the groups "
+            "currently highlighted on the left (Ctrl/Shift-click for "
+            "multi-select). Existing consensus entries for other groups are "
+            "left untouched. Re-running on a selected group replaces its "
+            f"existing entry in place. Source label: '{CONSENSUS_SOURCE_LABEL}'."
+        )
+        self._generate_selected_btn.clicked.connect(self._on_generate_selected_clicked)
+        footer.addWidget(self._generate_selected_btn)
         self._generate_btn = QPushButton("Generate Consensus GT for ALL groups", self)
         self._generate_btn.setToolTip(
             "Register one synthetic STAPLE-consensus RTSS per eligible group. "
-            "Generated entries appear in subsequent tabs with source label "
-            f"'{CONSENSUS_SOURCE_LABEL}'."
+            "Wipes any previously-generated synthetic entries first, then "
+            "regenerates from scratch. Generated entries appear in "
+            f"subsequent tabs with source label '{CONSENSUS_SOURCE_LABEL}'."
         )
         self._generate_btn.clicked.connect(self._on_generate_clicked)
         footer.addWidget(self._generate_btn)
@@ -391,8 +408,8 @@ class BuildConsensusTab(QWidget):
         active = bool(eligible)
         self._empty_label.setVisible(not active)
         self._splitter.setVisible(active)
-        self._auto_btn.setEnabled(active)
         self._generate_btn.setEnabled(active)
+        self._generate_selected_btn.setEnabled(active)
         self._inter_manual_btn.setEnabled(active)
         self._groups_list.clear()
         if not active:
@@ -442,16 +459,24 @@ class BuildConsensusTab(QWidget):
     def _auto_match_group(self, patient_id: str, source_label: str) -> None:
         """Group ROIs across the RTSSes in (patient_id, source_label) into organ buckets.
 
-        Uses **similarity-threshold clustering**: each ROI is compared against
-        the existing buckets via the hybrid Levenshtein + cosine matcher (with
-        TG-263 dictionary + user replacement rules). An ROI joins a bucket if
-        its best similarity to any bucket member meets the user-configured
-        threshold; otherwise it seeds a new bucket. Single-rater buckets are
-        dropped silently — STAPLE requires ≥2 raters per organ.
+        Uses **best-score-first threshold clustering**: for each RTSS, every
+        organ is pre-scored against every existing bucket, then organs are
+        processed in order of *descending* best-bucket score. An ROI joins
+        its highest-scoring still-available bucket if the score meets the
+        user-configured threshold; otherwise it seeds a new bucket.
+        Single-rater buckets are dropped silently — STAPLE requires ≥2
+        raters per organ.
 
-        Compared to the previous canonical-key approach this lets near-matches
-        cluster together (e.g. ``Brainstem`` and ``BrainStem_PRV0`` at
-        threshold 0.85), and the user can tune aggressiveness via the spinbox.
+        Why best-score-first (and not naive first-come-first-served):
+        prevents the "ghost bucket" failure where, say, ``A_Carotid_L``
+        from RTSS-2 floods into an existing ``Parotid_L`` bucket (because
+        both share the ``_L`` suffix and lots of characters → fuzzy
+        ~0.65) BEFORE the true ``Parotid_L`` from RTSS-2 ever gets a
+        chance to claim its perfect-match bucket. By processing the 1.0
+        match first, ``Parotid_L`` reclaims its bucket and the
+        ``A_Carotid_L`` (now finding no above-threshold target) becomes
+        its own bucket — or stays single-rater and gets dropped from
+        the final consensus, which is the correct behaviour.
         """
         rtsses = self._eligible_groups().get((patient_id, source_label), [])
         if not rtsses:
@@ -467,27 +492,46 @@ class BuildConsensusTab(QWidget):
             # against a single representative — we want one rater per RTSS per
             # organ for STAPLE).
             rtss_used_buckets: set[int] = set()
+
+            # Pre-score every organ in this RTSS against every existing
+            # bucket. Tuple shape: (organ, [(bucket_idx, score), ...
+            # sorted descending]).
+            organ_scores: list[tuple[Any, str, list[tuple[int, float]]]] = []
             for organ in r.organs:
                 name = str(organ.roi_name or "").strip()
                 if not name:
                     continue
-                best_idx = -1
-                best_score = -1.0
+                scores: list[tuple[int, float]] = []
                 for i, rep in enumerate(bucket_names):
-                    if i in rtss_used_buckets:
-                        continue
                     s = similarity(
                         name, rep, rules=rules, synonyms_flat=self._synonyms_flat
                     ).score
-                    if s > best_score:
-                        best_score = s
-                        best_idx = i
-                if best_idx >= 0 and best_score >= threshold:
-                    bucket_members[best_idx].append(
+                    scores.append((i, s))
+                scores.sort(key=lambda kv: kv[1], reverse=True)
+                organ_scores.append((organ, name, scores))
+
+            # Process organs in order of descending best-bucket score so
+            # high-confidence matches (e.g. exact-canonical 1.0 hits) win
+            # their preferred bucket before noisier near-matches steal it.
+            organ_scores.sort(
+                key=lambda triple: (triple[2][0][1] if triple[2] else -1.0),
+                reverse=True,
+            )
+
+            for organ, name, scores in organ_scores:
+                assigned = False
+                for bucket_idx, score in scores:
+                    if bucket_idx in rtss_used_buckets:
+                        continue
+                    if score < threshold:
+                        break  # scores are sorted desc — no later one will qualify
+                    bucket_members[bucket_idx].append(
                         (r.sop_instance_uid, int(organ.roi_number), name)
                     )
-                    rtss_used_buckets.add(best_idx)
-                else:
+                    rtss_used_buckets.add(bucket_idx)
+                    assigned = True
+                    break
+                if not assigned:
                     bucket_names.append(name)
                     bucket_members.append(
                         [(r.sop_instance_uid, int(organ.roi_number), name)]
@@ -599,19 +643,14 @@ class BuildConsensusTab(QWidget):
 
     # ---- Actions ----------------------------------------------------------
 
-    def _on_auto_match_clicked(self) -> None:
-        current = self._groups_list.currentItem()
-        if current is None:
-            return
-        key = current.data(Qt.ItemDataRole.UserRole)
-        if not key:
-            return
-        pid, label = key
-        self._auto_match_group(pid, label)
-        # Re-render selected
-        self._on_group_selected(current, None)
-
     def _on_generate_clicked(self) -> None:
+        """Generate synthetic consensus RTSSes for EVERY eligible group.
+
+        Wipes any previously-generated synthetic entries first so the
+        result reflects the current group-drawer state without leftovers
+        from a stale configuration (e.g. a group that's no longer
+        eligible after the user re-labelled an RTSS).
+        """
         if self._library is None or not self._group_drawers:
             QMessageBox.information(
                 self,
@@ -619,11 +658,53 @@ class BuildConsensusTab(QWidget):
                 "No eligible groups to generate consensus for.",
             )
             return
-        # Clear any previously-generated synthetic entries before re-registering.
         self._library.clear_synthetic_consensus()
+        keys = list(self._group_drawers.keys())
+        created, skipped = self._register_consensus_for(keys)
+        self._report_generation_result(created, skipped, scope="ALL")
+
+    def _on_generate_selected_clicked(self) -> None:
+        """Generate synthetic consensus only for groups highlighted on the left.
+
+        Does NOT wipe existing synthetic entries — so other groups'
+        consensus RTSSes remain intact. Per-group regeneration replaces
+        the existing entry in place via the deterministic
+        ``_mint_synthetic_uid`` token.
+        """
+        if self._library is None or not self._group_drawers:
+            self._show_status_msg(
+                "Generate Consensus GT",
+                "No eligible groups to generate consensus for.",
+            )
+            return
+        selected_keys: list[tuple[str, str]] = []
+        for item in self._groups_list.selectedItems():
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data:
+                selected_keys.append(tuple(data))
+        if not selected_keys:
+            self._show_status_msg(
+                "Generate Consensus GT",
+                "No groups selected — Ctrl/Shift-click one or more groups on "
+                "the left first.",
+            )
+            return
+        created, skipped = self._register_consensus_for(selected_keys)
+        self._report_generation_result(created, skipped, scope="SELECTED")
+
+    def _register_consensus_for(
+        self, keys: list[tuple[str, str]]
+    ) -> tuple[int, list[str]]:
+        """Register synthetic consensus RTSSes for the given (patient, label) keys.
+
+        Returns ``(created_count, skipped_messages)``. Re-registration of
+        an existing (patient, label) replaces the entry in place because
+        ``_mint_synthetic_uid`` is deterministic.
+        """
         created = 0
         skipped: list[str] = []
-        for (pid, label), buckets in self._group_drawers.items():
+        for (pid, label) in keys:
+            buckets = self._group_drawers.get((pid, label), {})
             if not buckets:
                 skipped.append(f"{pid}/{label}: no matched organs")
                 continue
@@ -631,12 +712,22 @@ class BuildConsensusTab(QWidget):
             if entry is None:
                 skipped.append(f"{pid}/{label}: no shared FrameOfReferenceUID")
                 continue
-            ok = self._library.register_synthetic_consensus(pid, entry.frame_of_reference_uid, entry)
+            ok = self._library.register_synthetic_consensus(
+                pid, entry.frame_of_reference_uid, entry
+            )
             if ok:
                 created += 1
             else:
                 skipped.append(f"{pid}/{label}: register failed")
-        msg = [f"Generated {created} consensus RTSS entr{'y' if created == 1 else 'ies'}."]
+        return created, skipped
+
+    def _report_generation_result(
+        self, created: int, skipped: list[str], scope: str
+    ) -> None:
+        msg = [
+            f"Generated {created} consensus RTSS entr{'y' if created == 1 else 'ies'} "
+            f"({scope} groups)."
+        ]
         if skipped:
             msg.append("Skipped:")
             msg.extend(f"  • {s}" for s in skipped)
@@ -698,71 +789,196 @@ class BuildConsensusTab(QWidget):
         )
 
     def _mint_synthetic_uid(self, patient_id: str, source_label: str) -> str:
-        """Generate a deterministic-ish UID for a synthetic RTSS.
+        """Generate a deterministic UID for a synthetic RTSS.
 
         Not a real DICOM UID — uses our own prefix so it can never collide
-        with anything pydicom would read off disk. Same input produces the
-        same UID within a session, which keeps the cache stable when the
-        user re-runs Generate.
+        with anything pydicom would read off disk. Same (patient, source)
+        pair always produces the same UID, so re-running Generate replaces
+        the existing entry in place via ``MetadataLibrary.
+        register_synthetic_consensus`` rather than minting a sibling that
+        leaves a stale orphan behind.
         """
-        token = f"{patient_id}|{source_label}|{int(time.time() // 60)}"
+        token = f"{patient_id}|{source_label}"
         return f"AUTOSEG.SYNTHETIC.{abs(hash(token)) % (10 ** 18)}"
 
     # ---- Inter-manual metrics --------------------------------------------
 
     def _on_inter_manual_clicked(self) -> None:
-        """Compute pairwise rater metrics for the selected group's organs.
+        """Open settings → compute for every selected group → show results.
 
-        Loads the patient's CT, rasterises each constituent's mask, then
-        runs the existing geometric metric pipeline on every (rater A,
-        rater B) pair within each organ bucket. Results are shown in a
-        modal dialog with a table view + CSV-friendly copy.
+        Workflow:
 
-        Synchronous in the UI thread for simplicity — a typical group
-        (3–5 raters × ~10 organs) finishes in a few seconds. A wait
-        cursor is set so the user knows the app is working.
+        1. Resolve every selected group on the left list (Ctrl/Shift-click).
+           Fall back to the current item if no multi-selection exists yet.
+        2. Open a settings dialog so the user can pick which geometric
+           metrics to compute and override the Surface Dice / APL
+           tolerance values for this run.
+        3. Run the pairwise computation under a QProgressDialog showing
+           one tick per (group × organ) — cancellable.
+        4. Display the merged result rows in the existing results dialog
+           with an additional Patient + Source-label column.
         """
         if self._library is None:
             return
-        current = self._groups_list.currentItem()
-        if current is None:
-            QMessageBox.information(
-                self,
-                "Inter-manual metrics",
-                "Select a group on the left first.",
-            )
+        selected_items = self._groups_list.selectedItems()
+        if not selected_items:
+            current = self._groups_list.currentItem()
+            if current is None:
+                self._show_status_msg(
+                    "Inter-observer variability",
+                    "Select one or more groups on the left first "
+                    "(Ctrl/Shift-click for multi-select).",
+                )
+                return
+            selected_items = [current]
+        selected_keys: list[tuple[str, str]] = []
+        for item in selected_items:
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data:
+                selected_keys.append(tuple(data))
+
+        # Settings dialog — defaults from Tab 4's tolerances + all geom on.
+        settings_dlg = _InterObserverSettingsDialog(
+            n_groups=len(selected_keys),
+            default_sd_tau_mm=float(
+                (self._settings.get("tolerances") or {}).get("surface_dice_tau_mm", 3.0)
+            ),
+            default_apl_tau_mm=float(
+                (self._settings.get("tolerances") or {}).get("apl_tolerance_mm", 3.0)
+            ),
+            parent=self,
+        )
+        if settings_dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        pid, source_label = current.data(Qt.ItemDataRole.UserRole)
-        buckets = self._group_drawers.get((pid, source_label), {})
-        if not buckets:
-            QMessageBox.information(
-                self,
-                "Inter-manual metrics",
-                "No matched organs to evaluate for this group.",
+        config = settings_dlg.metric_config()
+
+        # Pre-flight bucket count for the progress bar denominator. We count
+        # (group × organ) pairs because that's where the per-organ rasterisation
+        # + metric loop sits — finer-grained ticks would dwarf the bar with
+        # micro-updates between rater pairs.
+        total_units = 0
+        for key in selected_keys:
+            total_units += len(self._group_drawers.get(key, {}))
+        if total_units == 0:
+            self._show_status_msg(
+                "Inter-observer variability",
+                "No matched organs to evaluate across the selected group(s).",
             )
             return
 
-        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            rows = self._compute_inter_manual_rows(pid, buckets)
-        finally:
-            QGuiApplication.restoreOverrideCursor()
+        progress = QProgressDialog(
+            "Loading CTs and computing pairwise metrics…",
+            "Cancel",
+            0,
+            total_units,
+            self,
+        )
+        progress.setWindowTitle("Inter-observer variability")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        # Match the cancel behaviour we use elsewhere — modal, parent-bound.
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        # CRUCIAL: by default QProgressDialog auto-resets on cancel (hides
+        # itself + resets to max+1), so the next ``setValue()`` call from
+        # a per-organ tick re-shows the dialog and the user sees a "new
+        # dialog opens at 12/20". Disable both behaviours so cancel sticks.
+        progress.setAutoReset(False)
+        progress.setAutoClose(False)
 
-        if not rows:
-            QMessageBox.warning(
-                self,
-                "Inter-manual metrics",
-                "Could not load the CT or rasterise any constituent masks "
-                "for this group. Check the Load Data tab for missing files.",
+        cancel_check = progress.wasCanceled  # pass the bound method as a closure
+        all_rows: list[dict[str, Any]] = []
+        cancelled = False
+        units_done = 0
+        for pid, source_label in selected_keys:
+            if cancel_check():
+                cancelled = True
+                break
+            buckets = self._group_drawers.get((pid, source_label), {})
+            if not buckets:
+                continue
+            group_rows = self._compute_inter_manual_rows(
+                pid,
+                buckets,
+                config,
+                progress_cb=lambda done_in_group: self._tick_progress(
+                    progress, units_done + done_in_group, total_units, pid, source_label
+                ),
+                cancel_check=cancel_check,
+            )
+            # Stamp every row with the source group identity so the merged
+            # results table can distinguish which patient/label produced it.
+            for r in group_rows:
+                r["patient_id"] = pid
+                r["source_label"] = source_label
+            all_rows.extend(group_rows)
+            units_done += len(buckets)
+            if not cancel_check():
+                progress.setValue(units_done)
+            QApplication.processEvents()
+            if cancel_check():
+                cancelled = True
+                break
+        progress.close()
+
+        if cancelled and not all_rows:
+            return
+        if not all_rows:
+            self._show_status_msg(
+                "Inter-observer variability",
+                "Could not load CTs or rasterise any constituent masks for "
+                "the selected group(s). Check the Load Data tab for missing files.",
             )
             return
-        dlg = _InterManualMetricsDialog(rows, pid, source_label, parent=self)
+        dlg = _InterManualMetricsDialog(
+            all_rows,
+            n_groups=len(selected_keys),
+            cancelled=cancelled,
+            sd_tau_mm=float(config["tolerances"]["surface_dice_tau_mm"]),
+            apl_tau_mm=float(config["tolerances"]["apl_tolerance_mm"]),
+            parent=self,
+        )
         dlg.exec()
+
+    def _tick_progress(
+        self,
+        progress: QProgressDialog,
+        done: int,
+        total: int,
+        pid: str,
+        source_label: str,
+    ) -> None:
+        """Advance the QProgressDialog and pump events so Cancel stays live.
+
+        Skip the setValue call once cancel has been requested so we don't
+        re-show a hidden dialog or step past a final value the user
+        already dismissed.
+        """
+        if progress.wasCanceled():
+            QApplication.processEvents()
+            return
+        progress.setValue(min(done, total))
+        progress.setLabelText(
+            f"Computing inter-observer metrics — {pid} / {source_label}\n"
+            f"{done} / {total} organ buckets done"
+        )
+        QApplication.processEvents()
+
+    def _show_status_msg(self, title: str, message: str) -> None:
+        """QMessageBox wrapper parented to the main window for reliability.
+
+        The same QScrollArea-parent quirk that breaks Tab 3's QMessageBox
+        also applies here; using ``self.window()`` as the parent (the
+        top-level main window) makes the dialog appear reliably.
+        """
+        QMessageBox.information(self.window() or self, title, message)
 
     def _compute_inter_manual_rows(
         self,
         patient_id: str,
         buckets: dict[str, list[tuple[str, int, str]]],
+        config: dict[str, Any] | None = None,
+        progress_cb=None,
+        cancel_check=None,
     ) -> list[dict[str, Any]]:
         """Build the pairwise-metric row list for the inter-manual dialog.
 
@@ -770,6 +986,17 @@ class BuildConsensusTab(QWidget):
         ``organ``, ``rater_a``, ``rater_b``, ``metrics`` (a dict mirroring
         :func:`compute_geometric_metrics`'s output). Empty list on
         catastrophic failure (no CT, no library).
+
+        ``config`` is forwarded to ``compute_geometric_metrics``; if None,
+        a sensible default (all metrics on, 3 mm tolerances) is used.
+
+        ``progress_cb`` is invoked with the number of completed organ
+        buckets so callers can drive a QProgressDialog.
+
+        ``cancel_check`` is a zero-arg callable returning ``True`` when
+        the user has requested cancellation. Checked before each organ
+        AND between each pairwise comparison so a cancel during a long
+        run takes effect within a second or two.
         """
         if self._library is None:
             return []
@@ -793,28 +1020,30 @@ class BuildConsensusTab(QWidget):
         mask_cache: dict[tuple[str, int], Any] = {}
         rtss_cache: dict[str, Any] = {}
 
-        # Use the same metric config the Compute tab would: all geometric
-        # metrics on, default tolerances.
-        config = {
-            "geometric": {
-                "dice": True,
-                "hausdorff100": True,
-                "hausdorff95": True,
-                "mean_surface_distance": True,
-                "surface_dice": True,
-                "apl_mean": False,
-                "apl_total": False,
-                "volume": True,
-                "com_offset": True,
-            },
-            "tolerances": {
-                "surface_dice_tau_mm": 3.0,
-                "apl_tolerance_mm": 3.0,
-            },
-        }
+        if config is None:
+            config = {
+                "geometric": {
+                    "dice": True,
+                    "hausdorff100": True,
+                    "hausdorff95": True,
+                    "mean_surface_distance": True,
+                    "surface_dice": True,
+                    "apl_mean": False,
+                    "apl_total": False,
+                    "volume": True,
+                    "com_offset": True,
+                },
+                "tolerances": {
+                    "surface_dice_tau_mm": 3.0,
+                    "apl_tolerance_mm": 3.0,
+                },
+            }
 
         out: list[dict[str, Any]] = []
+        organs_done = 0
         for organ_name, members in sorted(buckets.items()):
+            if cancel_check is not None and cancel_check():
+                return out
             # Build masks for every rater contributing to this organ.
             rater_masks: list[tuple[str, Any]] = []  # (filename, sitk_mask)
             for sop_uid, roi_number, _roi_name in members:
@@ -840,9 +1069,18 @@ class BuildConsensusTab(QWidget):
                 if m is None:
                     continue
                 rater_masks.append((self._rtstruct_filename_for(sop_uid), m))
-            # Pairwise comparisons
+            # Pairwise comparisons — also cancellable so a click during a
+            # long rater stack (e.g. 5 raters = 10 pairs per organ)
+            # doesn't have to wait for the full quadratic loop to finish.
+            cancel_now = False
             for i in range(len(rater_masks)):
+                if cancel_check is not None and cancel_check():
+                    cancel_now = True
+                    break
                 for j in range(i + 1, len(rater_masks)):
+                    if cancel_check is not None and cancel_check():
+                        cancel_now = True
+                        break
                     name_a, mask_a = rater_masks[i]
                     name_b, mask_b = rater_masks[j]
                     try:
@@ -857,6 +1095,33 @@ class BuildConsensusTab(QWidget):
                             "metrics": metrics,
                         }
                     )
+                if cancel_now:
+                    break
+            # Drop this organ's rasterised masks from the cache before
+            # moving to the next organ. ``mask_cache`` keys are
+            # (sop_uid, roi_number) — each ROI belongs to exactly one
+            # organ bucket, so cached masks are never reused across
+            # organs. Holding them inflates peak RAM linearly with
+            # (raters × organs); evicting per-organ caps it at
+            # (raters × 1). For a 5-rater × 12-organ patient that's
+            # ~250 MB peak instead of ~3 GB.
+            for sop_uid, roi_number, _roi_name in members:
+                mask_cache.pop((sop_uid, roi_number), None)
+            rater_masks.clear()
+            # SimpleITK images hold C++-backed memory outside Python's
+            # refcount system; hint the GC after each organ so peak
+            # actually drops between iterations.
+            gc.collect()
+            # Bail out cleanly after the cache eviction so a mid-organ
+            # cancel still releases this organ's masks before we leave.
+            if cancel_now:
+                return out
+            organs_done += 1
+            if progress_cb is not None:
+                progress_cb(organs_done)
+                # Pump events so the progress bar repaints + cancel button
+                # remains live during a long run.
+                QApplication.processEvents()
         return out
 
     def _rtstruct_file_path(self, sop_uid: str) -> str | None:
@@ -921,20 +1186,55 @@ class BuildConsensusTab(QWidget):
 # ---- Inter-manual metrics dialog ----------------------------------------
 
 
-# Display order matches the canonical results-table convention; "?" cells
-# render as empty strings when the underlying metric wasn't computed.
-_INTER_MANUAL_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("dice", "Dice"),
-    ("surface_dice", "Surface Dice"),
-    ("hausdorff100", "HD 100% (mm)"),
-    ("hausdorff95", "HD 95% (mm)"),
-    ("mean_surface_distance", "MSD (mm)"),
-    ("volume_gt_cc", "Vol A (cc)"),
-    ("volume_test_cc", "Vol B (cc)"),
-    ("volume_diff_cc", "Vol diff (cc)"),
-    ("volume_ratio", "Vol ratio"),
-    ("com_offset_mm", "COM offset (mm)"),
+# Display order matches the canonical results-table convention. The
+# labels for tolerance-dependent metrics (Surface Dice, APL) are computed
+# at dialog-construction time from the user-supplied τ values; the static
+# block below is the fallback when no tolerance is provided.
+_INTER_MANUAL_COLUMN_KEYS: tuple[str, ...] = (
+    "dice",
+    "surface_dice",
+    "hausdorff100",
+    "hausdorff95",
+    "mean_surface_distance",
+    "apl_mean",
+    "apl_total",
+    "volume_gt_cc",
+    "volume_test_cc",
+    "volume_diff_cc",
+    "volume_ratio",
+    "com_offset_mm",
 )
+
+
+def _inter_manual_columns(
+    sd_tau_mm: float | None, apl_tau_mm: float | None
+) -> tuple[tuple[str, str], ...]:
+    """Build the (key, header) list with tolerance values baked into the labels.
+
+    Surface Dice and APL are tolerance-dependent — by including the τ
+    value in the header, two CSV exports computed at different
+    tolerances can be told apart at a glance in Excel.
+    """
+    static_overrides = {
+        "hausdorff100": "HD 100% (mm)",
+        "hausdorff95": "HD 95% (mm)",
+        "mean_surface_distance": "MSD (mm)",
+        "volume_gt_cc": "Vol A (cc)",
+        "volume_test_cc": "Vol B (cc)",
+        "volume_diff_cc": "Vol diff (cc)",
+        "volume_ratio": "Vol ratio",
+        "com_offset_mm": "COM offset (mm)",
+    }
+    out = []
+    for key in _INTER_MANUAL_COLUMN_KEYS:
+        if key in static_overrides:
+            label = static_overrides[key]
+        else:
+            label = metric_display_label(
+                key, sd_tau_mm=sd_tau_mm, apl_tau_mm=apl_tau_mm
+            )
+        out.append((key, label))
+    return tuple(out)
 
 
 class _InterManualTable(QTableWidget):
@@ -981,10 +1281,11 @@ class _InterManualTable(QTableWidget):
 
 
 class _InterManualMetricsDialog(QDialog):
-    """Modal popup showing pairwise rater metrics for a single group.
+    """Modal popup showing pairwise rater metrics for one OR MORE groups.
 
-    The table has one row per (organ × rater-A × rater-B) tuple. Three
-    paths get the data out:
+    The table has one row per (group × organ × rater-A × rater-B) tuple,
+    with leading Patient + Source-label columns when multiple groups are
+    merged into a single view. Three paths get the data out:
 
     - **Ctrl+A → Ctrl+C** copies as TSV with column headers prepended
       (Excel-friendly — paste directly into a sheet).
@@ -995,32 +1296,46 @@ class _InterManualMetricsDialog(QDialog):
     def __init__(
         self,
         rows: list[dict[str, Any]],
-        patient_id: str,
-        source_label: str,
+        n_groups: int = 1,
+        cancelled: bool = False,
+        sd_tau_mm: float | None = None,
+        apl_tau_mm: float | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(
-            f"Inter-manual metrics — {patient_id} / {source_label}"
+            f"Inter-observer variability — {n_groups} group(s)"
         )
-        self.resize(1100, 600)
-        self._patient_id = patient_id
-        self._source_label = source_label
+        self.resize(1200, 600)
+        self._n_groups = n_groups
+        # Resolve column labels with the τ values baked in so headers
+        # read e.g. "Surface Dice @ 3.00 mm" / "Mean APL @ 3.00 mm".
+        self._inter_manual_columns = _inter_manual_columns(sd_tau_mm, apl_tau_mm)
         layout = QVBoxLayout(self)
-        info = QLabel(
-            f"<b>Patient:</b> {patient_id}  &nbsp; <b>Source label:</b> {source_label}  "
-            f"&nbsp; <b>Comparisons:</b> {len(rows)}<br>"
-            "<span style='color:#666'>Pairwise rater comparison BEFORE the STAPLE "
-            "consensus is computed. Ctrl+A → Ctrl+C copies the table with column "
-            "headers; Export CSV writes a file.</span>",
-            self,
+        info_html = (
+            f"<b>Groups:</b> {n_groups}  &nbsp; <b>Comparisons:</b> {len(rows)}"
         )
+        if sd_tau_mm is not None or apl_tau_mm is not None:
+            tol_bits = []
+            if sd_tau_mm is not None:
+                tol_bits.append(f"Surface Dice τ = {sd_tau_mm:.2f} mm")
+            if apl_tau_mm is not None:
+                tol_bits.append(f"APL τ = {apl_tau_mm:.2f} mm")
+            info_html += "  &nbsp; <b>" + " · ".join(tol_bits) + "</b>"
+        if cancelled:
+            info_html += "  &nbsp; <span style='color:#d96b00'><b>Cancelled — partial results</b></span>"
+        info_html += (
+            "<br><span style='color:#666'>Pairwise rater comparison BEFORE the STAPLE "
+            "consensus is computed. Ctrl+A → Ctrl+C copies the table with column "
+            "headers; Export CSV writes a file.</span>"
+        )
+        info = QLabel(info_html, self)
         info.setTextFormat(Qt.TextFormat.RichText)
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        meta_headers = ["Organ", "Rater A", "Rater B"]
-        metric_headers = [label for _, label in _INTER_MANUAL_COLUMNS]
+        meta_headers = ["Patient", "Source label", "Organ", "Rater A", "Rater B"]
+        metric_headers = [label for _, label in self._inter_manual_columns]
         all_headers = meta_headers + metric_headers
         self._table = _InterManualTable(self)
         self._table.setColumnCount(len(all_headers))
@@ -1039,12 +1354,14 @@ class _InterManualMetricsDialog(QDialog):
         self._table.setSortingEnabled(False)
         for r_idx, row in enumerate(rows):
             metrics = row.get("metrics") or {}
-            self._set_cell(r_idx, 0, str(row.get("organ", "")))
-            self._set_cell(r_idx, 1, str(row.get("rater_a", "")))
-            self._set_cell(r_idx, 2, str(row.get("rater_b", "")))
-            for col_offset, (key, _label) in enumerate(_INTER_MANUAL_COLUMNS):
+            self._set_cell(r_idx, 0, str(row.get("patient_id", "")))
+            self._set_cell(r_idx, 1, str(row.get("source_label", "")))
+            self._set_cell(r_idx, 2, str(row.get("organ", "")))
+            self._set_cell(r_idx, 3, str(row.get("rater_a", "")))
+            self._set_cell(r_idx, 4, str(row.get("rater_b", "")))
+            for col_offset, (key, _label) in enumerate(self._inter_manual_columns):
                 value = metrics.get(key, "")
-                self._set_cell(r_idx, 3 + col_offset, self._fmt(value))
+                self._set_cell(r_idx, 5 + col_offset, self._fmt(value))
         self._table.setSortingEnabled(was_sorted)
         layout.addWidget(self._table, stretch=1)
 
@@ -1107,11 +1424,11 @@ class _InterManualMetricsDialog(QDialog):
 
     def _on_export_csv(self) -> None:
         suggested = (
-            f"inter_manual_{self._patient_id}_{self._source_label}.csv".replace(" ", "_")
+            f"inter_observer_variability_{self._n_groups}groups.csv".replace(" ", "_")
         )
         path_str, _ = QFileDialog.getSaveFileName(
             self,
-            "Export inter-manual metrics",
+            "Export inter-observer variability",
             suggested,
             "CSV files (*.csv);;All files (*)",
         )
@@ -1134,3 +1451,110 @@ class _InterManualMetricsDialog(QDialog):
         QMessageBox.information(
             self, "Export CSV", f"Exported {len(rows)} row(s) to {path}."
         )
+
+
+# ---- Inter-observer settings dialog ------------------------------------
+
+
+class _InterObserverSettingsDialog(QDialog):
+    """Modal pre-flight settings for the inter-observer computation.
+
+    Lets the user pick which geometric metrics to compute and override
+    the Surface Dice / APL tolerance values for this run. Defaults are
+    inherited from Tab 4's tolerances (passed in by the caller) plus
+    all geometric metrics on (except APL, which is off by default to
+    match Tab 4's geometric defaults). Returns the config dict via
+    :meth:`metric_config` after Accept.
+    """
+
+    def __init__(
+        self,
+        n_groups: int,
+        default_sd_tau_mm: float = 3.0,
+        default_apl_tau_mm: float = 3.0,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Inter-observer variability — settings")
+        self.resize(420, 400)
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"<b>{n_groups} group(s) selected.</b>  "
+                "Pick which metrics to compute and override the tolerance "
+                "values for this run.",
+                self,
+            )
+        )
+
+        # Metric checkboxes — sensible default set (all geom on except APL,
+        # which is expensive and rarely needed for inter-observer studies).
+        metrics_box = QGroupBox("Metrics to compute", self)
+        metrics_layout = QVBoxLayout(metrics_box)
+        self._metric_boxes: dict[str, QCheckBox] = {}
+        defaults = {
+            "dice": True,
+            "surface_dice": True,
+            "hausdorff100": True,
+            "hausdorff95": True,
+            "mean_surface_distance": True,
+            "apl_mean": False,
+            "apl_total": False,
+            "volume": True,
+            "com_offset": True,
+        }
+        labels = {
+            "dice": "Dice",
+            "surface_dice": "Surface Dice (uses τ below)",
+            "hausdorff100": "Hausdorff 100%",
+            "hausdorff95": "Hausdorff 95%",
+            "mean_surface_distance": "Mean Surface Distance",
+            "apl_mean": "Mean APL (uses τ below)",
+            "apl_total": "Total APL (uses τ below)",
+            "volume": "Volume + diff/ratio",
+            "com_offset": "Centre-of-mass offset",
+        }
+        for key, default_on in defaults.items():
+            cb = QCheckBox(labels[key], metrics_box)
+            cb.setChecked(default_on)
+            metrics_layout.addWidget(cb)
+            self._metric_boxes[key] = cb
+        layout.addWidget(metrics_box)
+
+        # Tolerance overrides — only relevant when surface_dice / apl
+        # are enabled, but we always show them so the user can pre-set.
+        tol_box = QGroupBox("Tolerances", self)
+        tol_form = QFormLayout(tol_box)
+        self._sd_tau_spin = QDoubleSpinBox(tol_box)
+        self._sd_tau_spin.setRange(0.0, 100.0)
+        self._sd_tau_spin.setSingleStep(0.1)
+        self._sd_tau_spin.setDecimals(2)
+        self._sd_tau_spin.setSuffix(" mm")
+        self._sd_tau_spin.setValue(default_sd_tau_mm)
+        tol_form.addRow("Surface Dice τ:", self._sd_tau_spin)
+        self._apl_tau_spin = QDoubleSpinBox(tol_box)
+        self._apl_tau_spin.setRange(0.0, 100.0)
+        self._apl_tau_spin.setSingleStep(0.1)
+        self._apl_tau_spin.setDecimals(2)
+        self._apl_tau_spin.setSuffix(" mm")
+        self._apl_tau_spin.setValue(default_apl_tau_mm)
+        tol_form.addRow("APL τ:", self._apl_tau_spin)
+        layout.addWidget(tol_box)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def metric_config(self) -> dict[str, Any]:
+        """Return the ``config`` dict accepted by ``compute_geometric_metrics``."""
+        return {
+            "geometric": {key: cb.isChecked() for key, cb in self._metric_boxes.items()},
+            "tolerances": {
+                "surface_dice_tau_mm": float(self._sd_tau_spin.value()),
+                "apl_tolerance_mm": float(self._apl_tau_spin.value()),
+            },
+        }
