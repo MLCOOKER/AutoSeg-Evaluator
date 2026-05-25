@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -450,7 +451,7 @@ class MatchContoursTab(QWidget):
 
     def _on_help_clicked(self) -> None:
         QMessageBox.information(
-            self,
+            self.window(),
             "Match Contours — workflow",
             "<p><b>What this tab does</b></p>"
             "<p>For each organ you want to evaluate, this tab defines the "
@@ -617,19 +618,11 @@ class MatchContoursTab(QWidget):
     def _on_clear_all_clicked(self) -> None:
         """Wipe every drawer + reset all session-scoped scaffolding.
 
-        Equivalent to starting fresh against the currently-loaded folder.
-        Per the user spec: also clears the rejection denylist and the
-        last-auto-match identifier so the next Run Auto-Match behaves
-        like the first one.
-
-        We deliberately do NOT pop a confirmation QMessageBox here —
-        QMessageBox.question on this tab refuses to render (a quirk of
-        the QScrollArea wrapper plumbing the parent chain in
-        ``MainWindow._wrap_scroll``; the status line confirms the
-        handler fires but the modal dialog never appears). The clear
-        is performed immediately and the status line reports what was
-        wiped. The previous state is snapshotted onto the undo stack
-        first so an accidental Clear All can be reversed via Ctrl+Z.
+        Also clears the rejection denylist and the last-auto-match
+        identifier so the next Run Auto-Match behaves like the first
+        one. No confirmation dialog: the prior state is snapshotted
+        onto the undo stack first so an accidental Clear All can be
+        reversed with Ctrl+Z.
         """
         n_drawers = len(self._drawers)
         n_deny = sum(len(v) for v in self._test_denylist.values())
