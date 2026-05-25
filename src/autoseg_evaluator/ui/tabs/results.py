@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence
+from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QStyle,
+    QStyleOptionHeader,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -37,6 +39,100 @@ from autoseg_evaluator.data.results import META_COLUMNS, ResultsManager, metric_
 
 
 _ERROR_BG = QColor("#FFE0E0")
+
+
+# Column-group bands for the header. Each metric key is classified into a
+# family; the header item for that column is given the family's tint and
+# a tooltip describing the band. Helps the user scan the wide results
+# table without losing context. Tints are kept very subtle so they remain
+# legible in both light and dark themes.
+# Saturated enough to read against both light and dark header backgrounds
+# (the stripe is only ~4 px tall along the header bottom — needs strong
+# colour to be discernible at that size).
+_GROUP_BANDS: dict[str, tuple[str, QColor]] = {
+    "identifier": ("Identifier columns", QColor("#5C6BC0")),    # indigo
+    "overlap":    ("Volumetric overlap", QColor("#00ACC1")),    # cyan
+    "surface":    ("Surface distances", QColor("#FB8C00")),     # orange
+    "apl":        ("Added Path Length", QColor("#FDD835")),     # yellow
+    "volume":     ("Volume + COM", QColor("#43A047")),          # green
+    "staple":     ("STAPLE consensus", QColor("#EC407A")),      # pink
+    "dvh":        ("Dose-volume histogram", QColor("#8E24AA")), # purple
+}
+
+
+class _BandedHeaderView(QHeaderView):
+    """QHeaderView that paints a coloured stripe below each column header.
+
+    Qt-material's header stylesheet overrides ``QTableWidgetItem.setBackground``
+    so per-cell tinting via the item API doesn't show. The reliable fix is
+    to paint the band ourselves: ``paintSection`` runs the default header
+    paint first (so the text + sort indicator render normally), then
+    overlays a thin coloured rectangle along the bottom edge keyed to the
+    column's family.
+
+    The ``bands`` dict is set externally via :meth:`set_bands` and is keyed
+    by column index → family name (a key in ``_GROUP_BANDS``).
+    """
+
+    STRIPE_HEIGHT_PX = 4
+
+    def __init__(self, orientation: Qt.Orientation, parent=None) -> None:
+        super().__init__(orientation, parent)
+        self._bands: dict[int, str] = {}
+
+    def set_bands(self, bands: dict[int, str]) -> None:
+        self._bands = dict(bands)
+        self.viewport().update()
+
+    def paintSection(self, painter: QPainter, rect, logicalIndex: int) -> None:  # type: ignore[override]
+        super().paintSection(painter, rect, logicalIndex)
+        band_name = self._bands.get(logicalIndex)
+        if not band_name:
+            return
+        info = _GROUP_BANDS.get(band_name)
+        if info is None:
+            return
+        _label, color = info
+        painter.save()
+        painter.fillRect(
+            rect.x(),
+            rect.bottom() - self.STRIPE_HEIGHT_PX + 1,
+            rect.width(),
+            self.STRIPE_HEIGHT_PX,
+            color,
+        )
+        painter.restore()
+
+
+def _band_for_metric_key(key: str) -> str:
+    if key in ("dice", "surface_dice"):
+        return "overlap"
+    if key in ("hausdorff100", "hausdorff95", "mean_surface_distance"):
+        return "surface"
+    if key in ("apl_mean", "apl_total"):
+        return "apl"
+    if key.startswith("volume_") or key.startswith("com_"):
+        return "volume"
+    if (
+        key.startswith("staple_")
+        or key in (
+            "consensus_volume_cc",
+            "rater_disagreement_cc",
+            "rater_volume_range_cc",
+            "uncertain_band_cc",
+            "mean_entropy",
+            "n_raters",
+        )
+    ):
+        return "staple"
+    # DVH built-ins or dynamic ``d{X}_gy`` / ``v{X}gy_cc``
+    if key in ("dmin_gy", "dmean_gy", "dmax_gy"):
+        return "dvh"
+    if key.startswith("d") and key.endswith("_gy"):
+        return "dvh"
+    if key.startswith("v") and key.endswith("gy_cc"):
+        return "dvh"
+    return "dvh"  # safe default — unknown metrics drop into the rightmost band
 
 
 class ResultsTab(QWidget):
@@ -83,6 +179,20 @@ class ResultsTab(QWidget):
         self._table.setColumnCount(len(headers))
         self._table.setRowCount(len(rows))
         self._table.setHorizontalHeaderLabels(headers)
+        # Build the column → band map and hand it to the banded header for
+        # painting. Also set per-header tooltips describing the band so the
+        # user can hover for context.
+        bands: dict[int, str] = {c: "identifier" for c in range(len(meta_keys))}
+        for c_off, key in enumerate(metric_cols):
+            bands[len(meta_keys) + c_off] = _band_for_metric_key(key)
+        self._banded_header.set_bands(bands)
+        for col_idx, band in bands.items():
+            item = self._table.horizontalHeaderItem(col_idx)
+            if item is None:
+                continue
+            label, _color = _GROUP_BANDS.get(band, ("", QColor("#FFFFFF")))
+            if label:
+                item.setToolTip(label)
 
         for r, row in enumerate(rows):
             is_error = bool(row.get("error"))
@@ -133,6 +243,12 @@ class ResultsTab(QWidget):
         outer.addLayout(toolbar)
 
         self._table = _ResultsTable(self)
+        # Custom horizontal header that paints a coloured stripe per
+        # column family — gives the user a visible cue to the column
+        # group even when qt-material's stylesheet overrides per-item
+        # header backgrounds.
+        self._banded_header = _BandedHeaderView(Qt.Orientation.Horizontal, self._table)
+        self._table.setHorizontalHeader(self._banded_header)
         self._table.setSortingEnabled(True)
         self._table.setAlternatingRowColors(True)
         # SelectItems (not SelectRows) so users can copy a sub-rectangle if they want.

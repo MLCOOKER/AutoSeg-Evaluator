@@ -89,6 +89,13 @@ class ManageSourceLabelsDialog(QDialog):
             | QTableWidget.EditTrigger.SelectedClicked
             | QTableWidget.EditTrigger.EditKeyPressed
         )
+        # Click-to-sort on column headers — useful for bulk-selecting all
+        # rows from one vendor / one origin / one patient before applying
+        # an override. Each cell carries its SOPInstanceUID in UserRole,
+        # so the binding survives row reordering.
+        self._table.setSortingEnabled(True)
+        self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.horizontalHeader().setSectionsClickable(True)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -138,6 +145,10 @@ class ManageSourceLabelsDialog(QDialog):
             for ctx in patient.contexts:
                 for rtss in ctx.rtstructs:
                     rtstructs.append((patient_id, rtss))
+        # Disable sorting during bulk insert so each setItem doesn't trigger
+        # a re-sort. Re-enable at the end.
+        was_sorted = self._table.isSortingEnabled()
+        self._table.setSortingEnabled(False)
         self._table.setRowCount(len(rtstructs))
 
         for row, (patient_id, rtss) in enumerate(rtstructs):
@@ -155,6 +166,8 @@ class ManageSourceLabelsDialog(QDialog):
             edit_item = QTableWidgetItem(custom)
             edit_item.setData(Qt.ItemDataRole.UserRole, rtss.sop_instance_uid)
             self._table.setItem(row, 4, edit_item)
+
+        self._table.setSortingEnabled(was_sorted)
 
     def _set_readonly_cell(self, row: int, col: int, text: str) -> None:
         item = QTableWidgetItem(text)

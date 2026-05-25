@@ -1,8 +1,9 @@
 """Theme application via qt-material with a graceful fallback.
 
-Dark mode uses a high-contrast VS Code-inspired palette (deep grey background,
-near-white body text, bright blue accent) rather than the qt-material default,
-which renders dark-on-dark text in several widgets and is hard to read.
+- Light mode uses qt-material's stock ``light_blue.xml`` unchanged.
+- Dark mode is a high-contrast VS Code-inspired palette that fixes
+  qt-material's default dark-on-dark text issues. Applied via the
+  ``extra`` template dict so we don't have to fork the qss file.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ def apply_theme(app: QApplication, theme: str = "light_blue.xml") -> None:
             # which we DON'T want now that we provide explicit text values.
             kwargs["extra"] = _DARK_EXTRA
             kwargs["invert_secondary"] = False
+        # Light theme: pass through to qt-material's stock palette unchanged.
         apply_stylesheet(app, theme=theme, **kwargs)
     except Exception:
         # An invalid theme name shouldn't crash the app — fall back to the default style.

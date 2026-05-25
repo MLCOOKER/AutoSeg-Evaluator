@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -95,26 +96,42 @@ class LoadDataTab(QWidget):
         self._summary_layout.addWidget(self._summary_label)
         outer.addWidget(self._summary_box)
 
-        # Cohort tree + Manage Source Labels button
+        # Cohort tree (left) + Issues panel (right) — side-by-side via a
+        # horizontal splitter so the user can rebalance the panes. The
+        # Manage Source Labels button stays in the cohort column header.
+        body_split = QSplitter(Qt.Orientation.Horizontal, self)
+        body_split.setChildrenCollapsible(False)
+
+        cohort_pane = QWidget(body_split)
+        cohort_layout = QVBoxLayout(cohort_pane)
+        cohort_layout.setContentsMargins(0, 0, 0, 0)
+        cohort_layout.setSpacing(4)
         tree_header = QHBoxLayout()
-        tree_header.addWidget(QLabel("<b>Cohort</b>", self))
+        tree_header.addWidget(QLabel("<b>Cohort</b>", cohort_pane))
         tree_header.addStretch(1)
-        self._source_labels_btn = QPushButton("Manage Source Labels…", self)
+        self._source_labels_btn = QPushButton("Manage Source Labels…", cohort_pane)
         self._source_labels_btn.setEnabled(False)
         self._source_labels_btn.clicked.connect(self._on_manage_sources_clicked)
         tree_header.addWidget(self._source_labels_btn)
-        outer.addLayout(tree_header)
+        cohort_layout.addLayout(tree_header)
+        self._tree = CohortTreeWidget(cohort_pane)
+        cohort_layout.addWidget(self._tree, stretch=1)
+        body_split.addWidget(cohort_pane)
 
-        self._tree = CohortTreeWidget(self)
-        outer.addWidget(self._tree, stretch=2)
-
-        # Issues panel
-        self._issues_box = QGroupBox("Issues", self)
+        self._issues_box = QGroupBox("Issues", body_split)
         issues_layout = QVBoxLayout(self._issues_box)
-        self._issues_list = QListWidget(self)
-        self._issues_list.setMaximumHeight(120)
+        self._issues_list = QListWidget(self._issues_box)
+        # Drop the fixed cap — the side-by-side layout means the list takes
+        # whatever vertical space the splitter pane has, not a strip below
+        # the cohort tree.
         issues_layout.addWidget(self._issues_list)
-        outer.addWidget(self._issues_box)
+        body_split.addWidget(self._issues_box)
+
+        # Default split: cohort gets ~2/3, issues gets ~1/3 of the width.
+        body_split.setStretchFactor(0, 2)
+        body_split.setStretchFactor(1, 1)
+        body_split.setSizes([700, 350])
+        outer.addWidget(body_split, stretch=2)
 
         # Progress bar (visible only during a scan)
         progress_row = QHBoxLayout()

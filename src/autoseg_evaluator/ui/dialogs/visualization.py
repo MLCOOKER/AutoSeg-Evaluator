@@ -257,13 +257,18 @@ class _LegendRow(QWidget):
 
         swatch = QLabel(self)
         swatch.setFixedSize(20, 14)
+        # Mid-grey border reads on both light and dark backgrounds.
         swatch.setStyleSheet(
-            f"background-color: {color}; border: 1px solid #333; border-radius: 2px;"
+            f"background-color: {color}; border: 1px solid #888; border-radius: 2px;"
         )
         layout.addWidget(swatch)
 
+        # No explicit colour — let the application's theme palette decide so the
+        # label is readable in both light AND dark mode. Previously we used
+        # ``color: inherit`` which is not valid in Qt stylesheets and silently
+        # forced the text to default black, making it unreadable on the dark
+        # background.
         text = QLabel(label, self)
-        text.setStyleSheet("color: inherit;")
         layout.addWidget(text, stretch=1)
 
 
