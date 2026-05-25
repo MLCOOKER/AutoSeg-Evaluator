@@ -234,6 +234,8 @@ class OrganDrawer(CollapsibleBox):
         else:
             self._patients_layout.addWidget(new_widget)
         self._refresh_content_height()
+        # GT source may have changed — re-evaluate whether "vs STAPLE" is allowed.
+        self._refresh_staple_availability()
 
     def remove_patient(self, patient_id: str) -> None:
         if patient_id not in self._patients:
@@ -535,6 +537,42 @@ class OrganDrawer(CollapsibleBox):
         n = len(self._patients)
         word = "patient" if n == 1 else "patients"
         self._count_label.setText(f"{n} {word}")
+        self._refresh_staple_availability()
+
+    def _refresh_staple_availability(self) -> None:
+        """Grey out the 'vs STAPLE' toggle if any patient's GT is a synthetic
+        STAPLE consensus.
+
+        Rationale: running STAPLE on a STAPLE result is methodologically
+        meaningless (the consensus is already an EM estimate from N
+        raters; treating it as one rater in another EM is circular). The
+        Build Consensus GT tab assigns "STAPLE Consensus" as the source
+        label of any synthetic GT it produces — we key off that string
+        to avoid coupling the widget to the data-model classes.
+        """
+        has_synthetic = any(
+            sub.gt_source_label == "STAPLE Consensus" for sub in self._patients.values()
+        )
+        if has_synthetic:
+            self._staple_check.setChecked(False)
+            self._staple_check.setEnabled(False)
+            self._staple_check.setToolTip(
+                "Disabled — this drawer's GT is already a STAPLE consensus "
+                "(generated in the Build Consensus GT tab). Running STAPLE "
+                "on a STAPLE result is methodologically meaningless."
+            )
+            self._staple_include_gt_check.setChecked(False)
+            self._staple_include_gt_check.setEnabled(False)
+        else:
+            self._staple_check.setEnabled(True)
+            self._staple_check.setToolTip(
+                "Also compute metrics against a STAPLE consensus contour derived "
+                "from contours in the drawer. Adds per-rater STAPLE sensitivity/"
+                "specificity columns and a consensus-uncertainty summary row per "
+                "patient. Use the 'GT in pool' sub-toggle to control whether the "
+                "designated GT contributes to the consensus."
+            )
+            self._staple_include_gt_check.setEnabled(self._staple_check.isChecked())
 
     def _refresh_content_height(self) -> None:
         """Recompute the open-height target so newly added/removed rows fit."""

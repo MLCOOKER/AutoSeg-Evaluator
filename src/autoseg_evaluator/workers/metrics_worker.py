@@ -419,11 +419,23 @@ class MetricsWorker(QObject):
             was_designated_gt=True,
         )
         try:
-            row["metrics"].update(
-                compute_dvh_metrics(
-                    gt_rtss, dose_ds, group["gt_roi_number"], self._dvh_config
+            # Synthetic STAPLE-consensus GT: there is no RTSS dataset to feed
+            # dicompyler-core, so we DVH straight off the synthesised binary
+            # mask via the same code path used by STAPLE consensus rows.
+            if gt_rtss is None:
+                gt_mask = self._mask_cache.get(
+                    (group["patient_id"], group["gt_sop"], group["gt_roi_number"])
                 )
-            )
+                if gt_mask is None:
+                    row["error"] = "DVH: synthetic GT mask missing — cannot evaluate dose."
+                else:
+                    row["metrics"].update(self._dvh_for_consensus_mask(gt_mask, dose_ds))
+            else:
+                row["metrics"].update(
+                    compute_dvh_metrics(
+                        gt_rtss, dose_ds, group["gt_roi_number"], self._dvh_config
+                    )
+                )
         except DVHError as exc:
             row["error"] = f"DVH: {exc}"
         return row
@@ -810,6 +822,15 @@ class MetricsWorker(QObject):
     # ---- Caches ----------------------------------------------------------
 
     def _load_rtstruct(self, patient_id: str, sop_uid: str):
+        # Synthetic STAPLE-consensus RTSSes have no DICOM file on disk;
+        # their masks are produced on-the-fly in ``_get_mask`` by running
+        # STAPLE on the constituent real RTSSes. Returning None here is
+        # safe — callers that try to read contour data directly will
+        # get a clear error, and downstream code paths that need the
+        # mask use ``_get_mask`` (which handles synthetic entries).
+        entry = self._find_rtstruct_entry(patient_id, sop_uid)
+        if entry is not None and entry.is_synthetic_consensus:
+            return None
         if sop_uid in self._rtstruct_cache:
             return self._rtstruct_cache[sop_uid]
         path = self._rtstruct_file_path(patient_id, sop_uid)
@@ -818,6 +839,23 @@ class MetricsWorker(QObject):
         ds = read_rtstruct(path)
         self._rtstruct_cache[sop_uid] = ds
         return ds
+
+    def _find_rtstruct_entry(self, patient_id: str, sop_uid: str):
+        """Locate the ``RTSTRUCTEntry`` for a given (patient, SOP UID) — None if absent.
+
+        Used to determine whether the RTSS is a synthetic STAPLE consensus
+        without having to thread that flag through every caller.
+        """
+        if self._library is None:
+            return None
+        patient = self._library.patients.get(patient_id)
+        if patient is None:
+            return None
+        for ctx in patient.contexts:
+            for r in ctx.rtstructs:
+                if r.sop_instance_uid == sop_uid:
+                    return r
+        return None
 
     def _load_ct(self, patient_id: str, rtstruct_sop_uid: str):
         if patient_id in self._ct_cache:
@@ -838,9 +876,48 @@ class MetricsWorker(QObject):
         key = (patient_id, sop_uid, roi_number)
         if key in self._mask_cache:
             return self._mask_cache[key]
+        # If this is a synthetic consensus RTSS, synthesise the mask by
+        # running STAPLE on its constituent real RTSSes. The result is
+        # cached under the synthetic (sop_uid, roi_number) key so repeat
+        # access in the same run is free.
+        entry = self._find_rtstruct_entry(patient_id, sop_uid)
+        if entry is not None and entry.is_synthetic_consensus:
+            mask = self._synthesise_consensus_mask(patient_id, entry, roi_number, ct)
+            self._mask_cache[key] = mask
+            return mask
         mask = extract_mask_for_roi(ct, rtss, roi_number)
         self._mask_cache[key] = mask
         return mask
+
+    def _synthesise_consensus_mask(self, patient_id: str, entry, roi_number: int, ct):
+        """Build a binary STAPLE consensus mask for one synthetic ROI on the fly.
+
+        Reads the constituent real RTSSes registered in
+        ``entry.constituent_groups[roi_number]``, rasterises each, then
+        runs the existing STAPLE algorithm on the stack. Returns ``None``
+        when fewer than 2 constituent masks could be built (STAPLE needs
+        at least 2 raters).
+        """
+        constituents = entry.constituent_groups.get(roi_number) or []
+        if len(constituents) < 2:
+            return None
+        masks = []
+        for real_sop, real_roi in constituents:
+            try:
+                real_rtss = self._load_rtstruct(patient_id, real_sop)
+            except Exception:  # noqa: BLE001 — missing constituent shouldn't crash the batch
+                continue
+            if real_rtss is None:
+                continue
+            real_mask = extract_mask_for_roi(ct, real_rtss, int(real_roi))
+            if real_mask is not None:
+                masks.append(real_mask)
+        if len(masks) < 2:
+            return None
+        result = compute_staple(masks, self._staple_config)
+        if result is None:
+            return None
+        return result.consensus_mask
 
     def _load_dose(self, patient_id: str):
         if patient_id in self._dose_cache:

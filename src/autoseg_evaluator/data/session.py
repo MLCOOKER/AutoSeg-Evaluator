@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 DEFAULT_SUFFIX = ".session.json"
 
 
@@ -31,8 +31,19 @@ def build_session_dict(
     drawers_state: list[dict[str, Any]],
     replacement_rules: list[dict[str, str]],
     template: dict[str, Any],
+    consensus_groups: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the on-disk JSON dictionary."""
+    """Assemble the on-disk JSON dictionary.
+
+    ``consensus_groups`` (added in schema v2) is a list of dicts describing
+    the synthetic STAPLE-consensus RTSSes the user generated in the
+    Build Consensus GT tab. Each entry contains the patient_id, source
+    label, FrameOfReferenceUID, and the per-organ constituent groups so
+    the consensus can be re-derived after the library is rescanned.
+    Sessions saved against schema v1 simply omit this key and load
+    cleanly — the consensus tab will just be empty until the user
+    re-generates.
+    """
     return {
         "schema_version": SCHEMA_VERSION,
         "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -40,6 +51,7 @@ def build_session_dict(
         "replacement_rules": list(replacement_rules or []),
         "last_template": dict(template or {}),
         "drawers": list(drawers_state or []),
+        "consensus_groups": list(consensus_groups or []),
     }
 
 

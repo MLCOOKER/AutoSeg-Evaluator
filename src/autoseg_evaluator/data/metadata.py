@@ -59,8 +59,21 @@ class RTSTRUCTEntry:
     study_instance_uid: str
     organs: list[OrganEntry] = field(default_factory=list)
 
+    # ---- Synthetic STAPLE-consensus support ---------------------------------
+    # When True, this entry has no real DICOM file backing it. The masks are
+    # produced at compute-time by running STAPLE over ``constituent_groups``
+    # (one group per ROI in ``organs``). Each group lists the (SOPInstanceUID,
+    # ROINumber) pairs from REAL RTSSes that contribute to that synthetic ROI.
+    # ``file_path`` is empty, ``source_label`` is set to "STAPLE Consensus",
+    # and downstream code that reads contour data must respect this flag.
+    is_synthetic_consensus: bool = False
+    constituent_groups: dict[int, list[tuple[str, int]]] = field(default_factory=dict)
+    """``{synthetic_roi_number: [(real_sop_uid, real_roi_number), …]}``"""
+
     @property
     def filename(self) -> str:
+        if self.is_synthetic_consensus:
+            return "(STAPLE consensus)"
         return os.path.basename(self.file_path)
 
 
@@ -477,6 +490,65 @@ class MetadataLibrary:
 
     def all_rtstructs(self) -> list[RTSTRUCTEntry]:
         return [r for p in self.patients.values() for c in p.contexts for r in c.rtstructs]
+
+    # ---- Synthetic STAPLE-consensus RTSS support --------------------------
+
+    def register_synthetic_consensus(
+        self,
+        patient_id: str,
+        for_uid: str,
+        entry: "RTSTRUCTEntry",
+    ) -> bool:
+        """Append a synthetic consensus RTSS to the patient's matching context.
+
+        The synthetic entry must be marked ``is_synthetic_consensus=True``.
+        Returns True on success, False if the patient or matching context
+        couldn't be found.
+
+        Re-registering a synthetic entry with a SOPInstanceUID that already
+        exists in that context is treated as an update (replace in place).
+        """
+        if not entry.is_synthetic_consensus:
+            return False
+        patient = self.patients.get(patient_id)
+        if patient is None:
+            return False
+        for ctx in patient.contexts:
+            if ctx.frame_of_reference_uid != for_uid:
+                continue
+            for i, existing in enumerate(ctx.rtstructs):
+                if existing.sop_instance_uid == entry.sop_instance_uid:
+                    ctx.rtstructs[i] = entry
+                    return True
+            ctx.rtstructs.append(entry)
+            return True
+        return False
+
+    def unregister_synthetic_consensus(self, sop_uid: str) -> bool:
+        """Drop a synthetic consensus RTSS by SOPInstanceUID. Returns True if removed."""
+        for patient in self.patients.values():
+            for ctx in patient.contexts:
+                for i, r in enumerate(ctx.rtstructs):
+                    if r.is_synthetic_consensus and r.sop_instance_uid == sop_uid:
+                        ctx.rtstructs.pop(i)
+                        return True
+        return False
+
+    def clear_synthetic_consensus(self) -> None:
+        """Remove every synthetic consensus RTSS — used before re-applying a new set."""
+        for patient in self.patients.values():
+            for ctx in patient.contexts:
+                ctx.rtstructs = [r for r in ctx.rtstructs if not r.is_synthetic_consensus]
+
+    def synthetic_consensus_entries(self) -> list[tuple[str, str, "RTSTRUCTEntry"]]:
+        """Return ``(patient_id, for_uid, entry)`` for every synthetic RTSS in the library."""
+        out: list[tuple[str, str, RTSTRUCTEntry]] = []
+        for pid, patient in self.patients.items():
+            for ctx in patient.contexts:
+                for r in ctx.rtstructs:
+                    if r.is_synthetic_consensus:
+                        out.append((pid, ctx.frame_of_reference_uid, r))
+        return out
 
 
 # ---- Helpers --------------------------------------------------------------

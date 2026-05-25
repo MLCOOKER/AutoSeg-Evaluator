@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -101,6 +102,21 @@ class MatchContoursTab(QWidget):
         self._drawers: dict[str, OrganDrawer] = {}  # organ_name → drawer
         self._focused_drawer: OrganDrawer | None = None
         self._synonyms_flat: dict[str, str] = flatten_synonyms(load_synonyms(synonyms_path()))
+        # Remember the last Auto-Match GT identifier so we can detect a
+        # manufacturer/filename change between runs and clear stale drawers.
+        self._last_auto_match_identifier: tuple[str, str] | None = None
+        # Bounded undo history of session_state() snapshots; pushed before
+        # every drawer-mutating operation. Most recent state on top.
+        self._undo_stack: list[list[dict[str, Any]]] = []
+        self._undo_limit: int = 20
+        # Per-(organ × patient) denylist of (sop_uid, roi_number) test rows
+        # the user explicitly removed. Honoured by the "refresh tests" pass
+        # of Run Auto-Match so previously-rejected matches don't reappear
+        # when the cohort grows (e.g. a new vendor added a year later).
+        # Keyed by (organ_name, patient_id) → set[(sop_uid, roi_number)].
+        # Persisted in the session JSON so the rejection memory survives
+        # save/load cycles.
+        self._test_denylist: dict[tuple[str, str], set[tuple[str, int]]] = {}
 
         self._build_ui()
 
@@ -115,6 +131,10 @@ class MatchContoursTab(QWidget):
         # Reset everything: previously-built drawers reference SOPInstanceUIDs
         # from the prior cohort and aren't meaningful against the new one.
         self._reset_drawers()
+        # Cross-cohort undo history is meaningless — old snapshots reference
+        # stale UIDs. Start fresh whenever the library changes.
+        self._clear_undo_history()
+        self._last_auto_match_identifier = None
         if library is None:
             self._tree.clear()
             self._set_empty_state(True)
@@ -161,6 +181,22 @@ class MatchContoursTab(QWidget):
                         ],
                     }
                 )
+            # Collect denylist entries scoped to this drawer's organ name.
+            # Stored as a flat list of {patient_id, sop_uid, roi_number}
+            # tuples for JSON-friendliness — restored on load so the next
+            # Run Auto-Match honours previous rejections.
+            denylist_entries: list[dict[str, Any]] = []
+            for (deny_organ, deny_pid), entries in self._test_denylist.items():
+                if deny_organ != drawer.organ_name():
+                    continue
+                for sop, roi in entries:
+                    denylist_entries.append(
+                        {
+                            "patient_id": deny_pid,
+                            "sop_uid": sop,
+                            "roi_number": int(roi),
+                        }
+                    )
             out.append(
                 {
                     "organ_name": drawer.organ_name(),
@@ -170,6 +206,7 @@ class MatchContoursTab(QWidget):
                     "staple_include_gt": drawer.staple_include_gt(),
                     "expanded": drawer.isExpanded(),
                     "patients": patients,
+                    "denylist": denylist_entries,
                 }
             )
         return out
@@ -189,6 +226,10 @@ class MatchContoursTab(QWidget):
         # Wipe existing drawers so the restore is deterministic
         self._reset_drawers()
         self._tree.clear_marks()
+        # Fresh denylist — about to be rehydrated from the session payload
+        # so previous in-memory rejections from a different cohort don't
+        # bleed into the restored state.
+        self._test_denylist.clear()
 
         applied = 0
         missing = 0
@@ -203,6 +244,15 @@ class MatchContoursTab(QWidget):
             drawer.set_gt_comparison(bool(d.get("gt_comparison", True)))
             drawer.set_staple_consensus(bool(d.get("staple_consensus", False)))
             drawer.set_staple_include_gt(bool(d.get("staple_include_gt", True)))
+
+            # Restore this drawer's denylist (may be missing in sessions
+            # saved before this field existed — defensive ``or []``).
+            for entry in d.get("denylist", []) or []:
+                pid = str(entry.get("patient_id", "") or "")
+                sop = str(entry.get("sop_uid", "") or "")
+                roi = int(entry.get("roi_number", 0) or 0)
+                if pid and sop and roi:
+                    self._test_denylist.setdefault((organ_name, pid), set()).add((sop, roi))
 
             for p in d.get("patients", []) or []:
                 patient_id = str(p.get("patient_id", "") or "")
@@ -360,7 +410,86 @@ class MatchContoursTab(QWidget):
         layout.addWidget(self._run_match_btn)
 
         layout.addStretch(1)
+
+        # Nuke-it-all button — wipes every drawer + clears the per-drawer
+        # denylist + clears the undo stack + resets the last-auto-match
+        # identifier. Useful when the user wants to restart from scratch
+        # without reloading the folder.
+        self._clear_all_btn = QPushButton("Clear All", bar)
+        self._clear_all_btn.setToolTip(
+            "Remove every drawer + clear the rejection denylist + reset the "
+            "last Auto-Match identifier. Equivalent to starting a fresh "
+            "session against the currently loaded folder. Takes effect "
+            "immediately (no confirm dialog), but the previous state is "
+            "preserved on the undo stack — press Undo / Ctrl+Z to restore."
+        )
+        self._clear_all_btn.clicked.connect(self._on_clear_all_clicked)
+        layout.addWidget(self._clear_all_btn)
+
+        # Undo button — restores the previous drawer state from a snapshot
+        # stack populated before every mutating operation. Bounded history
+        # (default 20 entries). Disabled when the stack is empty.
+        self._undo_btn = QPushButton("Undo", bar)
+        self._undo_btn.setShortcut(QKeySequence.StandardKey.Undo)
+        self._undo_btn.setToolTip(
+            "Undo the last drawer change (Ctrl+Z). Covers add / remove / "
+            "Set GT / Auto-Match / Remove Poor Matches. Up to 20 steps."
+        )
+        self._undo_btn.setEnabled(False)
+        self._undo_btn.clicked.connect(self._on_undo_clicked)
+        layout.addWidget(self._undo_btn)
+
+        # Help button explaining the Match Contours workflow — particularly
+        # useful since the per-drawer toggles (truncate / vs GT / vs STAPLE /
+        # GT in pool) interact with the optional Build Consensus GT tab.
+        self._help_btn = QPushButton("Help", bar)
+        self._help_btn.setToolTip("Show a workflow explanation for this tab")
+        self._help_btn.clicked.connect(self._on_help_clicked)
+        layout.addWidget(self._help_btn)
         return bar
+
+    def _on_help_clicked(self) -> None:
+        QMessageBox.information(
+            self,
+            "Match Contours — workflow",
+            "<p><b>What this tab does</b></p>"
+            "<p>For each organ you want to evaluate, this tab defines the "
+            "<b>ground-truth contour</b> (one RTSS) and the <b>test contours</b> "
+            "(one or more other RTSSes) that will be compared against it on "
+            "the Compute tab.</p>"
+            "<p><b>How to use it</b></p>"
+            "<ol>"
+            "<li>Optionally define <i>Replacement Rules</i> for site-specific "
+            "name quirks (e.g. <code>Musc_Constrict</code> → "
+            "<code>Pharyngeal_Constrictor</code>).</li>"
+            "<li>Define a <i>Template</i> listing the organs you want to "
+            "evaluate and how to identify the GT RTSS within each patient.</li>"
+            "<li>Click <i>Run Auto-Match</i> — drawers are created with the "
+            "matched GT + test contours per organ.</li>"
+            "<li>Curate the drawers: remove poor matches, drag-drop additional "
+            "test contours, toggle per-drawer options.</li>"
+            "</ol>"
+            "<p><b>Per-drawer options</b></p>"
+            "<ul>"
+            "<li><b>Truncate</b> — zero out test slices outside the GT's "
+            "craniocaudal extent. Useful for structures the AI may "
+            "legitimately extend beyond the manual GT (cord, rectum).</li>"
+            "<li><b>vs GT</b> — compute test-vs-GT metrics. The default mode.</li>"
+            "<li><b>vs STAPLE</b> — additionally build a STAPLE consensus over "
+            "the drawer's contours and compute each rater against it. Adds "
+            "per-rater sensitivity/specificity plus a consensus summary row.</li>"
+            "<li><b>GT in pool</b> — when 'vs STAPLE' is on, controls whether "
+            "the designated GT is fed into the EM. Default ON (matches the "
+            "no-true-truth framing of Warfield 2004).</li>"
+            "</ul>"
+            "<p><b>Interaction with the Build Consensus GT tab</b></p>"
+            "<p>If you used Tab 2 to generate a <b>synthetic consensus GT</b>, "
+            "it appears in the Loaded Contours tree like any other RTSS with "
+            "source label <i>'STAPLE Consensus'</i>. You can designate it as "
+            "the GT here. When the GT is synthetic, the per-drawer "
+            "<i>vs STAPLE</i> option is disabled — running STAPLE on a STAPLE "
+            "result is methodologically meaningless.</p>",
+        )
 
     def _build_left_panel(self) -> QWidget:
         container = QWidget(self)
@@ -445,6 +574,104 @@ class MatchContoursTab(QWidget):
         return container
 
     # ---- Drawer plumbing --------------------------------------------------
+
+    # ---- Undo ------------------------------------------------------------
+
+    def _push_undo_snapshot(self) -> None:
+        """Capture the current session state to the undo stack before mutating.
+
+        Snapshots are full ``session_state()`` payloads — restoring via
+        ``apply_session_state`` deterministically rebuilds drawers from any
+        snapshot. Bounded to ``self._undo_limit`` entries so the stack
+        doesn't grow without bound on long sessions.
+        """
+        snapshot = self.session_state()
+        self._undo_stack.append(snapshot)
+        if len(self._undo_stack) > self._undo_limit:
+            # Drop the oldest entry to keep memory bounded.
+            self._undo_stack.pop(0)
+        if hasattr(self, "_undo_btn"):
+            self._undo_btn.setEnabled(True)
+
+    def _on_undo_clicked(self) -> None:
+        """Pop the most recent snapshot off the stack and restore it."""
+        if not self._undo_stack:
+            return
+        snapshot = self._undo_stack.pop()
+        self.apply_session_state(snapshot)
+        self._resync_tree_marks()
+        if hasattr(self, "_undo_btn"):
+            self._undo_btn.setEnabled(bool(self._undo_stack))
+        self._show_status(
+            f"Undo applied. {len(self._undo_stack)} step(s) remaining."
+        )
+
+    def _clear_undo_history(self) -> None:
+        """Reset the undo stack — called when the library changes (different cohort)."""
+        self._undo_stack.clear()
+        if hasattr(self, "_undo_btn"):
+            self._undo_btn.setEnabled(False)
+
+    # ---- Clear All -------------------------------------------------------
+
+    def _on_clear_all_clicked(self) -> None:
+        """Wipe every drawer + reset all session-scoped scaffolding.
+
+        Equivalent to starting fresh against the currently-loaded folder.
+        Per the user spec: also clears the rejection denylist and the
+        last-auto-match identifier so the next Run Auto-Match behaves
+        like the first one.
+
+        We deliberately do NOT pop a confirmation QMessageBox here —
+        QMessageBox.question on this tab refuses to render (a quirk of
+        the QScrollArea wrapper plumbing the parent chain in
+        ``MainWindow._wrap_scroll``; the status line confirms the
+        handler fires but the modal dialog never appears). The clear
+        is performed immediately and the status line reports what was
+        wiped. The previous state is snapshotted onto the undo stack
+        first so an accidental Clear All can be reversed via Ctrl+Z.
+        """
+        n_drawers = len(self._drawers)
+        n_deny = sum(len(v) for v in self._test_denylist.values())
+        if (
+            n_drawers == 0
+            and n_deny == 0
+            and self._last_auto_match_identifier is None
+        ):
+            self._show_status(
+                "Clear All: nothing to clear (no drawers or denylist)."
+            )
+            return
+        # Push a snapshot BEFORE wiping so Undo can restore the prior
+        # state. The undo stack itself is preserved.
+        self._push_undo_snapshot()
+        self._reset_drawers()
+        self._resync_tree_marks()
+        self._test_denylist.clear()
+        self._last_auto_match_identifier = None
+        parts: list[str] = []
+        if n_drawers:
+            parts.append(f"{n_drawers} drawer(s)")
+        if n_deny:
+            parts.append(f"{n_deny} denylist entry/entries")
+        self._show_status(
+            "Cleared: " + ", ".join(parts) + ". Press Undo to restore."
+        )
+
+    # ---- Denylist helpers ------------------------------------------------
+
+    def _add_to_denylist(
+        self, organ_name: str, patient_id: str, sop_uid: str, roi_number: int
+    ) -> None:
+        """Record a (patient, sop, roi) tuple as user-rejected for this drawer.
+
+        Used by the test-row remove handler so Run Auto-Match doesn't
+        re-add a contour the user already curated out. Cheap; the set
+        membership lookup happens once per candidate during the
+        refresh-tests pass.
+        """
+        key = (organ_name, patient_id)
+        self._test_denylist.setdefault(key, set()).add((sop_uid, int(roi_number)))
 
     def _resync_tree_marks(self) -> None:
         """Authoritatively recompute loaded-contours ticks from current drawer state.
@@ -553,6 +780,7 @@ class MatchContoursTab(QWidget):
         """
         if self._library is None:
             return
+        self._push_undo_snapshot()
         skipped: list[str] = []
         new_subsections = 0
         for patient_id, sop_uid, roi_number, roi_name in organs:
@@ -563,6 +791,20 @@ class MatchContoursTab(QWidget):
             drawer = self.add_drawer(roi_name)
             existing = drawer.patient_subsection(patient_id)
             if existing is not None:
+                # Re-running Auto-Match on an existing subsection should ALSO
+                # pick up any test sources added since the previous run (the
+                # year-later-new-vendor workflow). We re-run the matcher on
+                # every non-GT RTSS in this patient, drop anything already
+                # present in ``existing.tests`` (preserve user curation) and
+                # anything on the per-drawer denylist (preserve user
+                # rejections), and append the rest.
+                merged_tests = self._refresh_tests_for_existing(
+                    drawer.organ_name(),
+                    patient_id,
+                    sop_uid,
+                    roi_name,
+                    list(existing.tests),
+                )
                 subsection = PatientSubsection(
                     patient_id=patient_id,
                     gt_rtstruct_sop_uid=sop_uid,
@@ -570,11 +812,19 @@ class MatchContoursTab(QWidget):
                     gt_source_label=rtss.source_label,
                     gt_roi_number=roi_number,
                     gt_roi_name=roi_name,
-                    tests=list(existing.tests),
+                    tests=merged_tests,
                 )
                 drawer.update_patient(subsection)
             else:
-                auto_tests = self._auto_match_tests(patient_id, sop_uid, roi_name)
+                # Brand-new subsection: full auto-match, but still honour the
+                # denylist (the user may have cleared and re-added drawers).
+                auto_tests = [
+                    t
+                    for t in self._auto_match_tests(patient_id, sop_uid, roi_name)
+                    if not self._is_denylisted(
+                        drawer.organ_name(), patient_id, t.rtstruct_sop_uid, t.roi_number
+                    )
+                ]
                 subsection = PatientSubsection(
                     patient_id=patient_id,
                     gt_rtstruct_sop_uid=sop_uid,
@@ -595,6 +845,50 @@ class MatchContoursTab(QWidget):
             bits.append("Skipped: " + ", ".join(skipped))
         if bits:
             self._show_status(" ".join(bits))
+
+    def _is_denylisted(
+        self, organ_name: str, patient_id: str, sop_uid: str, roi_number: int
+    ) -> bool:
+        denied = self._test_denylist.get((organ_name, patient_id))
+        if not denied:
+            return False
+        return (sop_uid, int(roi_number)) in denied
+
+    def _refresh_tests_for_existing(
+        self,
+        organ_name: str,
+        patient_id: str,
+        gt_sop_uid: str,
+        gt_roi_name: str,
+        existing_tests: list[TestRow],
+    ) -> list[TestRow]:
+        """Merge new test sources into an existing subsection's test list.
+
+        Strategy:
+        - Keep every existing test row as-is (preserve manual curation).
+        - For each non-GT RTSS in the patient, fuzzy-match against the GT
+          organ name. If the chosen (sop_uid, roi_number) is already in
+          ``existing_tests`` OR on the denylist OR is the GT itself, skip.
+        - Otherwise append as a new ``TestRow``.
+
+        Returns the merged list. Order: existing tests first (insertion
+        order preserved), new sources appended.
+        """
+        already_present: set[tuple[str, int]] = {
+            (t.rtstruct_sop_uid, int(t.roi_number)) for t in existing_tests
+        }
+        merged = list(existing_tests)
+        for new_test in self._auto_match_tests(patient_id, gt_sop_uid, gt_roi_name):
+            key = (new_test.rtstruct_sop_uid, int(new_test.roi_number))
+            if key in already_present:
+                continue
+            if self._is_denylisted(
+                organ_name, patient_id, new_test.rtstruct_sop_uid, new_test.roi_number
+            ):
+                continue
+            merged.append(new_test)
+            already_present.add(key)
+        return merged
 
     def _auto_match_tests(
         self, patient_id: str, gt_sop_uid: str, gt_roi_name: str
@@ -676,6 +970,7 @@ class MatchContoursTab(QWidget):
         """Add ``organs`` as test rows to ``target``."""
         if self._library is None or target is None:
             return
+        self._push_undo_snapshot()
         skipped: list[str] = []
         added = 0
         for patient_id, sop_uid, roi_number, roi_name in organs:
@@ -726,6 +1021,7 @@ class MatchContoursTab(QWidget):
         drawer = self._drawers.pop(organ_name, None)
         if drawer is None:
             return
+        self._push_undo_snapshot()
         if self._focused_drawer is drawer:
             self._focused_drawer = None
             self._add_selected_btn.setText("Add Selected → (auto)")
@@ -740,9 +1036,13 @@ class MatchContoursTab(QWidget):
             return
         if drawer.patient_subsection(patient_id) is None:
             return
+        self._push_undo_snapshot()
         drawer.remove_patient(patient_id)
         # Auto-cleanup: if the drawer is now empty, remove the drawer too.
         if drawer.patient_count() == 0:
+            # Note: _on_remove_drawer also pushes a snapshot, but the second
+            # push is a no-op for undo correctness — the user just sees one
+            # extra step that quickly resolves to the same state.
             self._on_remove_drawer(organ_name)
         else:
             self._resync_tree_marks()
@@ -753,20 +1053,32 @@ class MatchContoursTab(QWidget):
         drawer = self._drawers.get(organ_name)
         if drawer is None:
             return
+        self._push_undo_snapshot()
         if drawer.remove_test(patient_id, sop_uid, roi_number):
+            # Remember the rejection so Run Auto-Match's test-refresh pass
+            # doesn't re-add this exact contour on a future run.
+            self._add_to_denylist(organ_name, patient_id, sop_uid, roi_number)
             self._resync_tree_marks()
 
     def _on_remove_red(self, organ_name: str) -> None:
         drawer = self._drawers.get(organ_name)
         if drawer is None:
             return
-        if drawer.remove_poor_matches():
+        self._push_undo_snapshot()
+        removed = drawer.remove_poor_matches()
+        if removed:
+            for pid, sop, roi in removed:
+                self._add_to_denylist(organ_name, pid, sop, roi)
             self._resync_tree_marks()
 
     def _on_remove_all_red(self) -> None:
+        self._push_undo_snapshot()
         total = 0
-        for drawer in self._drawers.values():
-            total += len(drawer.remove_poor_matches())
+        for organ_name, drawer in self._drawers.items():
+            removed = drawer.remove_poor_matches()
+            for pid, sop, roi in removed:
+                self._add_to_denylist(organ_name, pid, sop, roi)
+            total += len(removed)
         if total:
             self._resync_tree_marks()
             self._show_status(f"Removed {total} poor-match test row{'s' if total != 1 else ''}.")
@@ -901,6 +1213,23 @@ class MatchContoursTab(QWidget):
             )
             return
 
+        # If the GT identifier (manufacturer + filename criteria) has changed
+        # since the previous Auto-Match run, wipe existing drawers first.
+        # Otherwise stale GTs from the previous manufacturer linger on patients
+        # the new manufacturer doesn't cover. Same-identifier re-runs (e.g.
+        # the user added another organ to the template) keep existing drawers
+        # and merge in the new organs.
+        current_identifier = (gt_mfr, gt_filename)
+        previous_identifier = getattr(self, "_last_auto_match_identifier", None)
+        if previous_identifier is not None and previous_identifier != current_identifier:
+            self._reset_drawers()
+            self._resync_tree_marks()
+            self._show_status(
+                f"GT identifier changed ({_fmt_identifier(previous_identifier)} → "
+                f"{_fmt_identifier(current_identifier)}) — cleared previous drawers."
+            )
+        self._last_auto_match_identifier = current_identifier
+
         rules = self._replacement_rules()
         gt_tuples: list[tuple[str, str, int, str]] = []
         no_gt_patients: list[str] = []
@@ -1024,6 +1353,17 @@ def _find_gt_rtss(patient, gt_mfr: str, gt_filename: str) -> RTSTRUCTEntry | Non
             if gt_filename and gt_filename in rtss.filename.lower():
                 return rtss
     return None
+
+
+def _fmt_identifier(identifier: tuple[str, str]) -> str:
+    """Human-readable rendering of the (gt_mfr, gt_filename) tuple for status messages."""
+    mfr, fname = identifier
+    parts = []
+    if mfr:
+        parts.append(f"mfr='{mfr}'")
+    if fname:
+        parts.append(f"file~='{fname}'")
+    return " + ".join(parts) if parts else "(unset)"
 
 
 def _h_divider() -> QFrame:

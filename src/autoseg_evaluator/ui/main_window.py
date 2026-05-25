@@ -27,6 +27,7 @@ from autoseg_evaluator.data.session import (
     save_session,
 )
 from autoseg_evaluator.workers.metrics_worker import MetricsWorker
+from autoseg_evaluator.ui.tabs.build_consensus import BuildConsensusTab
 from autoseg_evaluator.ui.tabs.compute import ComputeTab
 from autoseg_evaluator.ui.tabs.load_data import LoadDataTab
 from autoseg_evaluator.ui.tabs.match_contours import MatchContoursTab
@@ -59,6 +60,7 @@ class MainWindow(QMainWindow):
 
         self._tabs = QTabWidget(self)
         self._load_tab = LoadDataTab(settings=self._settings, parent=self)
+        self._consensus_tab = BuildConsensusTab(settings=self._settings, parent=self)
         self._match_tab = MatchContoursTab(settings=self._settings, parent=self)
         self._compute_tab = ComputeTab(settings=self._settings, parent=self)
         self._results_tab = ResultsTab()
@@ -69,15 +71,17 @@ class MainWindow(QMainWindow):
         # Inner widgets (drawers, results table) still keep their own
         # scrolling when their content overflows.
         self._tabs.addTab(_wrap_scroll(self._load_tab), "1. Load Data")
-        self._tabs.addTab(_wrap_scroll(self._match_tab), "2. Match Contours")
-        self._tabs.addTab(_wrap_scroll(self._compute_tab), "3. Compute")
-        self._tabs.addTab(_wrap_scroll(self._results_tab), "4. Results")
+        self._tabs.addTab(_wrap_scroll(self._consensus_tab), "2. Build Consensus GT (Optional)")
+        self._tabs.addTab(_wrap_scroll(self._match_tab), "3. Match Contours")
+        self._tabs.addTab(_wrap_scroll(self._compute_tab), "4. Compute")
+        self._tabs.addTab(_wrap_scroll(self._results_tab), "5. Results")
         self._tabs.setCurrentIndex(int(self._settings.get("active_tab", 0)))
         self._results_tab.set_results_manager(self._results)
 
         # Wire cross-tab signals
         self._load_tab.libraryLoaded.connect(self._on_library_loaded)
         self._load_tab.overridesChanged.connect(self._on_overrides_changed)
+        self._consensus_tab.consensusGenerated.connect(self._on_consensus_generated)
         self._match_tab.replacementRulesChanged.connect(self._on_replacement_rules_changed)
         self._match_tab.templateChanged.connect(self._on_template_changed)
         self._compute_tab.metricConfigChanged.connect(self._on_metric_config_changed)
@@ -89,6 +93,7 @@ class MainWindow(QMainWindow):
     def _on_library_loaded(self, library: Any) -> None:
         """Stash the loaded library so Match Contours / Compute tabs can read it."""
         self._library = library
+        self._consensus_tab.set_library(library)
         self._match_tab.set_library(library)
         self._compute_tab.set_library(library)
         # Persist updated last_folder right away — survives crashes mid-session
@@ -96,6 +101,13 @@ class MainWindow(QMainWindow):
         # If a Load Session is in progress, this scan completion is the trigger
         # to apply the saved drawer state.
         self._on_library_loaded_post_session()
+
+    def _on_consensus_generated(self) -> None:
+        """User clicked Generate Consensus GT — refresh downstream tabs so the
+        synthetic RTSSes appear in their trees."""
+        if self._library is not None:
+            self._match_tab.set_library(self._library)
+            self._compute_tab.set_library(self._library)
 
     def _on_overrides_changed(self, overrides: dict[str, str]) -> None:
         self._settings["custom_source_labels"] = dict(overrides)
@@ -312,6 +324,7 @@ class MainWindow(QMainWindow):
             drawers_state=self._match_tab.session_state(),
             replacement_rules=list(self._settings.get("replacement_rules", []) or []),
             template=dict(self._settings.get("last_template", {}) or {}),
+            consensus_groups=self._consensus_tab.session_state(),
         )
         try:
             save_session(path, data)
@@ -366,6 +379,16 @@ class MainWindow(QMainWindow):
             return
         data = self._pending_session_restore
         self._pending_session_restore = None
+        # Consensus groups must be restored BEFORE drawers so the synthetic
+        # RTSSes exist in the library by the time the drawer-restore code
+        # tries to resolve their SOPInstanceUIDs.
+        consensus_groups = data.get("consensus_groups", []) or []
+        if consensus_groups:
+            self._consensus_tab.apply_session_state(consensus_groups)
+            # Refresh downstream tabs so the synthetic RTSSes appear in their trees.
+            if self._library is not None:
+                self._match_tab.set_library(self._library)
+                self._compute_tab.set_library(self._library)
         drawers_state = data.get("drawers", []) or []
         applied, missing, warnings = self._match_tab.apply_session_state(drawers_state)
         msg_lines = [f"Session restored: {applied} patient sub-section(s) loaded."]

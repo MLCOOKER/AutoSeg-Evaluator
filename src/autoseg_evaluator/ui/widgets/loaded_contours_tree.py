@@ -26,6 +26,7 @@ from autoseg_evaluator.ui.widgets.organ_drawer import ORGAN_MIME_TYPE
 _PATIENT_GLYPH = "👤"
 _CONTEXT_GLYPH = "🗂"
 _RTSS_GLYPH = "📄"
+_CONSTITUENT_SUFFIX = "  ▸ in STAPLE consensus"  # marker for files that fed a consensus
 
 
 # ItemDataRole keys we tuck onto QTreeWidgetItem ----
@@ -67,11 +68,25 @@ class LoadedContoursTree(QTreeWidget):
 
         # Track which organ items are already assigned somewhere (so we can ✓-mark them)
         self._marked_organs: set[tuple[str, str, int]] = set()  # (patient_id, sop_uid, roi_number)
+        # SOP UIDs of RTSSes that contributed to a synthetic STAPLE consensus
+        # — these are flagged with a visual marker so the user can see at a
+        # glance which files fed which consensus, without losing the ability
+        # to use them individually as GT or test contours.
+        self._constituent_uids: set[str] = set()
 
     # ---- Public API -------------------------------------------------------
 
     def populate(self, library: MetadataLibrary) -> None:
         self.clear()
+        # Collect every SOPInstanceUID that's a constituent of some synthetic
+        # STAPLE consensus, so the per-RTSS rendering can flag them. Stored
+        # per-populate so it stays in sync with whatever Build Consensus GT
+        # generated most recently.
+        self._constituent_uids = set()
+        for _pid, _for, syn in library.synthetic_consensus_entries():
+            for members in syn.constituent_groups.values():
+                for sop, _roi in members:
+                    self._constituent_uids.add(sop)
         for patient_id in sorted(library.patients):
             self.addTopLevelItem(self._make_patient_item(library.patients[patient_id]))
         # Leave everything collapsed on load — user expands what they need.
@@ -175,11 +190,42 @@ class LoadedContoursTree(QTreeWidget):
             parent_item.addChild(self._make_rtstruct_item(rtss, patient_id))
 
     def _make_rtstruct_item(self, rtss: RTSTRUCTEntry, patient_id: str) -> QTreeWidgetItem:
-        item = QTreeWidgetItem([f"{_RTSS_GLYPH}  {rtss.filename}", f"[{rtss.source_label}]"])
+        # Distinguish three rendering states:
+        # - Synthetic STAPLE consensus entry → distinct glyph + bold title,
+        #   informative tooltip.
+        # - Constituent of a synthetic consensus → trailing marker suffix +
+        #   tooltip explaining the relationship.
+        # - Plain RTSS → unchanged from before.
+        if rtss.is_synthetic_consensus:
+            title = f"{_RTSS_GLYPH}  {rtss.filename}"
+            tooltip = (
+                "Synthetic STAPLE consensus RTSS generated from "
+                f"{len(rtss.constituent_groups)} organ(s) across multiple raters. "
+                "Designate this as the GT in a drawer to compare AI contours "
+                "against the consensus reference."
+            )
+        elif rtss.sop_instance_uid in self._constituent_uids:
+            title = f"{_RTSS_GLYPH}  {rtss.filename}{_CONSTITUENT_SUFFIX}"
+            tooltip = (
+                "This RTSS contributed to a synthetic STAPLE consensus generated "
+                "in the Build Consensus GT tab. The consensus is also present "
+                "in this tree (with source label 'STAPLE Consensus'). You can "
+                "still use this file directly as a GT or test contour if you "
+                "want to compare individual raters against the consensus."
+            )
+        else:
+            title = f"{_RTSS_GLYPH}  {rtss.filename}"
+            tooltip = ""
+        item = QTreeWidgetItem([title, f"[{rtss.source_label}]"])
         item.setData(0, ROLE_NODE_KIND, "rtstruct")
         item.setData(0, ROLE_PATIENT_ID, patient_id)
         item.setData(0, ROLE_RTSS_SOP_UID, rtss.sop_instance_uid)
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
+        if tooltip:
+            item.setToolTip(0, tooltip)
+            item.setToolTip(1, tooltip)
+        if rtss.is_synthetic_consensus:
+            _bold(item, 0)
         # Sort organs alphabetically (case-insensitive) regardless of file order
         for organ in sorted(rtss.organs, key=lambda o: o.roi_name.lower()):
             item.addChild(
