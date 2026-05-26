@@ -382,7 +382,63 @@ def test_run_auto_match_warns_when_no_gt_criterion(qapp, populated_library):
     }
     tab._on_run_auto_match_clicked()
     assert tab._drawers == {}
-    assert "Manufacturer or filename criterion" in tab._status_label.text()
+    assert "source-label or filename criterion" in tab._status_label.text()
+
+
+def test_find_gt_rtss_matches_source_label_not_just_manufacturer():
+    """The template should match against the cascade-resolved source_label.
+
+    Regression for the v2.2-and-earlier behaviour where ``_find_gt_rtss``
+    queried ``rtss.manufacturer`` only, so RTSSes whose source label came
+    from StructureSetLabel / SoftwareVersions / filename / or a user
+    override couldn't be picked up by the template.
+    """
+    from types import SimpleNamespace
+
+    from autoseg_evaluator.data.metadata import RTSTRUCTEntry
+    from autoseg_evaluator.ui.tabs.match_contours import _find_gt_rtss
+
+    rtss = RTSTRUCTEntry(
+        sop_instance_uid="1.2.3",
+        file_path="/tmp/inhouse.dcm",
+        manufacturer="",  # raw tag empty
+        source_label="InHouseUNet",  # cascade resolved via StructureSetLabel
+        source_origin="label",
+        frame_of_reference_uid="for-1",
+        study_instance_uid="study-1",
+        structure_set_label="InHouseUNet",
+    )
+    patient = SimpleNamespace(contexts=[SimpleNamespace(rtstructs=[rtss])])
+    # Matches against source_label even though Manufacturer is empty.
+    assert _find_gt_rtss(patient, "inhouse", "") is rtss
+    # Negative: a substring that doesn't appear in source_label fails.
+    assert _find_gt_rtss(patient, "limbus", "") is None
+
+
+def test_find_gt_rtss_honours_user_override_on_source_label():
+    """An RTSS with a user-overridden source_label should be findable by it.
+
+    The scanner stores the override in ``source_label`` (cascade step 1 is
+    the user override), so ``_find_gt_rtss`` matches on the new label.
+    """
+    from types import SimpleNamespace
+
+    from autoseg_evaluator.data.metadata import RTSTRUCTEntry
+    from autoseg_evaluator.ui.tabs.match_contours import _find_gt_rtss
+
+    # User overrode the source label — original Manufacturer was 'Limbus AI Inc.'
+    # but the user simplified it to 'Limbus' across all rows for consistency.
+    rtss = RTSTRUCTEntry(
+        sop_instance_uid="1.2.4",
+        file_path="/tmp/lim.dcm",
+        manufacturer="Limbus AI Inc.",
+        source_label="Limbus",  # ← user override
+        source_origin="custom",
+        frame_of_reference_uid="for-1",
+        study_instance_uid="study-1",
+    )
+    patient = SimpleNamespace(contexts=[SimpleNamespace(rtstructs=[rtss])])
+    assert _find_gt_rtss(patient, "limbus", "") is rtss
 
 
 def test_run_auto_match_skips_patients_with_no_gt_rtss(qapp, populated_library):

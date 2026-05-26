@@ -4,6 +4,36 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — 2026-05-26
+
+### Fixed
+- **Template GT identifier now matches the source label, not just the
+  raw Manufacturer tag.** ``_find_gt_rtss`` queries ``rtss.source_label``
+  — the cascade-resolved display name with any Manage Source Labels
+  override applied — instead of the raw DICOM ``Manufacturer`` tag.
+  This makes the template work for RTSSes whose source came from a
+  later cascade step (StructureSetLabel, SoftwareVersions, filename)
+  AND honours user overrides, which were previously ignored.
+- The Define Template dialog field is renamed from
+  ``Manufacturer contains:`` to ``Source label contains:`` to reflect
+  the new behaviour, with updated hint text. Settings key migrated to
+  ``gt_source_label`` (the legacy ``gt_manufacturer`` key is still
+  read as a fallback so v2.2-era templates load unchanged).
+
+### Added
+- **Manage Source Labels dialog** now displays six raw DICOM
+  identification fields as separate columns alongside the detected
+  source: ``Manufacturer``, ``StructureSetLabel``, ``SoftwareVersions``,
+  ``StructureSetName``, ``StructureSetDescription``,
+  ``ManufacturerModelName``. Lets users disambiguate two RTSSes from
+  the same vendor (e.g. v3 vs v4 of a product, or 'manual' vs 'auto'
+  exports that share a Manufacturer string) and bulk-override
+  accordingly. Dialog defaults to 1400 × 560 to accommodate the new
+  columns.
+- ``RTSTRUCTEntry`` data model gains 5 optional fields backing the new
+  columns. All default to empty string so older sessions load
+  unchanged.
+
 ## [2.2.0] — 2026-05-26
 
 ### Added

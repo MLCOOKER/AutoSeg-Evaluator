@@ -56,6 +56,16 @@ class RTSTRUCTEntry:
     frame_of_reference_uid: str
     study_instance_uid: str
     organs: list[OrganEntry] = field(default_factory=list)
+    # Additional raw DICOM fields surfaced in Manage Source Labels so the
+    # user can disambiguate two RTSSes from the same vendor (e.g. v3 vs v4
+    # of the same product, or "manual" vs "auto" sets with identical
+    # Manufacturer). All optional — empty string when the tag is absent
+    # so older sessions and tests don't need to know about them.
+    structure_set_label: str = ""
+    software_versions: str = ""
+    structure_set_name: str = ""
+    structure_set_description: str = ""
+    manufacturer_model_name: str = ""
 
     # ---- Synthetic STAPLE-consensus support ---------------------------------
     # When True, this entry has no real DICOM file backing it. The masks are
@@ -310,6 +320,11 @@ class MetadataLibrary:
                 frame_of_reference_uid=for_uid,
                 study_instance_uid=study_uid,
                 organs=organs,
+                structure_set_label=_get_str(ds, "StructureSetLabel"),
+                software_versions=_get_str(ds, "SoftwareVersions"),
+                structure_set_name=_get_str(ds, "StructureSetName"),
+                structure_set_description=_get_str(ds, "StructureSetDescription"),
+                manufacturer_model_name=_get_str(ds, "ManufacturerModelName"),
             )
         )
 

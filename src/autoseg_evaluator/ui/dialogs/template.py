@@ -4,12 +4,16 @@ The user specifies:
 
 * a list of organ names to set as ground truth (one per patient),
 * a way to identify the GT RTSS file within each patient — either by a
-  substring of its ``Manufacturer`` tag, or by a substring of its
-  filename, or both,
+  substring of its **source label** (the cascade-resolved display name,
+  honouring any Manage Source Labels override), or by a substring of
+  its filename, or both,
 * a string-similarity threshold below which test matches are flagged.
 
 The template is persisted in ``settings.json`` under ``last_template`` so
 the user resumes with their previous configuration on the next launch.
+The current settings key is ``gt_source_label``; older settings files
+with the v2.2-and-earlier ``gt_manufacturer`` key are still loaded for
+backward-compatibility.
 """
 
 from __future__ import annotations
@@ -76,15 +80,18 @@ class TemplateDialog(QDialog):
         id_box = QGroupBox("Identify the GT RTSS file by…")
         id_form = QFormLayout(id_box)
         self._mfr_edit = QLineEdit()
-        self._mfr_edit.setPlaceholderText("e.g. Varian Medical Systems")
-        id_form.addRow("Manufacturer contains:", self._mfr_edit)
+        self._mfr_edit.setPlaceholderText("e.g. Limbus, MIM, Varian, manual…")
+        id_form.addRow("Source label contains:", self._mfr_edit)
         self._filename_edit = QLineEdit()
         self._filename_edit.setPlaceholderText("e.g. manual")
         id_form.addRow("Filename contains:", self._filename_edit)
         hint = QLabel(
-            "<i>An RTSS file matches if its Manufacturer tag OR its filename "
-            "contains the corresponding substring (case-insensitive). Leave "
-            "blank to ignore that criterion.</i>"
+            "<i>An RTSS file matches if its <b>source label</b> OR its filename "
+            "contains the corresponding substring (case-insensitive). The source "
+            "label is the column shown in the cohort tree and on every drawer — "
+            "i.e. the cascade-resolved name (Manufacturer → StructureSetLabel → "
+            "SoftwareVersions → … → filename) with any Manage Source Labels "
+            "override applied. Leave blank to ignore that criterion.</i>"
         )
         hint.setWordWrap(True)
         id_form.addRow(hint)
@@ -114,7 +121,12 @@ class TemplateDialog(QDialog):
     def _populate(self) -> None:
         organs = self._existing.get("organs", []) or []
         self._organs_edit.setPlainText("\n".join(str(o) for o in organs))
-        self._mfr_edit.setText(str(self._existing.get("gt_manufacturer", "")))
+        # Read the new ``gt_source_label`` key, falling back to the legacy
+        # ``gt_manufacturer`` key for templates saved by v2.2 and earlier.
+        legacy_or_new = self._existing.get(
+            "gt_source_label", self._existing.get("gt_manufacturer", "")
+        )
+        self._mfr_edit.setText(str(legacy_or_new))
         self._filename_edit.setText(str(self._existing.get("gt_filename", "")))
         try:
             thr = float(self._existing.get("similarity_threshold", 0.6))
@@ -128,7 +140,7 @@ class TemplateDialog(QDialog):
         ]
         self._result = {
             "organs": organs,
-            "gt_manufacturer": self._mfr_edit.text().strip(),
+            "gt_source_label": self._mfr_edit.text().strip(),
             "gt_filename": self._filename_edit.text().strip(),
             "similarity_threshold": float(self._threshold_spin.value()),
         }

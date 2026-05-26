@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -39,6 +41,57 @@ _ORIGIN_DESCRIPTIONS = {
     "unknown": "no source",
 }
 
+# Column indices — when bumping these, also update _populate_table,
+# _on_reset_all, _on_bulk_apply, and _on_apply (they read/write the
+# editable column by index).
+_COL_FILE = 0
+_COL_PATIENT = 1
+_COL_DETECTED = 2
+_COL_ORIGIN = 3
+_COL_MANUFACTURER = 4
+_COL_STRUCT_SET_LABEL = 5
+_COL_SOFTWARE_VERSIONS = 6
+_COL_STRUCT_SET_NAME = 7
+_COL_STRUCT_SET_DESCRIPTION = 8
+_COL_MANUFACTURER_MODEL = 9
+_COL_CUSTOM = 10
+_COL_HEADERS = [
+    "File",
+    "Patient",
+    "Detected source",
+    "Origin",
+    "Manufacturer",
+    "StructureSetLabel",
+    "SoftwareVersions",
+    "StructureSetName",
+    "StructureSetDescription",
+    "ManufacturerModelName",
+    "Custom label",
+]
+
+# Initial column widths (px). Applied on first open; the user can drag
+# any column divider to adjust. Numbers picked to fit typical DICOM
+# string lengths without horizontal scrolling on the 1400-px default
+# dialog width.
+_DEFAULT_COLUMN_WIDTHS: list[int] = [
+    220,  # File
+    80,  # Patient
+    180,  # Detected source
+    130,  # Origin
+    130,  # Manufacturer
+    150,  # StructureSetLabel
+    130,  # SoftwareVersions
+    130,  # StructureSetName
+    180,  # StructureSetDescription
+    170,  # ManufacturerModelName
+    180,  # Custom label
+]
+
+# Identity / interaction columns are always shown — hiding them would
+# leave the dialog unusable. Every other column is toggleable via the
+# header context menu.
+_NON_HIDEABLE_COLUMNS: frozenset[int] = frozenset({0, 1, 10})  # File, Patient, Custom label
+
 
 class ManageSourceLabelsDialog(QDialog):
     """Edit the SOPInstanceUID → custom source-label mapping.
@@ -54,7 +107,9 @@ class ManageSourceLabelsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Manage Source Labels")
-        self.resize(900, 500)
+        # Wider default since v2.3 adds 6 raw DICOM columns alongside the
+        # detected source. Users can still resize or maximise the dialog.
+        self.resize(1400, 560)
 
         self._library = library
         self._existing = dict(existing_overrides)
@@ -70,16 +125,16 @@ class ManageSourceLabelsDialog(QDialog):
             "Override the detected source label for any RTSTRUCT below. Custom "
             "labels persist across sessions and apply everywhere the source is "
             "shown (drawers, results CSV, etc.). Leave the field blank to keep "
-            "the auto-detected value."
+            "the auto-detected value. "
+            "<i>Tip: right-click any column header to show or hide DICOM "
+            "columns, and drag the dividers to resize.</i>"
         )
         info.setWordWrap(True)
         layout.addWidget(info)
 
         self._table = QTableWidget(self)
-        self._table.setColumnCount(5)
-        self._table.setHorizontalHeaderLabels(
-            ["File", "Patient", "Detected source", "Origin", "Custom label"]
-        )
+        self._table.setColumnCount(len(_COL_HEADERS))
+        self._table.setHorizontalHeaderLabels(_COL_HEADERS)
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(
@@ -95,12 +150,21 @@ class ManageSourceLabelsDialog(QDialog):
         self._table.horizontalHeader().setSortIndicatorShown(True)
         self._table.horizontalHeader().setSectionsClickable(True)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        # All columns are user-resizable. Sensible initial widths are
+        # applied via _DEFAULT_COLUMN_WIDTHS; the user can drag any
+        # divider, and the bottom-right corner of the dialog itself is
+        # resizable for the full table width.
+        for col in range(len(_COL_HEADERS)):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+            header.resizeSection(col, _DEFAULT_COLUMN_WIDTHS[col])
+        # Right-click the header to toggle column visibility — lets users
+        # hide DICOM columns they don't need without losing the data
+        # (they remain part of the model, just not drawn).
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._show_column_visibility_menu)
         self._table.itemSelectionChanged.connect(self._refresh_bulk_button)
+        # Wider default so the new DICOM-field columns are visible without
+        # the user having to resize on first open.
         layout.addWidget(self._table, stretch=1)
 
         # Bulk-apply row: select rows in the table, type a label, click apply.
@@ -155,17 +219,32 @@ class ManageSourceLabelsDialog(QDialog):
             # what they're replacing.
             detected_label, detected_origin = _detected_for(rtss)
 
-            self._set_readonly_cell(row, 0, rtss.filename)
-            self._set_readonly_cell(row, 1, patient_id)
-            self._set_readonly_cell(row, 2, detected_label)
+            self._set_readonly_cell(row, _COL_FILE, rtss.filename)
+            self._set_readonly_cell(row, _COL_PATIENT, patient_id)
+            self._set_readonly_cell(row, _COL_DETECTED, detected_label)
             self._set_readonly_cell(
-                row, 3, _ORIGIN_DESCRIPTIONS.get(detected_origin, detected_origin)
+                row,
+                _COL_ORIGIN,
+                _ORIGIN_DESCRIPTIONS.get(detected_origin, detected_origin),
+            )
+            # Raw DICOM fields — surfaced so the user can disambiguate two
+            # RTSSes whose detected source labels happen to collide (e.g.
+            # two model versions from the same vendor).
+            self._set_readonly_cell(row, _COL_MANUFACTURER, rtss.manufacturer or "")
+            self._set_readonly_cell(row, _COL_STRUCT_SET_LABEL, rtss.structure_set_label or "")
+            self._set_readonly_cell(row, _COL_SOFTWARE_VERSIONS, rtss.software_versions or "")
+            self._set_readonly_cell(row, _COL_STRUCT_SET_NAME, rtss.structure_set_name or "")
+            self._set_readonly_cell(
+                row, _COL_STRUCT_SET_DESCRIPTION, rtss.structure_set_description or ""
+            )
+            self._set_readonly_cell(
+                row, _COL_MANUFACTURER_MODEL, rtss.manufacturer_model_name or ""
             )
 
             custom = self._existing.get(rtss.sop_instance_uid, "")
             edit_item = QTableWidgetItem(custom)
             edit_item.setData(Qt.ItemDataRole.UserRole, rtss.sop_instance_uid)
-            self._table.setItem(row, 4, edit_item)
+            self._table.setItem(row, _COL_CUSTOM, edit_item)
 
         self._table.setSortingEnabled(was_sorted)
 
@@ -174,9 +253,39 @@ class ManageSourceLabelsDialog(QDialog):
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         self._table.setItem(row, col, item)
 
+    def _show_column_visibility_menu(self, pos: QPoint) -> None:
+        """Header right-click → checkable list of column visibility toggles.
+
+        File / Patient / Custom label are pinned visible (hiding them
+        leaves the dialog unusable); every other column can be toggled.
+        A 'Show all' action restores everything.
+        """
+        menu = QMenu(self)
+        for col, header_text in enumerate(_COL_HEADERS):
+            if col in _NON_HIDEABLE_COLUMNS:
+                continue
+            action = QAction(header_text, menu)
+            action.setCheckable(True)
+            action.setChecked(not self._table.isColumnHidden(col))
+            # Default-arg trick to bind ``col`` at iteration time rather
+            # than capturing the loop variable by reference.
+            action.toggled.connect(
+                lambda checked, c=col: self._table.setColumnHidden(c, not checked)
+            )
+            menu.addAction(action)
+        menu.addSeparator()
+        show_all = QAction("Show all columns", menu)
+        show_all.triggered.connect(self._show_all_columns)
+        menu.addAction(show_all)
+        menu.exec(self._table.horizontalHeader().mapToGlobal(pos))
+
+    def _show_all_columns(self) -> None:
+        for col in range(self._table.columnCount()):
+            self._table.setColumnHidden(col, False)
+
     def _on_reset_all(self) -> None:
         for row in range(self._table.rowCount()):
-            edit_item = self._table.item(row, 4)
+            edit_item = self._table.item(row, _COL_CUSTOM)
             if edit_item is not None:
                 edit_item.setText("")
 
@@ -195,7 +304,7 @@ class ManageSourceLabelsDialog(QDialog):
             return
         value = (self._bulk_edit.text() or "").strip()
         for row in rows:
-            edit_item = self._table.item(row, 4)
+            edit_item = self._table.item(row, _COL_CUSTOM)
             if edit_item is not None:
                 edit_item.setText(value)
         self._bulk_edit.clear()
@@ -203,7 +312,7 @@ class ManageSourceLabelsDialog(QDialog):
     def _on_apply(self) -> None:
         overrides: dict[str, str] = {}
         for row in range(self._table.rowCount()):
-            edit_item = self._table.item(row, 4)
+            edit_item = self._table.item(row, _COL_CUSTOM)
             if edit_item is None:
                 continue
             sop_uid = edit_item.data(Qt.ItemDataRole.UserRole)
