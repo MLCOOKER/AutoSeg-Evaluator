@@ -4,6 +4,75 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-05-26
+
+First public portable-bundle release. Adds the Build Consensus GT tab,
+the distribution + CI pipeline, and a substantial accuracy / UX pass on
+top of the in-development 2.0.0 baseline.
+
+### Added
+- **Build Consensus GT tab** (Tab 2): cluster manual rater RTSSes by
+  organ via best-score-first thresholded matching, compute pairwise
+  inter-observer variability across multiple groups in one batch
+  (configurable metrics, tolerance overrides, progress bar, cancel),
+  and optionally generate STAPLE-derived synthetic ground-truth RTSSes
+  that flow into Match Contours as designated GT (with deterministic
+  synthetic SOPInstanceUID).
+- **Per-organ RAM eviction** in the inter-observer worker — peak RAM
+  bounded by a single organ's masks rather than a whole patient's
+  contour set; drops ~12× on 5-rater × 12-organ patients.
+- **Tolerance values baked into headers** for Surface Dice and APL in
+  both the results table and CSV export (`Surface Dice @ 3.00 mm`),
+  preventing silent cross-tolerance merges in Excel.
+- **Portable Windows bundle** (`scripts/build_portable.py`): builds a
+  self-contained CPython 3.11 embeddable distribution with every
+  dependency as inspectable `.py` / `.pyd` files under
+  `python\Lib\site-packages\`. No PyInstaller blob, no Python install,
+  no admin rights, no registry writes, no internet required at the
+  end user — hospital-IT friendly.
+- **GitHub Actions release pipeline** (`.github/workflows/release.yml`):
+  builds + attaches the portable bundle to a GitHub Release on every
+  `v*` tag push.
+- **GitHub Actions CI** (`.github/workflows/ci.yml`): ruff + 259-test
+  pytest suite on Windows + Linux with headless Qt
+  (`QT_QPA_PLATFORM=offscreen`) on every push and PR.
+- **`docs/PROJECT_OVERVIEW.md`**: ~5 000-word architecture reference for
+  manuscript drafting and future LLM-assisted modifications.
+- **README**: from-source install instructions for macOS and Linux
+  (apt / dnf / pacman) including the libxcb-* Qt deps.
+
+### Fixed
+- **Tab 3 cancel** now interrupts computation mid-patient (not just
+  between drawers) — `_cancelled` checks threaded into per-test mask
+  load, per-GT row, before STAPLE, and per-rater STAPLE row.
+- **Tab 2 inter-observer cancel** no longer reopens the progress dialog
+  one contour-pair later — `QProgressDialog.setAutoReset(False)` +
+  `setAutoClose(False)`, cancel check inside the organ loop, and
+  `_tick_progress` skips `setValue` when already cancelled.
+- **Greedy first-fit clustering bug** ("Parotid_L matched with
+  A_Carotid_L") replaced with best-score-first ordering: pre-score all
+  organs, sort by descending best-score, then assign — ensures the
+  strongest matches claim their natural bucket first.
+- **Help dialog on Match Contours** now opens (missing `QMessageBox`
+  import + dialog parented to `self.window()` to render through the
+  `QScrollArea` wrapper).
+- **Clear All** is now undoable via Ctrl+Z (pushes a session snapshot
+  onto the undo stack before wiping, instead of clearing the stack).
+
+### Changed
+- **Synthetic RTSS UIDs** are now fully deterministic
+  (`AUTOSEG.SYNTHETIC.{hash(patient_id|source_label)}`) — re-running
+  consensus generation on the same group produces the same UID,
+  enabling reproducible session round-trips.
+- **Ruff lint config** ignores N802 / N803 / N813 / N815 (Qt API
+  convention) plus stylistic-only rules B905 / SIM108 / SIM102. The
+  remaining ruleset (E / F / W / I / UP / B / SIM minus the above)
+  is enforced in CI.
+
+### Removed
+- "Re-run auto-match for selected group" button in Tab 2 (redundant
+  with the main Run Auto-Match flow).
+
 ## [2.0.0] — 2026-05-22
 
 First public release of the v2 rewrite. Full migration from the single-window
