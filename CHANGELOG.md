@@ -7,11 +7,17 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 ## [2.0.0] — 2026-05-22
 
 First public release of the v2 rewrite. Full migration from the single-window
-PyQt5 prototype (`GUI23v13.py`) to a modular four-tab PySide6 application with
+PyQt5 prototype (`GUI23v13.py`) to a modular five-tab PySide6 application with
 substantially expanded clinical functionality.
 
 ### Added
-- Four-tab workflow: Load Data → Match Contours → Compute → Results.
+- Five-tab workflow: Load Data → Build Consensus GT *(optional)* → Match
+  Contours → Compute → Results.
+- Build Consensus GT tab — cluster manual rater RTSSes, compute pairwise
+  inter-observer variability (multi-group selection, configurable metrics,
+  tolerance overrides, progress + cancel), and optionally generate a
+  STAPLE-derived synthetic ground-truth RTSS that flows into Tab 3 as a
+  designated GT (with deterministic synthetic UID).
 - Organ-drawer accordion UI grouping multi-patient comparisons by structure.
 - Save / load session JSON for resuming curated matches across runs.
 - TG-263 synonym dictionary (663 canonical names, ~17 000 variants generated
@@ -29,6 +35,15 @@ substantially expanded clinical functionality.
 - Dark / light theme toggle (`View → Theme`) with a VS Code-inspired
   high-contrast dark palette.
 - Manage Source Labels dialog with bulk-apply for multi-row overrides.
+- Tolerance values (τ for Surface Dice and APL) baked into results table
+  and CSV column headers (e.g. `Surface Dice @ 3.00 mm`) so CSVs computed at
+  different tolerances can't be silently merged.
+- Portable Windows bundle build script (`scripts/build_portable.py`)
+  producing a self-contained CPython 3.11 embeddable distribution with all
+  dependencies as inspectable `.py` / `.pyd` files — hospital-IT friendly,
+  no PyInstaller blob, no installation required.
+- GitHub Actions CI (ruff + pytest on Windows + Linux, headless Qt) and
+  release pipeline (builds + attaches portable bundle on `v*` tag push).
 
 ### Changed
 - GUI framework migrated PyQt5 → PySide6 (LGPL).
