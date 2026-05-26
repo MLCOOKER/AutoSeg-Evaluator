@@ -28,7 +28,6 @@ from typing import Literal, TypeVar
 import numpy as np
 from scipy import spatial
 
-
 T = TypeVar("T")
 
 # ``match_method`` values. ``tg263`` means both inputs resolved to the same

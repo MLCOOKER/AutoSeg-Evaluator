@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPainter
+from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -27,8 +27,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QStyle,
-    QStyleOptionHeader,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -36,7 +34,6 @@ from PySide6.QtWidgets import (
 )
 
 from autoseg_evaluator.data.results import META_COLUMNS, ResultsManager, metric_display_label
-
 
 _ERROR_BG = QColor("#FFE0E0")
 
@@ -50,13 +47,13 @@ _ERROR_BG = QColor("#FFE0E0")
 # (the stripe is only ~4 px tall along the header bottom — needs strong
 # colour to be discernible at that size).
 _GROUP_BANDS: dict[str, tuple[str, QColor]] = {
-    "identifier": ("Identifier columns", QColor("#5C6BC0")),    # indigo
-    "overlap":    ("Volumetric overlap", QColor("#00ACC1")),    # cyan
-    "surface":    ("Surface distances", QColor("#FB8C00")),     # orange
-    "apl":        ("Added Path Length", QColor("#FDD835")),     # yellow
-    "volume":     ("Volume + COM", QColor("#43A047")),          # green
-    "staple":     ("STAPLE consensus", QColor("#EC407A")),      # pink
-    "dvh":        ("Dose-volume histogram", QColor("#8E24AA")), # purple
+    "identifier": ("Identifier columns", QColor("#5C6BC0")),  # indigo
+    "overlap": ("Volumetric overlap", QColor("#00ACC1")),  # cyan
+    "surface": ("Surface distances", QColor("#FB8C00")),  # orange
+    "apl": ("Added Path Length", QColor("#FDD835")),  # yellow
+    "volume": ("Volume + COM", QColor("#43A047")),  # green
+    "staple": ("STAPLE consensus", QColor("#EC407A")),  # pink
+    "dvh": ("Dose-volume histogram", QColor("#8E24AA")),  # purple
 }
 
 
@@ -113,16 +110,13 @@ def _band_for_metric_key(key: str) -> str:
         return "apl"
     if key.startswith("volume_") or key.startswith("com_"):
         return "volume"
-    if (
-        key.startswith("staple_")
-        or key in (
-            "consensus_volume_cc",
-            "rater_disagreement_cc",
-            "rater_volume_range_cc",
-            "uncertain_band_cc",
-            "mean_entropy",
-            "n_raters",
-        )
+    if key.startswith("staple_") or key in (
+        "consensus_volume_cc",
+        "rater_disagreement_cc",
+        "rater_volume_range_cc",
+        "uncertain_band_cc",
+        "mean_entropy",
+        "n_raters",
     ):
         return "staple"
     # DVH built-ins or dynamic ``d{X}_gy`` / ``v{X}gy_cc``
@@ -172,8 +166,7 @@ class ResultsTab(QWidget):
         meta_labels = [label for _, label in META_COLUMNS]
         sd_tau, apl_tau = self._results_mgr.tolerances()
         headers = meta_labels + [
-            metric_display_label(k, sd_tau_mm=sd_tau, apl_tau_mm=apl_tau)
-            for k in metric_cols
+            metric_display_label(k, sd_tau_mm=sd_tau, apl_tau_mm=apl_tau) for k in metric_cols
         ]
 
         # Re-build with sorting disabled to keep insertion order stable
@@ -208,9 +201,7 @@ class ResultsTab(QWidget):
             m = row.get("metrics") or {}
             for c_off, key in enumerate(metric_cols):
                 value = m.get(key, "")
-                self._table.setItem(
-                    r, len(meta_keys) + c_off, _make_item(value, error_bg=is_error)
-                )
+                self._table.setItem(r, len(meta_keys) + c_off, _make_item(value, error_bg=is_error))
 
         self._autosize_columns()
         if was_sorted:

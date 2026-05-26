@@ -13,9 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout
 
-# Re-use the synthetic DICOM writers from test_metadata.py
-from test_metadata import _write_ct_slice, _write_rtstruct  # noqa: E402
-
 from autoseg_evaluator.data.metadata import MetadataLibrary  # noqa: E402
 from autoseg_evaluator.ui.widgets.collapsible_box import CollapsibleBox  # noqa: E402
 from autoseg_evaluator.ui.widgets.loaded_contours_tree import LoadedContoursTree  # noqa: E402
@@ -25,6 +22,9 @@ from autoseg_evaluator.ui.widgets.organ_drawer import (  # noqa: E402
     TestRow,
 )
 from autoseg_evaluator.ui.widgets.signal_bar import SignalBar  # noqa: E402
+
+# Re-use the synthetic DICOM writers from test_metadata.py
+from test_metadata import _write_ct_slice, _write_rtstruct  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -212,7 +212,9 @@ def test_loaded_contours_tree_populates_from_library(qapp, tmp_path):
     folder = tmp_path
     study_uid = generate_uid()
     for_uid = generate_uid()
-    _write_ct_slice(folder, patient_id="HN1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
+    _write_ct_slice(
+        folder, patient_id="HN1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+    )
     _write_rtstruct(
         folder,
         patient_id="HN1",
@@ -243,7 +245,9 @@ def test_loaded_contours_tree_populates_from_library(qapp, tmp_path):
     assert patient_item.childCount() == 2  # two RTSTRUCTs
     # Each RTSTRUCT carries its organs as children
     rtss_item = patient_item.child(0)
-    organ_names = [rtss_item.child(i).data(0, 261) for i in range(rtss_item.childCount())]  # ROLE_ROI_NAME
+    organ_names = [
+        rtss_item.child(i).data(0, 261) for i in range(rtss_item.childCount())
+    ]  # ROLE_ROI_NAME
     assert set(organ_names) >= {"Prostate"}  # Prostate appears in both
 
 
@@ -253,7 +257,9 @@ def test_loaded_contours_tree_marks_organs(qapp, tmp_path):
     folder = tmp_path
     study_uid = generate_uid()
     for_uid = generate_uid()
-    _write_ct_slice(folder, patient_id="HN1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
+    _write_ct_slice(
+        folder, patient_id="HN1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+    )
     _write_rtstruct(
         folder,
         patient_id="HN1",

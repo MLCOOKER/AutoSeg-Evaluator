@@ -27,12 +27,10 @@ the consensus summary row.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import numpy as np
 import SimpleITK as sitk
-
 
 # ---- Configuration -------------------------------------------------------
 
@@ -71,7 +69,7 @@ class StapleConfig:
     bbox_padding_max_voxels: int = 25
 
     @classmethod
-    def from_dict(cls, d: dict | None) -> "StapleConfig":
+    def from_dict(cls, d: dict | None) -> StapleConfig:
         d = dict(d or {})
         return cls(
             max_iterations=int(d.get("max_iterations", 100)),
@@ -95,20 +93,20 @@ class StapleResult:
     for tracking which index belonged to which rater.
     """
 
-    consensus_mask: sitk.Image          # uint8 binary, P ≥ 0.5
-    probability_map: sitk.Image         # float32 in [0, 1]
+    consensus_mask: sitk.Image  # uint8 binary, P ≥ 0.5
+    probability_map: sitk.Image  # float32 in [0, 1]
     sensitivities: list[float]
     specificities: list[float]
     elapsed_iterations: int
     max_iterations: int
     n_raters: int
     consensus_volume_cc: float
-    uncertain_band_cc: float            # voxels with 0.2 < P < 0.8 (often 0 once STAPLE converges)
-    mean_entropy: float                 # binary entropy over P > 0.05 voxels
-    rater_disagreement_cc: float        # voxels where raters split (some yes, some no)
-    rater_volume_range_cc: float        # max(per-rater volume) − min(per-rater volume)
-    bbox_padding_used: int = 0          # actual voxel-ring padding selected by the adaptive sizer
-    bbox_fg_ratio: float = 0.0          # foreground-to-bbox ratio after padding (diagnostic)
+    uncertain_band_cc: float  # voxels with 0.2 < P < 0.8 (often 0 once STAPLE converges)
+    mean_entropy: float  # binary entropy over P > 0.05 voxels
+    rater_disagreement_cc: float  # voxels where raters split (some yes, some no)
+    rater_volume_range_cc: float  # max(per-rater volume) − min(per-rater volume)
+    bbox_padding_used: int = 0  # actual voxel-ring padding selected by the adaptive sizer
+    bbox_fg_ratio: float = 0.0  # foreground-to-bbox ratio after padding (diagnostic)
 
     @property
     def converged(self) -> bool:
@@ -178,7 +176,9 @@ def compute_staple(
     # that were never cropped.
     bin_cropped = sitk.BinaryThreshold(prob_cropped, lowerThreshold=0.5, upperThreshold=1.0)
     bin_cropped = sitk.Cast(bin_cropped, sitk.sitkUInt8)
-    probability_map = _pad_back(prob_cropped, reference, bbox, default=0.0, pixel_type=sitk.sitkFloat32)
+    probability_map = _pad_back(
+        prob_cropped, reference, bbox, default=0.0, pixel_type=sitk.sitkFloat32
+    )
     consensus_mask = _pad_back(bin_cropped, reference, bbox, default=0, pixel_type=sitk.sitkUInt8)
 
     # Scalar uncertainty summaries
@@ -299,7 +299,9 @@ def _bbox_from_union(
     return x0, y0, z0, x1, y1, z1
 
 
-def _union_bounding_box(masks: list[sitk.Image], padding: int) -> tuple[int, int, int, int, int, int]:
+def _union_bounding_box(
+    masks: list[sitk.Image], padding: int
+) -> tuple[int, int, int, int, int, int]:
     """Return ``(x0, y0, z0, x1, y1, z1)`` of the padded union bounding box (inclusive)."""
     size = masks[0].GetSize()  # (x, y, z)
     union = None
@@ -328,7 +330,7 @@ def _union_bounding_box(masks: list[sitk.Image], padding: int) -> tuple[int, int
 
 def _crop(image: sitk.Image, bbox: tuple[int, int, int, int, int, int]) -> sitk.Image:
     x0, y0, z0, x1, y1, z1 = bbox
-    return image[x0:x1 + 1, y0:y1 + 1, z0:z1 + 1]
+    return image[x0 : x1 + 1, y0 : y1 + 1, z0 : z1 + 1]
 
 
 def _pad_back(
@@ -343,11 +345,13 @@ def _pad_back(
     ref_size = reference.GetSize()  # (x, y, z)
     x0, y0, z0, x1, y1, z1 = bbox
     # numpy shape order is (z, y, x)
-    arr = np.full((ref_size[2], ref_size[1], ref_size[0]),
-                  default,
-                  dtype=np.float32 if pixel_type == sitk.sitkFloat32 else np.uint8)
+    arr = np.full(
+        (ref_size[2], ref_size[1], ref_size[0]),
+        default,
+        dtype=np.float32 if pixel_type == sitk.sitkFloat32 else np.uint8,
+    )
     cropped_arr = sitk.GetArrayFromImage(cropped)
-    arr[z0:z1 + 1, y0:y1 + 1, x0:x1 + 1] = cropped_arr.astype(arr.dtype)
+    arr[z0 : z1 + 1, y0 : y1 + 1, x0 : x1 + 1] = cropped_arr.astype(arr.dtype)
     out = sitk.GetImageFromArray(arr)
     out.CopyInformation(reference)
     return sitk.Cast(out, pixel_type)

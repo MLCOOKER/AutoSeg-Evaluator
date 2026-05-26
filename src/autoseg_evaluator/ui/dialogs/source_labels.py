@@ -9,13 +9,12 @@ across sessions and re-loads of the same data.
 
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -28,7 +27,6 @@ from PySide6.QtWidgets import (
 )
 
 from autoseg_evaluator.data.metadata import MetadataLibrary, RTSTRUCTEntry
-
 
 _ORIGIN_DESCRIPTIONS = {
     "mfr": "Manufacturer tag",
@@ -160,7 +158,9 @@ class ManageSourceLabelsDialog(QDialog):
             self._set_readonly_cell(row, 0, rtss.filename)
             self._set_readonly_cell(row, 1, patient_id)
             self._set_readonly_cell(row, 2, detected_label)
-            self._set_readonly_cell(row, 3, _ORIGIN_DESCRIPTIONS.get(detected_origin, detected_origin))
+            self._set_readonly_cell(
+                row, 3, _ORIGIN_DESCRIPTIONS.get(detected_origin, detected_origin)
+            )
 
             custom = self._existing.get(rtss.sop_instance_uid, "")
             edit_item = QTableWidgetItem(custom)

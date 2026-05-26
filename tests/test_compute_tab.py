@@ -133,11 +133,14 @@ def test_compute_tab_set_library_updates_dose_summary(qapp):
     class FakeCtx:
         def __init__(self, n_dose):
             self.rtdoses = list(range(n_dose))
+
     class FakePatient:
         def __init__(self, n_dose):
             self.contexts = [FakeCtx(n_dose)]
+
     class FakeLibrary:
         patients = {"HN1": FakePatient(1), "HN2": FakePatient(0), "HN3": FakePatient(2)}
+
     tab.set_library(FakeLibrary())
     text = tab._dose_summary_label.text()
     assert "3 RTDOSE file(s)" in text

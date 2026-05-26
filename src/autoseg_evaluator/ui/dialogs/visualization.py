@@ -13,7 +13,7 @@ v1 paper's §2.5 ("Visualization") describes the same minimal feature.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import SimpleITK as sitk
@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 
 # Reference colour for GT (yellow). Test sources cycle through this
 # colourblind-distinguishable palette (Wong / Tol-derived).
@@ -150,7 +149,7 @@ class VisualizationWindow(QDialog):
         outer.addLayout(btn_row)
 
     @staticmethod
-    def _make_legend_row(color: str, label: str, checked: bool) -> "_LegendRow":
+    def _make_legend_row(color: str, label: str, checked: bool) -> _LegendRow:
         return _LegendRow(color, label, checked)
 
     # ---- Event handlers ---------------------------------------------------
@@ -225,7 +224,10 @@ class VisualizationWindow(QDialog):
             gt_slice = self._gt_arr[self._current_slice]
             if gt_slice.any():
                 self._ax.contour(
-                    gt_slice, levels=[0.5], colors=[_GT_COLOR], linewidths=1.2,
+                    gt_slice,
+                    levels=[0.5],
+                    colors=[_GT_COLOR],
+                    linewidths=1.2,
                 )
         self._ax.set_title(
             f"Slice {self._current_slice + 1} / {self._n_slices}",
@@ -245,7 +247,9 @@ class VisualizationWindow(QDialog):
 class _LegendRow(QWidget):
     """One row in the legend: colour swatch + label + visibility checkbox."""
 
-    def __init__(self, color: str, label: str, checked: bool, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, color: str, label: str, checked: bool, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

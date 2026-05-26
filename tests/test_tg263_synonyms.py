@@ -42,9 +42,7 @@ def _assert_tg263(synonyms_flat, a: str, b: str) -> None:
 def _assert_not_collapsed(synonyms_flat, a: str, b: str, *, score_under: float = 1.0) -> None:
     """Two names must not be treated as identical (laterality / semantic distinctness)."""
     m = similarity(a, b, synonyms_flat=synonyms_flat)
-    assert m.score < score_under, (
-        f"Expected {a!r} ↔ {b!r} to NOT collapse — got {m.score:.3f}"
-    )
+    assert m.score < score_under, f"Expected {a!r} ↔ {b!r} to NOT collapse — got {m.score:.3f}"
 
 
 # ---- Dictionary smoke-tests ---------------------------------------------
@@ -171,13 +169,13 @@ def test_distinct_canonicals_do_not_collapse(synonyms_flat, left, right):
 def test_cross_vendor_bridging_for_optic_nerve(synonyms_flat):
     """Every spelling we've seen in real data should resolve to the same OpticNrv."""
     variants = [
-        "OpticNrv_L",          # TG-263 primary
-        "OpticNerve_L",        # vendor (Eclipse-style)
-        "Optic_Nerve_L",       # vendor (snake case full word)
-        "Optic Nerve Left",    # vendor (verbose)
-        "L_OpticNrv",          # reverse-order
-        "Left_OpticNrv",       # reverse + verbose
-        "LeftOpticNrv",        # squished
+        "OpticNrv_L",  # TG-263 primary
+        "OpticNerve_L",  # vendor (Eclipse-style)
+        "Optic_Nerve_L",  # vendor (snake case full word)
+        "Optic Nerve Left",  # vendor (verbose)
+        "L_OpticNrv",  # reverse-order
+        "Left_OpticNrv",  # reverse + verbose
+        "LeftOpticNrv",  # squished
     ]
     # Every pairwise comparison must be a TG-263 grounded 1.0
     for a in variants:

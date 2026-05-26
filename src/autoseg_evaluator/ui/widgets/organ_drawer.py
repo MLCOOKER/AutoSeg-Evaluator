@@ -38,7 +38,6 @@ from PySide6.QtWidgets import (
 from autoseg_evaluator.ui.widgets.collapsible_box import CollapsibleBox
 from autoseg_evaluator.ui.widgets.signal_bar import SignalBar
 
-
 # Drag-and-drop MIME type — payload is a JSON list of organ dicts.
 ORGAN_MIME_TYPE = "application/x-autoseg-organs"
 
@@ -336,8 +335,7 @@ class OrganDrawer(CollapsibleBox):
         self._gt_compare_check = QCheckBox("vs GT", header)
         self._gt_compare_check.setChecked(True)
         self._gt_compare_check.setToolTip(
-            "Compute metrics for every test contour against the designated GT. "
-            "Default mode."
+            "Compute metrics for every test contour against the designated GT. Default mode."
         )
         self._gt_compare_check.toggled.connect(self.gtComparisonChanged)
         layout.addWidget(self._gt_compare_check)
@@ -442,7 +440,9 @@ class OrganDrawer(CollapsibleBox):
         viz_btn.setText("👁")
         viz_btn.setAutoRaise(True)
         viz_btn.setToolTip("Visualize contours for this patient")
-        viz_btn.clicked.connect(lambda _=False, pid=sub.patient_id: self.visualizeRequested.emit(pid))
+        viz_btn.clicked.connect(
+            lambda _=False, pid=sub.patient_id: self.visualizeRequested.emit(pid)
+        )
         header_row.addWidget(viz_btn)
 
         rm_btn = QToolButton(section)
@@ -458,7 +458,9 @@ class OrganDrawer(CollapsibleBox):
 
         # Test rows — sorted highest similarity first so poorest matches sink to the bottom
         if not sub.tests:
-            empty_lbl = QLabel("  <i>(no test matches yet — auto-match or add manually)</i>", section)
+            empty_lbl = QLabel(
+                "  <i>(no test matches yet — auto-match or add manually)</i>", section
+            )
             empty_lbl.setTextFormat(Qt.TextFormat.RichText)
             empty_lbl.setStyleSheet("color: #888;")
             layout.addWidget(empty_lbl)
@@ -522,10 +524,9 @@ class OrganDrawer(CollapsibleBox):
         rm.setAutoRaise(True)
         rm.setToolTip("Remove this test from the drawer")
         rm.clicked.connect(
-            lambda _=False,
-            pid=patient_id,
-            sop=test.rtstruct_sop_uid,
-            roi=test.roi_number: self.removeTestRequested.emit(pid, sop, roi)
+            lambda _=False, pid=patient_id, sop=test.rtstruct_sop_uid, roi=test.roi_number: (
+                self.removeTestRequested.emit(pid, sop, roi)
+            )
         )
         row_layout.addWidget(rm)
 
@@ -635,5 +636,3 @@ class OrganDrawer(CollapsibleBox):
         self.setProperty("dropHover", bool(on))
         self.style().unpolish(self)
         self.style().polish(self)
-
-

@@ -12,7 +12,6 @@ from typing import Any
 
 from autoseg_evaluator.utils.paths import settings_path
 
-
 _DEFAULTS: dict[str, Any] = {
     "last_folder": "",
     "window": {
@@ -47,12 +46,12 @@ _DEFAULTS: dict[str, Any] = {
     },
     "custom_source_labels": {},  # keyed by SOP Instance UID
     # User-defined Find→Replace rules applied to organ names before matching
-    "replacement_rules": [],     # list of {"find": str, "replace": str}
+    "replacement_rules": [],  # list of {"find": str, "replace": str}
     # Last-used auto-match template (organ list + GT identifier criteria)
     "last_template": {
         "organs": [],
-        "gt_manufacturer": "",   # substring to look for in Manufacturer tag
-        "gt_filename": "",       # substring to look for in RTSTRUCT filename
+        "gt_manufacturer": "",  # substring to look for in Manufacturer tag
+        "gt_filename": "",  # substring to look for in RTSTRUCT filename
         "similarity_threshold": 0.6,
     },
 }

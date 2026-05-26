@@ -67,9 +67,7 @@ class CollapsibleBox(QWidget):
         self._content_area.setFrameShape(QFrame.Shape.NoFrame)
         self._content_area.setMaximumHeight(0)
         self._content_area.setMinimumHeight(0)
-        self._content_area.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
+        self._content_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self._animation = QPropertyAnimation(self._content_area, b"maximumHeight", self)
         self._animation.setDuration(self.ANIMATION_DURATION_MS)
@@ -154,4 +152,3 @@ class CollapsibleBox(QWidget):
         self._animation.setEndValue(end)
         self._animation.start()
         self.toggled.emit(checked)
-

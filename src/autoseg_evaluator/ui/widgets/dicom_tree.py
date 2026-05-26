@@ -20,14 +20,13 @@ from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
 
 from autoseg_evaluator.data.metadata import (
+    ImageSeriesEntry,
     ImagingContext,
     MetadataLibrary,
     PatientEntry,
     RTDOSEEntry,
     RTSTRUCTEntry,
-    ImageSeriesEntry,
 )
-
 
 # Visual prefixes — kept as plain text glyphs so they render even without an icon font.
 _PATIENT_GLYPH = "👤"
@@ -63,8 +62,7 @@ class CohortTreeWidget(QTreeWidget):
         font.setPointSize(max(8, font.pointSize() - 2))
         self.setFont(font)
         self.setStyleSheet(
-            "QTreeWidget::item { padding: 0px 1px; }"
-            "QTreeWidget::branch { padding: 0px; }"
+            "QTreeWidget::item { padding: 0px 1px; }QTreeWidget::branch { padding: 0px; }"
         )
 
     # ---- Public API -------------------------------------------------------
@@ -115,9 +113,7 @@ class CohortTreeWidget(QTreeWidget):
         )
         return item
 
-    def _attach_context_children(
-        self, parent_item: QTreeWidgetItem, ctx: ImagingContext
-    ) -> None:
+    def _attach_context_children(self, parent_item: QTreeWidgetItem, ctx: ImagingContext) -> None:
         for series in ctx.image_series:
             parent_item.addChild(self._make_image_series_item(series))
         for rtss in ctx.rtstructs:

@@ -18,7 +18,6 @@ import math
 import numpy as np
 from scipy import ndimage
 
-
 # A lookup table mapping 8-bit neighbourhood codes (0–255) to the
 # corresponding oriented face-normals used to compute 3D surface area.
 _NEIGHBOUR_CODE_TO_NORMALS: list[list[list[float]]] = [
@@ -127,7 +126,12 @@ _NEIGHBOUR_CODE_TO_NORMALS: list[list[list[float]]] = [
     [[0.0, -0.25, 0.25], [0.0, -0.25, 0.25], [0.0, -0.25, 0.25], [0.0, 0.25, -0.25]],
     [[0.0, 0.25, 0.25], [0.0, 0.25, 0.25], [0.125, -0.125, -0.125]],
     [[-0.125, 0.125, 0.125], [0.125, -0.125, 0.125], [-0.125, -0.125, 0.125]],
-    [[-0.125, 0.125, 0.125], [0.125, -0.125, 0.125], [-0.125, -0.125, 0.125], [0.125, 0.125, 0.125]],
+    [
+        [-0.125, 0.125, 0.125],
+        [0.125, -0.125, 0.125],
+        [-0.125, -0.125, 0.125],
+        [0.125, 0.125, 0.125],
+    ],
     [[-0.0, 0.0, 0.5], [-0.25, -0.25, 0.25], [-0.125, -0.125, 0.125], [-0.125, -0.125, 0.125]],
     [[0.125, 0.125, 0.125], [0.125, -0.125, 0.125], [0.125, -0.125, -0.125]],
     [[-0.0, 0.5, 0.0], [-0.25, 0.25, -0.25], [0.125, -0.125, 0.125], [0.125, -0.125, 0.125]],
@@ -172,7 +176,12 @@ _NEIGHBOUR_CODE_TO_NORMALS: list[list[list[float]]] = [
     [[-0.0, 0.5, 0.0], [-0.25, 0.25, -0.25], [0.125, -0.125, 0.125], [0.125, -0.125, 0.125]],
     [[0.125, 0.125, 0.125], [0.125, -0.125, 0.125], [0.125, -0.125, -0.125]],
     [[-0.0, 0.0, 0.5], [-0.25, -0.25, 0.25], [-0.125, -0.125, 0.125], [-0.125, -0.125, 0.125]],
-    [[-0.125, 0.125, 0.125], [0.125, -0.125, 0.125], [-0.125, -0.125, 0.125], [0.125, 0.125, 0.125]],
+    [
+        [-0.125, 0.125, 0.125],
+        [0.125, -0.125, 0.125],
+        [-0.125, -0.125, 0.125],
+        [0.125, 0.125, 0.125],
+    ],
     [[-0.125, 0.125, 0.125], [0.125, -0.125, 0.125], [-0.125, -0.125, 0.125]],
     [[0.0, 0.25, 0.25], [0.0, 0.25, 0.25], [0.125, -0.125, -0.125]],
     [[0.0, -0.25, -0.25], [0.0, 0.25, 0.25], [0.0, 0.25, 0.25], [0.0, 0.25, 0.25]],
@@ -345,17 +354,19 @@ def _compute_bounding_box(mask: np.ndarray):
     return bbox_min, bbox_max
 
 
-def _crop_to_bounding_box(mask: np.ndarray, bbox_min: np.ndarray, bbox_max: np.ndarray) -> np.ndarray:
+def _crop_to_bounding_box(
+    mask: np.ndarray, bbox_min: np.ndarray, bbox_max: np.ndarray
+) -> np.ndarray:
     """Crop a mask to ``bbox_min..bbox_max`` with a 1-voxel buffer on the max side."""
     cropmask = np.zeros((bbox_max - bbox_min) + 2, np.uint8)
     num_dims = len(mask.shape)
     if num_dims == 2:
-        cropmask[0:-1, 0:-1] = mask[bbox_min[0]:bbox_max[0] + 1, bbox_min[1]:bbox_max[1] + 1]
+        cropmask[0:-1, 0:-1] = mask[bbox_min[0] : bbox_max[0] + 1, bbox_min[1] : bbox_max[1] + 1]
     elif num_dims == 3:
         cropmask[0:-1, 0:-1, 0:-1] = mask[
-            bbox_min[0]:bbox_max[0] + 1,
-            bbox_min[1]:bbox_max[1] + 1,
-            bbox_min[2]:bbox_max[2] + 1,
+            bbox_min[0] : bbox_max[0] + 1,
+            bbox_min[1] : bbox_max[1] + 1,
+            bbox_min[2] : bbox_max[2] + 1,
         ]
     return cropmask
 
@@ -389,8 +400,12 @@ def compute_surface_distances(mask_gt: np.ndarray, mask_pred: np.ndarray, spacin
 
     bbox_min, bbox_max = _compute_bounding_box(mask_gt | mask_pred)
     if bbox_min is None:
-        return dict(distances_gt_to_pred=np.array([]), distances_pred_to_gt=np.array([]),
-                    surfel_areas_gt=np.array([]), surfel_areas_pred=np.array([]))
+        return dict(
+            distances_gt_to_pred=np.array([]),
+            distances_pred_to_gt=np.array([]),
+            surfel_areas_gt=np.array([]),
+            surfel_areas_pred=np.array([]),
+        )
 
     cropmask_gt = _crop_to_bounding_box(mask_gt, bbox_min, bbox_max)
     cropmask_pred = _crop_to_bounding_box(mask_pred, bbox_min, bbox_max)
@@ -403,7 +418,9 @@ def compute_surface_distances(mask_gt: np.ndarray, mask_pred: np.ndarray, spacin
     )
 
     borders_gt = (neighbour_code_map_gt != 0) & (neighbour_code_map_gt != full_true_neighbours)
-    borders_pred = (neighbour_code_map_pred != 0) & (neighbour_code_map_pred != full_true_neighbours)
+    borders_pred = (neighbour_code_map_pred != 0) & (
+        neighbour_code_map_pred != full_true_neighbours
+    )
 
     if borders_gt.any():
         distmap_gt = ndimage.distance_transform_edt(~borders_gt, sampling=spacing_mm)

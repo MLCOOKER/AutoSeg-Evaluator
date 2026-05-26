@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QGuiApplication, QKeySequence
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -79,15 +79,14 @@ from autoseg_evaluator.core.masks import (
 )
 from autoseg_evaluator.core.matching import ReplacementRule, similarity
 from autoseg_evaluator.core.metrics import compute_geometric_metrics
-from autoseg_evaluator.data.results import metric_display_label
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
     OrganEntry,
     RTSTRUCTEntry,
 )
+from autoseg_evaluator.data.results import metric_display_label
 from autoseg_evaluator.data.synonyms import flatten_synonyms, load_synonyms
 from autoseg_evaluator.utils.paths import synonyms_path
-
 
 # Source label assigned to every synthetic consensus RTSS we generate.
 CONSENSUS_SOURCE_LABEL = "STAPLE Consensus"
@@ -103,7 +102,9 @@ class BuildConsensusTab(QWidget):
 
     consensusGenerated = Signal()
 
-    def __init__(self, settings: dict[str, Any] | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, settings: dict[str, Any] | None = None, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self._settings = settings or {}
         self._library: MetadataLibrary | None = None
@@ -309,7 +310,9 @@ class BuildConsensusTab(QWidget):
         drawers_pane = QFrame(self._splitter)
         drawers_layout = QVBoxLayout(drawers_pane)
         drawers_layout.setContentsMargins(0, 0, 0, 0)
-        drawers_layout.addWidget(QLabel("<b>Organ groupings for the selected group</b>", drawers_pane))
+        drawers_layout.addWidget(
+            QLabel("<b>Organ groupings for the selected group</b>", drawers_pane)
+        )
         drawers_layout.addWidget(
             QLabel(
                 "<span style='color:#666; font-size: 9pt'>"
@@ -377,9 +380,7 @@ class BuildConsensusTab(QWidget):
         footer.addWidget(self._inter_manual_btn)
 
         footer.addStretch(1)
-        self._generate_selected_btn = QPushButton(
-            "Generate Consensus GT for SELECTED groups", self
-        )
+        self._generate_selected_btn = QPushButton("Generate Consensus GT for SELECTED groups", self)
         self._generate_selected_btn.setToolTip(
             "Register a synthetic STAPLE-consensus RTSS for ONLY the groups "
             "currently highlighted on the left (Ctrl/Shift-click for "
@@ -419,9 +420,7 @@ class BuildConsensusTab(QWidget):
         for (pid, label), rtsses in eligible.items():
             item = QListWidgetItem(f"{pid}   {label}   ({len(rtsses)} RTSS)")
             item.setData(Qt.ItemDataRole.UserRole, (pid, label))
-            item.setToolTip(
-                "\n".join(f"• {r.filename}" for r in rtsses)
-            )
+            item.setToolTip("\n".join(f"• {r.filename}" for r in rtsses))
             self._groups_list.addItem(item)
         self._status_label.setText(
             f"{len(eligible)} eligible group(s) — select one to inspect its organ matches."
@@ -503,9 +502,7 @@ class BuildConsensusTab(QWidget):
                     continue
                 scores: list[tuple[int, float]] = []
                 for i, rep in enumerate(bucket_names):
-                    s = similarity(
-                        name, rep, rules=rules, synonyms_flat=self._synonyms_flat
-                    ).score
+                    s = similarity(name, rep, rules=rules, synonyms_flat=self._synonyms_flat).score
                     scores.append((i, s))
                 scores.sort(key=lambda kv: kv[1], reverse=True)
                 organ_scores.append((organ, name, scores))
@@ -514,7 +511,7 @@ class BuildConsensusTab(QWidget):
             # high-confidence matches (e.g. exact-canonical 1.0 hits) win
             # their preferred bucket before noisier near-matches steal it.
             organ_scores.sort(
-                key=lambda triple: (triple[2][0][1] if triple[2] else -1.0),
+                key=lambda triple: triple[2][0][1] if triple[2] else -1.0,
                 reverse=True,
             )
 
@@ -533,15 +530,13 @@ class BuildConsensusTab(QWidget):
                     break
                 if not assigned:
                     bucket_names.append(name)
-                    bucket_members.append(
-                        [(r.sop_instance_uid, int(organ.roi_number), name)]
-                    )
+                    bucket_members.append([(r.sop_instance_uid, int(organ.roi_number), name)])
                     rtss_used_buckets.add(len(bucket_names) - 1)
         # Drop single-rater buckets, then key the result by the most
         # frequent ROI name within each bucket (so the drawer header
         # reads as something meaningful to the user).
         kept: dict[str, list[tuple[str, int, str]]] = {}
-        for rep, members in zip(bucket_names, bucket_members):
+        for _rep, members in zip(bucket_names, bucket_members):
             if len(members) < 2:
                 continue
             name_counts: dict[str, int] = defaultdict(int)
@@ -560,7 +555,7 @@ class BuildConsensusTab(QWidget):
 
     def _on_threshold_changed(self, _value: float) -> None:
         """Re-cluster every eligible group whenever the threshold spinbox moves."""
-        for (pid, label) in list(self._group_drawers.keys()):
+        for pid, label in list(self._group_drawers.keys()):
             self._auto_match_group(pid, label)
         # Re-render the currently-selected group's drawers if any.
         current = self._groups_list.currentItem()
@@ -685,16 +680,13 @@ class BuildConsensusTab(QWidget):
         if not selected_keys:
             self._show_status_msg(
                 "Generate Consensus GT",
-                "No groups selected — Ctrl/Shift-click one or more groups on "
-                "the left first.",
+                "No groups selected — Ctrl/Shift-click one or more groups on the left first.",
             )
             return
         created, skipped = self._register_consensus_for(selected_keys)
         self._report_generation_result(created, skipped, scope="SELECTED")
 
-    def _register_consensus_for(
-        self, keys: list[tuple[str, str]]
-    ) -> tuple[int, list[str]]:
+    def _register_consensus_for(self, keys: list[tuple[str, str]]) -> tuple[int, list[str]]:
         """Register synthetic consensus RTSSes for the given (patient, label) keys.
 
         Returns ``(created_count, skipped_messages)``. Re-registration of
@@ -703,7 +695,7 @@ class BuildConsensusTab(QWidget):
         """
         created = 0
         skipped: list[str] = []
-        for (pid, label) in keys:
+        for pid, label in keys:
             buckets = self._group_drawers.get((pid, label), {})
             if not buckets:
                 skipped.append(f"{pid}/{label}: no matched organs")
@@ -721,9 +713,7 @@ class BuildConsensusTab(QWidget):
                 skipped.append(f"{pid}/{label}: register failed")
         return created, skipped
 
-    def _report_generation_result(
-        self, created: int, skipped: list[str], scope: str
-    ) -> None:
+    def _report_generation_result(self, created: int, skipped: list[str], scope: str) -> None:
         msg = [
             f"Generated {created} consensus RTSS entr{'y' if created == 1 else 'ies'} "
             f"({scope} groups)."
@@ -764,7 +754,7 @@ class BuildConsensusTab(QWidget):
         # roi_number starting from 1.
         organs: list[OrganEntry] = []
         constituent_groups: dict[int, list[tuple[str, int]]] = {}
-        for synthetic_roi_number, (canon, raters) in enumerate(sorted(buckets.items()), start=1):
+        for synthetic_roi_number, (_canon, raters) in enumerate(sorted(buckets.items()), start=1):
             # Display name: use the most common original ROI name across raters.
             name_counts: dict[str, int] = defaultdict(int)
             for _sop, _roi, roi_name in raters:
@@ -799,7 +789,7 @@ class BuildConsensusTab(QWidget):
         leaves a stale orphan behind.
         """
         token = f"{patient_id}|{source_label}"
-        return f"AUTOSEG.SYNTHETIC.{abs(hash(token)) % (10 ** 18)}"
+        return f"AUTOSEG.SYNTHETIC.{abs(hash(token)) % (10**18)}"
 
     # ---- Inter-manual metrics --------------------------------------------
 
@@ -900,8 +890,12 @@ class BuildConsensusTab(QWidget):
                 pid,
                 buckets,
                 config,
-                progress_cb=lambda done_in_group: self._tick_progress(
-                    progress, units_done + done_in_group, total_units, pid, source_label
+                # Bind loop variables as default args so the lambda captures
+                # their values at the current iteration, not by reference
+                # (the lambda is currently called synchronously so this is
+                # belt-and-braces, but it removes the B023 footgun outright).
+                progress_cb=lambda done_in_group, _u=units_done, _p=pid, _s=source_label: (
+                    self._tick_progress(progress, _u + done_in_group, total_units, _p, _s)
                 ),
                 cancel_check=cancel_check,
             )
@@ -1060,9 +1054,7 @@ class BuildConsensusTab(QWidget):
                             mask_cache[key] = None
                             continue
                     try:
-                        mask_cache[key] = extract_mask_for_roi(
-                            ct, rtss_cache[sop_uid], roi_number
-                        )
+                        mask_cache[key] = extract_mask_for_roi(ct, rtss_cache[sop_uid], roi_number)
                     except Exception:  # noqa: BLE001
                         mask_cache[key] = None
                 m = mask_cache[key]
@@ -1230,9 +1222,7 @@ def _inter_manual_columns(
         if key in static_overrides:
             label = static_overrides[key]
         else:
-            label = metric_display_label(
-                key, sd_tau_mm=sd_tau_mm, apl_tau_mm=apl_tau_mm
-            )
+            label = metric_display_label(key, sd_tau_mm=sd_tau_mm, apl_tau_mm=apl_tau_mm)
         out.append((key, label))
     return tuple(out)
 
@@ -1303,18 +1293,14 @@ class _InterManualMetricsDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(
-            f"Inter-observer variability — {n_groups} group(s)"
-        )
+        self.setWindowTitle(f"Inter-observer variability — {n_groups} group(s)")
         self.resize(1200, 600)
         self._n_groups = n_groups
         # Resolve column labels with the τ values baked in so headers
         # read e.g. "Surface Dice @ 3.00 mm" / "Mean APL @ 3.00 mm".
         self._inter_manual_columns = _inter_manual_columns(sd_tau_mm, apl_tau_mm)
         layout = QVBoxLayout(self)
-        info_html = (
-            f"<b>Groups:</b> {n_groups}  &nbsp; <b>Comparisons:</b> {len(rows)}"
-        )
+        info_html = f"<b>Groups:</b> {n_groups}  &nbsp; <b>Comparisons:</b> {len(rows)}"
         if sd_tau_mm is not None or apl_tau_mm is not None:
             tol_bits = []
             if sd_tau_mm is not None:
@@ -1323,7 +1309,9 @@ class _InterManualMetricsDialog(QDialog):
                 tol_bits.append(f"APL τ = {apl_tau_mm:.2f} mm")
             info_html += "  &nbsp; <b>" + " · ".join(tol_bits) + "</b>"
         if cancelled:
-            info_html += "  &nbsp; <span style='color:#d96b00'><b>Cancelled — partial results</b></span>"
+            info_html += (
+                "  &nbsp; <span style='color:#d96b00'><b>Cancelled — partial results</b></span>"
+            )
         info_html += (
             "<br><span style='color:#666'>Pairwise rater comparison BEFORE the STAPLE "
             "consensus is computed. Ctrl+A → Ctrl+C copies the table with column "
@@ -1346,9 +1334,7 @@ class _InterManualMetricsDialog(QDialog):
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSortingEnabled(True)
-        self._table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
-        )
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
         was_sorted = self._table.isSortingEnabled()
         self._table.setSortingEnabled(False)
@@ -1384,6 +1370,7 @@ class _InterManualMetricsDialog(QDialog):
     @staticmethod
     def _fmt(value: Any) -> str:
         import math as _math
+
         if value is None or value == "":
             return ""
         if isinstance(value, bool):
@@ -1404,7 +1391,9 @@ class _InterManualMetricsDialog(QDialog):
         n_cols = self._table.columnCount()
         n_rows = self._table.rowCount()
         headers = [
-            self._table.horizontalHeaderItem(c).text() if self._table.horizontalHeaderItem(c) else ""
+            self._table.horizontalHeaderItem(c).text()
+            if self._table.horizontalHeaderItem(c)
+            else ""
             for c in range(n_cols)
         ]
         rows: list[list[str]] = []
@@ -1423,9 +1412,7 @@ class _InterManualMetricsDialog(QDialog):
         QApplication.clipboard().setText("\n".join(lines))
 
     def _on_export_csv(self) -> None:
-        suggested = (
-            f"inter_observer_variability_{self._n_groups}groups.csv".replace(" ", "_")
-        )
+        suggested = f"inter_observer_variability_{self._n_groups}groups.csv".replace(" ", "_")
         path_str, _ = QFileDialog.getSaveFileName(
             self,
             "Export inter-observer variability",
@@ -1444,13 +1431,9 @@ class _InterManualMetricsDialog(QDialog):
                 writer.writerow(headers)
                 writer.writerows(rows)
         except OSError as exc:
-            QMessageBox.critical(
-                self, "Export CSV", f"Could not write file:\n{exc}"
-            )
+            QMessageBox.critical(self, "Export CSV", f"Could not write file:\n{exc}")
             return
-        QMessageBox.information(
-            self, "Export CSV", f"Exported {len(rows)} row(s) to {path}."
-        )
+        QMessageBox.information(self, "Export CSV", f"Exported {len(rows)} row(s) to {path}.")
 
 
 # ---- Inter-observer settings dialog ------------------------------------

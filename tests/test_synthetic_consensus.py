@@ -34,7 +34,6 @@ from autoseg_evaluator.data.session import (
     save_session,
 )
 
-
 # ---- Fixtures ------------------------------------------------------------
 
 
@@ -121,16 +120,28 @@ def test_register_synthetic_consensus_refuses_non_synthetic_entries():
 def test_register_synthetic_consensus_replaces_existing_uid_in_place():
     lib = _library_with_two_manuals()
     syn_v1 = RTSTRUCTEntry(
-        sop_instance_uid="SYN1", file_path="", manufacturer="STAPLE Consensus",
-        source_label="STAPLE Consensus", source_origin="synthetic",
-        frame_of_reference_uid="FOR1", study_instance_uid="", organs=[],
-        is_synthetic_consensus=True, constituent_groups={1: [("M1", 1), ("M2", 1)]},
+        sop_instance_uid="SYN1",
+        file_path="",
+        manufacturer="STAPLE Consensus",
+        source_label="STAPLE Consensus",
+        source_origin="synthetic",
+        frame_of_reference_uid="FOR1",
+        study_instance_uid="",
+        organs=[],
+        is_synthetic_consensus=True,
+        constituent_groups={1: [("M1", 1), ("M2", 1)]},
     )
     syn_v2 = RTSTRUCTEntry(
-        sop_instance_uid="SYN1", file_path="", manufacturer="STAPLE Consensus",
-        source_label="STAPLE Consensus", source_origin="synthetic",
-        frame_of_reference_uid="FOR1", study_instance_uid="", organs=[],
-        is_synthetic_consensus=True, constituent_groups={2: [("M1", 2), ("M2", 2)]},
+        sop_instance_uid="SYN1",
+        file_path="",
+        manufacturer="STAPLE Consensus",
+        source_label="STAPLE Consensus",
+        source_origin="synthetic",
+        frame_of_reference_uid="FOR1",
+        study_instance_uid="",
+        organs=[],
+        is_synthetic_consensus=True,
+        constituent_groups={2: [("M1", 2), ("M2", 2)]},
     )
     lib.register_synthetic_consensus("HN1", "FOR1", syn_v1)
     lib.register_synthetic_consensus("HN1", "FOR1", syn_v2)
@@ -143,10 +154,16 @@ def test_register_synthetic_consensus_replaces_existing_uid_in_place():
 def test_register_synthetic_consensus_returns_false_on_bad_patient_or_for():
     lib = _library_with_two_manuals()
     syn = RTSTRUCTEntry(
-        sop_instance_uid="SYN1", file_path="", manufacturer="STAPLE Consensus",
-        source_label="STAPLE Consensus", source_origin="synthetic",
-        frame_of_reference_uid="FOR1", study_instance_uid="", organs=[],
-        is_synthetic_consensus=True, constituent_groups={1: [("M1", 1), ("M2", 1)]},
+        sop_instance_uid="SYN1",
+        file_path="",
+        manufacturer="STAPLE Consensus",
+        source_label="STAPLE Consensus",
+        source_origin="synthetic",
+        frame_of_reference_uid="FOR1",
+        study_instance_uid="",
+        organs=[],
+        is_synthetic_consensus=True,
+        constituent_groups={1: [("M1", 1), ("M2", 1)]},
     )
     assert lib.register_synthetic_consensus("NOPE", "FOR1", syn) is False
     assert lib.register_synthetic_consensus("HN1", "FOR_NOPE", syn) is False
@@ -155,10 +172,16 @@ def test_register_synthetic_consensus_returns_false_on_bad_patient_or_for():
 def test_unregister_synthetic_consensus_removes_by_uid():
     lib = _library_with_two_manuals()
     syn = RTSTRUCTEntry(
-        sop_instance_uid="SYN1", file_path="", manufacturer="STAPLE Consensus",
-        source_label="STAPLE Consensus", source_origin="synthetic",
-        frame_of_reference_uid="FOR1", study_instance_uid="", organs=[],
-        is_synthetic_consensus=True, constituent_groups={1: [("M1", 1), ("M2", 1)]},
+        sop_instance_uid="SYN1",
+        file_path="",
+        manufacturer="STAPLE Consensus",
+        source_label="STAPLE Consensus",
+        source_origin="synthetic",
+        frame_of_reference_uid="FOR1",
+        study_instance_uid="",
+        organs=[],
+        is_synthetic_consensus=True,
+        constituent_groups={1: [("M1", 1), ("M2", 1)]},
     )
     lib.register_synthetic_consensus("HN1", "FOR1", syn)
     assert lib.unregister_synthetic_consensus("SYN1") is True
@@ -168,10 +191,16 @@ def test_unregister_synthetic_consensus_removes_by_uid():
 def test_clear_synthetic_consensus_only_removes_synthetic_entries():
     lib = _library_with_two_manuals()
     syn = RTSTRUCTEntry(
-        sop_instance_uid="SYN1", file_path="", manufacturer="STAPLE Consensus",
-        source_label="STAPLE Consensus", source_origin="synthetic",
-        frame_of_reference_uid="FOR1", study_instance_uid="", organs=[],
-        is_synthetic_consensus=True, constituent_groups={1: [("M1", 1), ("M2", 1)]},
+        sop_instance_uid="SYN1",
+        file_path="",
+        manufacturer="STAPLE Consensus",
+        source_label="STAPLE Consensus",
+        source_origin="synthetic",
+        frame_of_reference_uid="FOR1",
+        study_instance_uid="",
+        organs=[],
+        is_synthetic_consensus=True,
+        constituent_groups={1: [("M1", 1), ("M2", 1)]},
     )
     lib.register_synthetic_consensus("HN1", "FOR1", syn)
     lib.clear_synthetic_consensus()
@@ -184,10 +213,16 @@ def test_clear_synthetic_consensus_only_removes_synthetic_entries():
 def test_synthetic_consensus_entries_enumerates_all():
     lib = _library_with_two_manuals()
     syn = RTSTRUCTEntry(
-        sop_instance_uid="SYN1", file_path="", manufacturer="STAPLE Consensus",
-        source_label="STAPLE Consensus", source_origin="synthetic",
-        frame_of_reference_uid="FOR1", study_instance_uid="", organs=[],
-        is_synthetic_consensus=True, constituent_groups={1: [("M1", 1), ("M2", 1)]},
+        sop_instance_uid="SYN1",
+        file_path="",
+        manufacturer="STAPLE Consensus",
+        source_label="STAPLE Consensus",
+        source_origin="synthetic",
+        frame_of_reference_uid="FOR1",
+        study_instance_uid="",
+        organs=[],
+        is_synthetic_consensus=True,
+        constituent_groups={1: [("M1", 1), ("M2", 1)]},
     )
     lib.register_synthetic_consensus("HN1", "FOR1", syn)
     entries = lib.synthetic_consensus_entries()
@@ -273,6 +308,7 @@ def test_session_future_schema_raises():
     # The version check happens in load_session_file
     payload = {"schema_version": SCHEMA_VERSION + 99}
     import tempfile
+
     with tempfile.NamedTemporaryFile(
         "w", suffix=DEFAULT_SUFFIX, delete=False, encoding="utf-8"
     ) as fp:

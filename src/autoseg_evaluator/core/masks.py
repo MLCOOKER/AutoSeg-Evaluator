@@ -12,7 +12,7 @@ on them with the correct physical-units spacing.
 from __future__ import annotations
 
 import os
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 import pydicom
@@ -165,7 +165,7 @@ def truncate_to_gt_z_extent(
     # outside the GT extent aren't really "lost" data.
     slices_removed = int(np.sum(test_z_present[:z_min])) + int(np.sum(test_z_present[z_max + 1 :]))
     truncated = np.zeros_like(test_arr)
-    truncated[z_min:z_max + 1] = test_arr[z_min:z_max + 1]
+    truncated[z_min : z_max + 1] = test_arr[z_min : z_max + 1]
     si = sitk.GetImageFromArray(truncated.astype(np.uint8))
     si.CopyInformation(test_mask)
     return si, {

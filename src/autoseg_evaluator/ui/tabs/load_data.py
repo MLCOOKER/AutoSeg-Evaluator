@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -285,7 +285,9 @@ class LoadDataTab(QWidget):
     def _set_busy_ui(self, busy: bool) -> None:
         self._load_btn.setEnabled(not busy)
         self._reload_btn.setEnabled(not busy and self._library is not None)
-        self._source_labels_btn.setEnabled(not busy and bool(self._library and self._library.all_rtstructs()))
+        self._source_labels_btn.setEnabled(
+            not busy and bool(self._library and self._library.all_rtstructs())
+        )
         self._progress_bar.setVisible(busy)
         self._cancel_btn.setVisible(busy)
         self._cancel_btn.setEnabled(busy)

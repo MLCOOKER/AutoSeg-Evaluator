@@ -79,7 +79,21 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
-ignore = ["E501"]
+ignore = [
+    "E501",  # line length — handled by formatter / case-by-case
+    # Qt API forces camelCase for signals, slots, event overrides, and
+    # PascalCase imports (e.g. ``from PySide6.QtCore import Qt as qt``).
+    # The pep8-naming rules below fight a wall of Qt convention with no
+    # safety benefit, so we silence them project-wide.
+    "N802",  # invalid-function-name (mousePressEvent, paintSection, ...)
+    "N803",  # invalid-argument-name
+    "N813",  # camelcase-imported-as-lowercase
+    "N815",  # mixed-case-variable-in-class-scope (Qt signals: foo = Signal())
+    # Stylistic-only rules we don't enforce:
+    "B905",   # zip-without-explicit-strict — strict=True can mask real data shape issues
+    "SIM108", # if-else-block-instead-of-if-exp — sometimes the if/else reads clearer
+    "SIM102", # collapsible-if — nested ifs often document intent
+]
 
 [tool.ruff.format]
 quote-style = "double"

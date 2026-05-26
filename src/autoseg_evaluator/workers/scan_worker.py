@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import traceback
-from typing import Mapping
+from collections.abc import Mapping
 
 from PySide6.QtCore import QObject, Signal, Slot
 

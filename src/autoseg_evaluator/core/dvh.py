@@ -30,7 +30,7 @@ class DVHConfig:
     v_at_doses_gy: list[float] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DVHConfig":
+    def from_dict(cls, data: dict[str, Any]) -> DVHConfig:
         return cls(
             include_dmean=bool(data.get("include_dmean", True)),
             include_dmax=bool(data.get("include_dmax", True)),

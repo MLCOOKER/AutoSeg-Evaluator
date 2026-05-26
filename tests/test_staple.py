@@ -8,8 +8,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from autoseg_evaluator.core.staple import StapleConfig, StapleResult, compute_staple
-
+from autoseg_evaluator.core.staple import StapleConfig, compute_staple
 
 # ---- Fixtures ------------------------------------------------------------
 
@@ -18,7 +17,7 @@ def _cube(shape_xyz, lo_xyz, hi_xyz, spacing=(1.0, 1.0, 1.0)) -> sitk.Image:
     """Build a binary uint8 SimpleITK image with a filled cube."""
     sx, sy, sz = shape_xyz
     arr = np.zeros((sz, sy, sx), dtype=np.uint8)
-    arr[lo_xyz[2]:hi_xyz[2], lo_xyz[1]:hi_xyz[1], lo_xyz[0]:hi_xyz[0]] = 1
+    arr[lo_xyz[2] : hi_xyz[2], lo_xyz[1] : hi_xyz[1], lo_xyz[0] : hi_xyz[0]] = 1
     img = sitk.GetImageFromArray(arr)
     img.SetSpacing(spacing)
     return img

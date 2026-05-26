@@ -65,16 +65,73 @@ as inspectable files under `python\Lib\site-packages\`. No Python install,
 no admin rights, no registry writes, no internet access required at runtime —
 suited to locked-down clinical Windows environments.
 
-### From source
+### From source (Windows)
 
-```bash
+```powershell
 git clone https://github.com/MLCOOKER/AutoSeg-Evaluator.git
 cd AutoSeg-Evaluator
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 python -m autoseg_evaluator
 ```
 
 Python 3.10 or newer required.
+
+### From source (macOS)
+
+```bash
+# Python 3.11 via Homebrew (or python.org installer, or pyenv)
+brew install python@3.11
+
+git clone https://github.com/MLCOOKER/AutoSeg-Evaluator.git
+cd AutoSeg-Evaluator
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+python -m autoseg_evaluator
+```
+
+PySide6's macOS wheels are self-contained — no extra OS-level Qt
+dependencies needed.
+
+### From source (Linux — Ubuntu / Debian)
+
+PySide6's Qt platform plugin links against system C libraries; install
+them first, then proceed as on macOS:
+
+```bash
+sudo apt update
+sudo apt install -y python3.11 python3.11-venv python3-pip git \
+    libegl1 libxkbcommon0 libdbus-1-3 libxcb-cursor0 \
+    libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+    libxcb-render-util0 libxcb-shape0 libxcb-sync1 libxcb-xfixes0 \
+    libxcb-xinerama0 libxkbcommon-x11-0 libxcb-xkb1
+
+git clone https://github.com/MLCOOKER/AutoSeg-Evaluator.git
+cd AutoSeg-Evaluator
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+python -m autoseg_evaluator
+```
+
+For Fedora / RHEL use:
+```bash
+sudo dnf install -y python3.11 python3-pip git \
+    libxkbcommon mesa-libEGL dbus-libs xcb-util-cursor \
+    xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm
+```
+
+For Arch:
+```bash
+sudo pacman -S python git qt6-base libxkbcommon-x11
+```
+
+The full 259-test suite is exercised on `windows-latest` and
+`ubuntu-latest` in CI on every push — macOS is not in CI, but the same
+PySide6 / SimpleITK / pydicom stack ships official wheels for macOS so
+the app is expected to run identically there.
 
 ### Building the portable bundle locally
 

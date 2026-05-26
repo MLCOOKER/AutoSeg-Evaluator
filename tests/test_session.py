@@ -12,10 +12,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
-
-from test_metadata import _write_ct_slice, _write_rtstruct  # noqa: E402
 
 from autoseg_evaluator.data.metadata import MetadataLibrary  # noqa: E402
 from autoseg_evaluator.data.session import (  # noqa: E402
@@ -30,6 +27,7 @@ from autoseg_evaluator.ui.widgets.loaded_contours_tree import (  # noqa: E402
     ROLE_PATIENT_ID,
     ROLE_ROI_NAME,
 )
+from test_metadata import _write_ct_slice, _write_rtstruct  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -52,12 +50,22 @@ def populated_library(tmp_path):
             folder, patient_id=pid, study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
         )
         _write_rtstruct(
-            folder, patient_id=pid, study_uid=study_uid, for_uid=for_uid,
-            manufacturer="Varian", organs=organs, filename=f"manual_{pid}.dcm",
+            folder,
+            patient_id=pid,
+            study_uid=study_uid,
+            for_uid=for_uid,
+            manufacturer="Varian",
+            organs=organs,
+            filename=f"manual_{pid}.dcm",
         )
         _write_rtstruct(
-            folder, patient_id=pid, study_uid=study_uid, for_uid=for_uid,
-            manufacturer="Limbus", organs=organs, filename=f"limbus_{pid}.dcm",
+            folder,
+            patient_id=pid,
+            study_uid=study_uid,
+            for_uid=for_uid,
+            manufacturer="Limbus",
+            organs=organs,
+            filename=f"limbus_{pid}.dcm",
         )
     lib = MetadataLibrary()
     lib.scan_folder(str(folder))
@@ -72,11 +80,13 @@ def _make_tab(qapp, library):
 
 def _select_organs(tree, predicate):
     tree.clearSelection()
+
     def walk(item):
         if item.data(0, ROLE_NODE_KIND) == "organ" and predicate(item):
             item.setSelected(True)
         for i in range(item.childCount()):
             walk(item.child(i))
+
     for i in range(tree.topLevelItemCount()):
         walk(tree.topLevelItem(i))
 
@@ -87,7 +97,9 @@ def _select_organs(tree, predicate):
 def test_build_session_dict_contains_required_fields():
     data = build_session_dict(
         folder="/x/y",
-        drawers_state=[{"organ_name": "Prostate", "truncate": False, "expanded": True, "patients": []}],
+        drawers_state=[
+            {"organ_name": "Prostate", "truncate": False, "expanded": True, "patients": []}
+        ],
         replacement_rules=[{"find": "a", "replace": "b"}],
         template={"organs": ["Prostate"], "gt_manufacturer": "Varian"},
     )
@@ -128,9 +140,11 @@ def test_session_state_captures_current_drawers(qapp, populated_library):
     tab = _make_tab(qapp, lib)
     _select_organs(
         tab._tree,
-        lambda it: str(it.data(0, ROLE_PATIENT_ID) or "") == "HN1"
-        and str(it.data(0, ROLE_ROI_NAME) or "") == "Prostate"
-        and "manual_" in (it.parent().text(0) if it.parent() else ""),
+        lambda it: (
+            str(it.data(0, ROLE_PATIENT_ID) or "") == "HN1"
+            and str(it.data(0, ROLE_ROI_NAME) or "") == "Prostate"
+            and "manual_" in (it.parent().text(0) if it.parent() else "")
+        ),
     )
     tab._on_set_ground_truth_clicked()
     state = tab.session_state()
@@ -149,8 +163,10 @@ def test_apply_session_state_restores_drawers(qapp, populated_library):
     tab1 = _make_tab(qapp, lib)
     _select_organs(
         tab1._tree,
-        lambda it: str(it.data(0, ROLE_ROI_NAME) or "") == "Prostate"
-        and "manual_" in (it.parent().text(0) if it.parent() else ""),
+        lambda it: (
+            str(it.data(0, ROLE_ROI_NAME) or "") == "Prostate"
+            and "manual_" in (it.parent().text(0) if it.parent() else "")
+        ),
     )
     tab1._on_set_ground_truth_clicked()
     snapshot = tab1.session_state()
@@ -212,8 +228,10 @@ def test_apply_session_resets_previous_drawers(qapp, populated_library):
     # Manually create a drawer that will NOT exist in the restored state
     _select_organs(
         tab._tree,
-        lambda it: str(it.data(0, ROLE_ROI_NAME) or "") == "Bladder"
-        and "manual_" in (it.parent().text(0) if it.parent() else ""),
+        lambda it: (
+            str(it.data(0, ROLE_ROI_NAME) or "") == "Bladder"
+            and "manual_" in (it.parent().text(0) if it.parent() else "")
+        ),
     )
     tab._on_set_ground_truth_clicked()
     assert "Bladder" in tab._drawers

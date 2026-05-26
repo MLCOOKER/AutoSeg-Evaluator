@@ -40,11 +40,12 @@ import json
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 try:
     import pydicom  # noqa: F401 — only needed for sample-data resolution
+
     _HAS_PYDICOM = True
 except ImportError:
     _HAS_PYDICOM = False
@@ -130,25 +131,64 @@ def _category_strip(canonical: str) -> tuple[str, str] | None:
     """Return ``(prefix, naked)`` if ``canonical`` starts with a known category prefix."""
     for prefix in CATEGORY_PREFIXES:
         if canonical.startswith(prefix) and len(canonical) > len(prefix):
-            return prefix, canonical[len(prefix):]
+            return prefix, canonical[len(prefix) :]
     return None
 
 
 # Words whose presence in a description disqualifies it as a synonym candidate.
 # These signal aggregates, derivatives, sentences-with-fillers, or vague labels —
 # i.e. anything that wouldn't be a sensible alias for a vendor's ROI name.
-_DESC_FILLER_WORDS: frozenset[str] = frozenset({
-    "of", "by", "with", "for", "to", "on", "and", "or",
-    "the", "a", "an", "in", "at", "as", "is",
-})
-_DESC_BLOCKLIST: frozenset[str] = frozenset({
-    "set", "pair", "both", "non", "adjacent",
-    "minus", "plus", "prv", "ptv", "ctv", "gtv", "itv",
-    "expansion", "originally", "occupied", "whole",
-    "excluding", "generated", "tissue", "structure",
-    "evaluation", "boost", "region",
-    "any", "all", "only", "external", "internal",  # too generic on their own
-})
+_DESC_FILLER_WORDS: frozenset[str] = frozenset(
+    {
+        "of",
+        "by",
+        "with",
+        "for",
+        "to",
+        "on",
+        "and",
+        "or",
+        "the",
+        "a",
+        "an",
+        "in",
+        "at",
+        "as",
+        "is",
+    }
+)
+_DESC_BLOCKLIST: frozenset[str] = frozenset(
+    {
+        "set",
+        "pair",
+        "both",
+        "non",
+        "adjacent",
+        "minus",
+        "plus",
+        "prv",
+        "ptv",
+        "ctv",
+        "gtv",
+        "itv",
+        "expansion",
+        "originally",
+        "occupied",
+        "whole",
+        "excluding",
+        "generated",
+        "tissue",
+        "structure",
+        "evaluation",
+        "boost",
+        "region",
+        "any",
+        "all",
+        "only",
+        "external",
+        "internal",  # too generic on their own
+    }
+)
 
 
 def _clean_description(description: str) -> str | None:
@@ -226,7 +266,9 @@ def _laterality_variants(stem: str, side: str) -> list[str]:
     return variants
 
 
-def build_synonyms(rows: list[CSVRow]) -> tuple[
+def build_synonyms(
+    rows: list[CSVRow],
+) -> tuple[
     dict[str, list[str]],
     dict[str, dict[str, list[str]]],
     dict[str, list[str]],
@@ -480,7 +522,9 @@ def write_audit(
             if src["reverse"]:
                 lines.append(f"- **Reverse-order:** {', '.join(f'`{x}`' for x in src['reverse'])}")
             if src["naked"]:
-                lines.append(f"- **Category-collapse:** {', '.join(f'`{x}`' for x in src['naked'])}")
+                lines.append(
+                    f"- **Category-collapse:** {', '.join(f'`{x}`' for x in src['naked'])}"
+                )
             if src.get("description"):
                 descs = list(dict.fromkeys(src["description"]))
                 lines.append(f"- **From description:** {', '.join(f'`{x}`' for x in descs)}")
@@ -509,11 +553,18 @@ def write_conflicts(conflicts: dict[str, list[str]], out_path: Path) -> None:
 
     sections = (
         ("naked_conflict", "Rule 3 conflicts (naked variant skipped to avoid ambiguity)"),
-        ("laterality_skipped_unpaired", "Rule 2 skipped — canonical ends in `_L`/`_R` but no twin in TG-263"),
-        ("description_collision_bilateral_won",
-         "Description appears for multiple lateralised forms — assigned to the bilateral canonical"),
-        ("description_collision_skipped",
-         "Description proposed by genuinely unrelated canonicals — skipped for all"),
+        (
+            "laterality_skipped_unpaired",
+            "Rule 2 skipped — canonical ends in `_L`/`_R` but no twin in TG-263",
+        ),
+        (
+            "description_collision_bilateral_won",
+            "Description appears for multiple lateralised forms — assigned to the bilateral canonical",
+        ),
+        (
+            "description_collision_skipped",
+            "Description proposed by genuinely unrelated canonicals — skipped for all",
+        ),
     )
     for key, heading in sections:
         # Same conflict often gets logged once per colliding canonical that
@@ -618,8 +669,7 @@ def write_sample_resolution(
     lines.append("")
     coverage = (len(resolved) / len(rois) * 100) if rois else 0.0
     lines.append(
-        f"- **Resolved to TG-263 canonical:** {len(resolved)} / {len(rois)} "
-        f"({coverage:.1f}%)"
+        f"- **Resolved to TG-263 canonical:** {len(resolved)} / {len(rois)} ({coverage:.1f}%)"
     )
     lines.append(f"- **Unresolved (fuzzy fallback):** {len(unresolved)} / {len(rois)}")
     lines.append("")

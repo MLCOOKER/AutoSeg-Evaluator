@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from autoseg_evaluator.core.matching import (
     Match,
     ReplacementRule,
@@ -15,7 +13,6 @@ from autoseg_evaluator.core.matching import (
     similarity,
 )
 from autoseg_evaluator.data.synonyms import flatten_synonyms, load_synonyms
-
 
 # ---- canonicalise --------------------------------------------------------
 
@@ -186,8 +183,8 @@ def test_load_synonyms_ignores_invalid_entries(tmp_path):
     path = tmp_path / "syn.json"
     payload = {
         "esophagus": ["oesophagus", "eso"],
-        "junk": "not_a_list",          # should be skipped
-        "_ignored": ["whatever"],       # underscore prefix → comment
+        "junk": "not_a_list",  # should be skipped
+        "_ignored": ["whatever"],  # underscore prefix → comment
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     loaded = load_synonyms(path)

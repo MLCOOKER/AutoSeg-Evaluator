@@ -22,7 +22,6 @@ from autoseg_evaluator.data.metadata import (
 )
 from autoseg_evaluator.ui.widgets.organ_drawer import ORGAN_MIME_TYPE
 
-
 _PATIENT_GLYPH = "👤"
 _CONTEXT_GLYPH = "🗂"
 _RTSS_GLYPH = "📄"
@@ -32,7 +31,7 @@ _CONSTITUENT_SUFFIX = "  ▸ in STAPLE consensus"  # marker for files that fed a
 # ItemDataRole keys we tuck onto QTreeWidgetItem ----
 # Each leaf carries enough information for downstream code to look up the
 # corresponding RTSTRUCT + organ inside the MetadataLibrary.
-ROLE_NODE_KIND = Qt.ItemDataRole.UserRole          # "patient" | "context" | "rtstruct" | "organ"
+ROLE_NODE_KIND = Qt.ItemDataRole.UserRole  # "patient" | "context" | "rtstruct" | "organ"
 ROLE_PATIENT_ID = Qt.ItemDataRole.UserRole + 1
 ROLE_FOR_UID = Qt.ItemDataRole.UserRole + 2
 ROLE_RTSS_SOP_UID = Qt.ItemDataRole.UserRole + 3
@@ -62,8 +61,7 @@ class LoadedContoursTree(QTreeWidget):
         font.setPointSize(max(8, font.pointSize() - 2))
         self.setFont(font)
         self.setStyleSheet(
-            "QTreeWidget::item { padding: 0px 1px; }"
-            "QTreeWidget::branch { padding: 0px; }"
+            "QTreeWidget::item { padding: 0px 1px; }QTreeWidget::branch { padding: 0px; }"
         )
 
         # Track which organ items are already assigned somewhere (so we can ✓-mark them)
@@ -185,7 +183,9 @@ class LoadedContoursTree(QTreeWidget):
         self._attach_rtstructs(item, ctx, patient_id)
         return item
 
-    def _attach_rtstructs(self, parent_item: QTreeWidgetItem, ctx: ImagingContext, patient_id: str) -> None:
+    def _attach_rtstructs(
+        self, parent_item: QTreeWidgetItem, ctx: ImagingContext, patient_id: str
+    ) -> None:
         for rtss in ctx.rtstructs:
             parent_item.addChild(self._make_rtstruct_item(rtss, patient_id))
 
@@ -229,7 +229,9 @@ class LoadedContoursTree(QTreeWidget):
         # Sort organs alphabetically (case-insensitive) regardless of file order
         for organ in sorted(rtss.organs, key=lambda o: o.roi_name.lower()):
             item.addChild(
-                self._make_organ_item(organ.roi_name, organ.roi_number, patient_id, rtss.sop_instance_uid)
+                self._make_organ_item(
+                    organ.roi_name, organ.roi_number, patient_id, rtss.sop_instance_uid
+                )
             )
         return item
 

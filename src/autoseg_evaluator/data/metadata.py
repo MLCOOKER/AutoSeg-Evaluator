@@ -10,10 +10,9 @@ vendors that issue their generated structures inside a fresh
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import pydicom
 from pydicom.errors import InvalidDicomError
@@ -23,7 +22,6 @@ from autoseg_evaluator.core.source_labels import (
     SourceLabel,
     derive_source_label,
 )
-
 
 # ---- Dataclasses ----------------------------------------------------------
 
@@ -497,7 +495,7 @@ class MetadataLibrary:
         self,
         patient_id: str,
         for_uid: str,
-        entry: "RTSTRUCTEntry",
+        entry: RTSTRUCTEntry,
     ) -> bool:
         """Append a synthetic consensus RTSS to the patient's matching context.
 
@@ -540,7 +538,7 @@ class MetadataLibrary:
             for ctx in patient.contexts:
                 ctx.rtstructs = [r for r in ctx.rtstructs if not r.is_synthetic_consensus]
 
-    def synthetic_consensus_entries(self) -> list[tuple[str, str, "RTSTRUCTEntry"]]:
+    def synthetic_consensus_entries(self) -> list[tuple[str, str, RTSTRUCTEntry]]:
         """Return ``(patient_id, for_uid, entry)`` for every synthetic RTSS in the library."""
         out: list[tuple[str, str, RTSTRUCTEntry]] = []
         for pid, patient in self.patients.items():

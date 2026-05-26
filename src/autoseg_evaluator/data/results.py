@@ -12,7 +12,6 @@ import csv
 from pathlib import Path
 from typing import Any
 
-
 # Order of the fixed metadata columns shown before the dynamic metric columns.
 META_COLUMNS: list[tuple[str, str]] = [
     ("drawer", "Drawer"),
@@ -259,9 +258,7 @@ class ResultsManager:
         meta_keys = [k for k, _label in META_COLUMNS]
         meta_labels = [label for _k, label in META_COLUMNS]
         headers = meta_labels + [
-            metric_display_label(
-                k, sd_tau_mm=self._sd_tau_mm, apl_tau_mm=self._apl_tau_mm
-            )
+            metric_display_label(k, sd_tau_mm=self._sd_tau_mm, apl_tau_mm=self._apl_tau_mm)
             for k in metrics
         ]
 

@@ -6,7 +6,6 @@ import csv
 import math
 import os
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -182,10 +181,7 @@ def test_results_tab_refresh_populates_table(qapp):
     tab.set_results_manager(rm)
     assert tab._table.rowCount() == 2
     # Headers include meta + metric columns
-    headers = [
-        tab._table.horizontalHeaderItem(c).text()
-        for c in range(tab._table.columnCount())
-    ]
+    headers = [tab._table.horizontalHeaderItem(c).text() for c in range(tab._table.columnCount())]
     assert "Drawer" in headers
     assert metric_display_label("dice") in headers
     assert "hd95" in headers  # unknown key — display label falls through unchanged

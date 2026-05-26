@@ -48,17 +48,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from autoseg_evaluator.core.matching import (
-    ReplacementRule,
-    best_match,
-    similarity,
-)
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
     find_reference_image_folder,
     read_dicom_image,
     read_rtstruct,
     truncate_to_gt_z_extent,
+)
+from autoseg_evaluator.core.matching import (
+    ReplacementRule,
+    best_match,
+    similarity,
 )
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
@@ -76,7 +76,6 @@ from autoseg_evaluator.ui.widgets.organ_drawer import (
     TestRow,
 )
 from autoseg_evaluator.utils.paths import synonyms_path
-
 
 _STATUS_VISIBLE_MS = 6000
 
@@ -305,9 +304,7 @@ class MatchContoursTab(QWidget):
                 subsection = PatientSubsection(
                     patient_id=patient_id,
                     gt_rtstruct_sop_uid=gt_sop,
-                    gt_rtstruct_filename=str(
-                        gt.get("rtstruct_filename", rtss.filename)
-                    ),
+                    gt_rtstruct_filename=str(gt.get("rtstruct_filename", rtss.filename)),
                     gt_source_label=str(gt.get("source_label", rtss.source_label)),
                     gt_roi_number=gt_roi,
                     gt_roi_name=str(gt.get("roi_name", "")),
@@ -344,7 +341,9 @@ class MatchContoursTab(QWidget):
             lambda pid, sop, roi, name=organ_name: self._on_remove_test(name, pid, sop, roi)
         )
         drawer.removeRedRequested.connect(lambda name=organ_name: self._on_remove_red(name))
-        drawer.addSelectedRequested.connect(lambda name=organ_name: self._on_drawer_add_selected(name))
+        drawer.addSelectedRequested.connect(
+            lambda name=organ_name: self._on_drawer_add_selected(name)
+        )
         drawer.visualizeRequested.connect(
             lambda pid, name=organ_name: self._on_visualize(name, pid)
         )
@@ -603,9 +602,7 @@ class MatchContoursTab(QWidget):
         self._resync_tree_marks()
         if hasattr(self, "_undo_btn"):
             self._undo_btn.setEnabled(bool(self._undo_stack))
-        self._show_status(
-            f"Undo applied. {len(self._undo_stack)} step(s) remaining."
-        )
+        self._show_status(f"Undo applied. {len(self._undo_stack)} step(s) remaining.")
 
     def _clear_undo_history(self) -> None:
         """Reset the undo stack — called when the library changes (different cohort)."""
@@ -626,14 +623,8 @@ class MatchContoursTab(QWidget):
         """
         n_drawers = len(self._drawers)
         n_deny = sum(len(v) for v in self._test_denylist.values())
-        if (
-            n_drawers == 0
-            and n_deny == 0
-            and self._last_auto_match_identifier is None
-        ):
-            self._show_status(
-                "Clear All: nothing to clear (no drawers or denylist)."
-            )
+        if n_drawers == 0 and n_deny == 0 and self._last_auto_match_identifier is None:
+            self._show_status("Clear All: nothing to clear (no drawers or denylist).")
             return
         # Push a snapshot BEFORE wiping so Undo can restore the prior
         # state. The undo stack itself is preserved.
@@ -647,9 +638,7 @@ class MatchContoursTab(QWidget):
             parts.append(f"{n_drawers} drawer(s)")
         if n_deny:
             parts.append(f"{n_deny} denylist entry/entries")
-        self._show_status(
-            "Cleared: " + ", ".join(parts) + ". Press Undo to restore."
-        )
+        self._show_status("Cleared: " + ", ".join(parts) + ". Press Undo to restore.")
 
     # ---- Denylist helpers ------------------------------------------------
 
@@ -695,7 +684,11 @@ class MatchContoursTab(QWidget):
         while self._drawers_layout.count():
             item = self._drawers_layout.takeAt(0)
             w = item.widget()
-            if w is not None and w is not self._drawers_empty_label and w not in self._drawers.values():
+            if (
+                w is not None
+                and w is not self._drawers_empty_label
+                and w not in self._drawers.values()
+            ):
                 w.setParent(None)
         if self._drawers:
             for organ in sorted(self._drawers):
@@ -718,9 +711,7 @@ class MatchContoursTab(QWidget):
         ):
             btn.setEnabled(not no_data)
         # Add Selected enable state depends on focus, not on data-loaded state.
-        self._add_selected_btn.setEnabled(
-            (not no_data) and self._focused_drawer is not None
-        )
+        self._add_selected_btn.setEnabled((not no_data) and self._focused_drawer is not None)
 
     # ---- Focus tracking ---------------------------------------------------
 
@@ -763,9 +754,7 @@ class MatchContoursTab(QWidget):
             return
         self._set_ground_truth_organs(organs)
 
-    def _set_ground_truth_organs(
-        self, organs: list[tuple[str, str, int, str]]
-    ) -> None:
+    def _set_ground_truth_organs(self, organs: list[tuple[str, str, int, str]]) -> None:
         """Set GT for each ``(patient_id, sop_uid, roi_number, roi_name)`` tuple.
 
         Called both by the manual button click and by Run Auto-Match (which
@@ -978,9 +967,7 @@ class MatchContoursTab(QWidget):
             if rtss is None:
                 skipped.append(f"{patient_id}/{roi_name} (RTSTRUCT not found)")
                 continue
-            if any(
-                t.rtstruct_sop_uid == sop_uid and t.roi_number == roi_number for t in sub.tests
-            ):
+            if any(t.rtstruct_sop_uid == sop_uid and t.roi_number == roi_number for t in sub.tests):
                 skipped.append(f"{patient_id}/{roi_name} (already added)")
                 continue
             match = similarity(
@@ -1107,9 +1094,7 @@ class MatchContoursTab(QWidget):
             return
         gt_label = f"{sub.gt_source_label} — {sub.gt_roi_name}"
         title = f"Visualize  ·  {patient_id}  ·  {organ_name}"
-        dialog = VisualizationWindow(
-            ct, gt_mask, gt_label, test_pairs, title=title, parent=self
-        )
+        dialog = VisualizationWindow(ct, gt_mask, gt_label, test_pairs, title=title, parent=self)
         # Clear status now that the dialog is up
         self._show_status("")
         dialog.exec()
@@ -1118,13 +1103,9 @@ class MatchContoursTab(QWidget):
         self, patient_id: str, sub: PatientSubsection, truncate: bool
     ) -> tuple:
         """Load the CT + GT + every available test mask for one patient subsection."""
-        folder = find_reference_image_folder(
-            self._library, patient_id, sub.gt_rtstruct_sop_uid
-        )
+        folder = find_reference_image_folder(self._library, patient_id, sub.gt_rtstruct_sop_uid)
         if folder is None:
-            raise RuntimeError(
-                f"No reference image folder found for patient {patient_id}."
-            )
+            raise RuntimeError(f"No reference image folder found for patient {patient_id}.")
         ct = read_dicom_image(folder)
         gt_path = self._rtstruct_path(patient_id, sub.gt_rtstruct_sop_uid)
         if gt_path is None:

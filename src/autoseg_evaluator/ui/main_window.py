@@ -26,7 +26,6 @@ from autoseg_evaluator.data.session import (
     load_session_file,
     save_session,
 )
-from autoseg_evaluator.workers.metrics_worker import MetricsWorker
 from autoseg_evaluator.ui.tabs.build_consensus import BuildConsensusTab
 from autoseg_evaluator.ui.tabs.compute import ComputeTab
 from autoseg_evaluator.ui.tabs.load_data import LoadDataTab
@@ -34,7 +33,7 @@ from autoseg_evaluator.ui.tabs.match_contours import MatchContoursTab
 from autoseg_evaluator.ui.tabs.results import ResultsTab
 from autoseg_evaluator.ui.theme import apply_theme
 from autoseg_evaluator.utils.settings import save_settings
-
+from autoseg_evaluator.workers.metrics_worker import MetricsWorker
 
 # qt-material ships several themes; we expose one light and one dark default.
 LIGHT_THEME = "light_blue.xml"
@@ -137,9 +136,7 @@ class MainWindow(QMainWindow):
     def _on_compute_requested(self, config: dict) -> None:
         """Spin up the background metrics worker and pipe progress into Tab 3."""
         if self._library is None:
-            QMessageBox.warning(
-                self, "Compute", "Load a folder before running metric computation."
-            )
+            QMessageBox.warning(self, "Compute", "Load a folder before running metric computation.")
             return
         drawers_state = self._match_tab.session_state()
         if not drawers_state:
@@ -170,10 +167,14 @@ class MainWindow(QMainWindow):
         # Dice / APL column headers (and CSV export) carry the τ value
         # next to the metric name. Stops users accidentally merging CSVs
         # computed at different tolerances in Excel.
-        tol = (config.get("tolerances") or {})
+        tol = config.get("tolerances") or {}
         self._results.set_tolerances(
-            sd_tau_mm=float(tol.get("surface_dice_tau_mm")) if tol.get("surface_dice_tau_mm") is not None else None,
-            apl_tau_mm=float(tol.get("apl_tolerance_mm")) if tol.get("apl_tolerance_mm") is not None else None,
+            sd_tau_mm=float(tol.get("surface_dice_tau_mm"))
+            if tol.get("surface_dice_tau_mm") is not None
+            else None,
+            apl_tau_mm=float(tol.get("apl_tolerance_mm"))
+            if tol.get("apl_tolerance_mm") is not None
+            else None,
         )
 
         self._metrics_worker = MetricsWorker(self._library, drawers_state, config)
@@ -271,18 +272,14 @@ class MainWindow(QMainWindow):
         self._action_theme_light = QAction("Light", self, checkable=True)
         self._action_theme_light.setData(LIGHT_THEME)
         self._action_theme_light.setChecked(current_theme == LIGHT_THEME)
-        self._action_theme_light.triggered.connect(
-            lambda: self._on_theme_changed(LIGHT_THEME)
-        )
+        self._action_theme_light.triggered.connect(lambda: self._on_theme_changed(LIGHT_THEME))
         theme_group.addAction(self._action_theme_light)
         theme_menu.addAction(self._action_theme_light)
 
         self._action_theme_dark = QAction("Dark", self, checkable=True)
         self._action_theme_dark.setData(DARK_THEME)
         self._action_theme_dark.setChecked(current_theme == DARK_THEME)
-        self._action_theme_dark.triggered.connect(
-            lambda: self._on_theme_changed(DARK_THEME)
-        )
+        self._action_theme_dark.triggered.connect(lambda: self._on_theme_changed(DARK_THEME))
         theme_group.addAction(self._action_theme_dark)
         theme_menu.addAction(self._action_theme_dark)
 
@@ -325,9 +322,7 @@ class MainWindow(QMainWindow):
 
     def _write_session_to(self, path: Path) -> None:
         if self._library is None:
-            QMessageBox.warning(
-                self, "Save Session", "Load a folder before saving a session."
-            )
+            QMessageBox.warning(self, "Save Session", "Load a folder before saving a session.")
             return
         data = build_session_dict(
             folder=self._library.root_folder,

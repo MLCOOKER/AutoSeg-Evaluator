@@ -124,10 +124,7 @@ class MetricsWorker(QObject):
             # This keeps peak RAM bounded by a single patient's data instead
             # of the whole cohort, which matters dramatically when working
             # with 50+ patients × multiple AI vendors × thick masks.
-            if (
-                current_patient is not None
-                and group["patient_id"] != current_patient
-            ):
+            if current_patient is not None and group["patient_id"] != current_patient:
                 self._evict_patient_caches(current_patient)
             current_patient = group["patient_id"]
 
@@ -445,9 +442,7 @@ class MetricsWorker(QObject):
                     row["metrics"].update(self._dvh_for_consensus_mask(gt_mask, dose_ds))
             else:
                 row["metrics"].update(
-                    compute_dvh_metrics(
-                        gt_rtss, dose_ds, group["gt_roi_number"], self._dvh_config
-                    )
+                    compute_dvh_metrics(gt_rtss, dose_ds, group["gt_roi_number"], self._dvh_config)
                 )
         except DVHError as exc:
             row["error"] = f"DVH: {exc}"
@@ -512,16 +507,16 @@ class MetricsWorker(QObject):
                 "STAPLE requires at least 2 non-empty rater contours in the pool. "
                 "Hint: with 'GT in pool' off, you need at least 2 test contours."
             )
-            return [
-                self._make_staple_error_row(group, r, error_text) for r in raters
-            ] + [self._make_staple_summary_row(group, None, error_text)]
+            return [self._make_staple_error_row(group, r, error_text) for r in raters] + [
+                self._make_staple_summary_row(group, None, error_text)
+            ]
 
         result = compute_staple([r["mask"] for r in staple_pool], self._staple_config)
         if result is None:
             error_text = "STAPLE returned no consensus (fewer than 2 non-empty masks)."
-            return [
-                self._make_staple_error_row(group, r, error_text) for r in raters
-            ] + [self._make_staple_summary_row(group, None, error_text)]
+            return [self._make_staple_error_row(group, r, error_text) for r in raters] + [
+                self._make_staple_summary_row(group, None, error_text)
+            ]
 
         consensus_mask = result.consensus_mask
         # The reference these rows are compared against is the STAPLE
@@ -585,9 +580,7 @@ class MetricsWorker(QObject):
             dose_ds = self._load_dose(group["patient_id"])
             if dose_ds is not None:
                 try:
-                    summary["metrics"].update(
-                        self._dvh_for_consensus_mask(consensus_mask, dose_ds)
-                    )
+                    summary["metrics"].update(self._dvh_for_consensus_mask(consensus_mask, dose_ds))
                 except DVHError as dvh_exc:
                     summary["error"] = f"DVH: {dvh_exc}"
         out.append(summary)
@@ -659,7 +652,9 @@ class MetricsWorker(QObject):
 
         try:
             reader = sitk.ImageFileReader()
-            reader.SetFileName(str(getattr(dose_ds, "filename", "")) or self._dose_path_for(dose_ds))
+            reader.SetFileName(
+                str(getattr(dose_ds, "filename", "")) or self._dose_path_for(dose_ds)
+            )
             img = reader.Execute()
         except Exception:  # noqa: BLE001 — fall back to pydicom pixel array
             return None
@@ -715,9 +710,7 @@ class MetricsWorker(QObject):
             mode_label = "gt"
         else:
             include_gt = bool(group.get("staple_include_gt", True))
-            mode_label = (
-                "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
-            )
+            mode_label = "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
         row = self._make_row_skeleton(
             group,
             source_label=test["source_label"],
@@ -737,9 +730,7 @@ class MetricsWorker(QObject):
         self, group: dict[str, Any], rater: dict[str, Any], error_text: str
     ) -> dict[str, Any]:
         include_gt = bool(group.get("staple_include_gt", True))
-        mode_label = (
-            "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
-        )
+        mode_label = "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
         row = self._make_row_skeleton(
             group,
             source_label=rater["source_label"],
@@ -763,9 +754,7 @@ class MetricsWorker(QObject):
         self, group: dict[str, Any], result, error_text: str
     ) -> dict[str, Any]:
         include_gt = bool(group.get("staple_include_gt", True))
-        mode_label = (
-            "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
-        )
+        mode_label = "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
         row = self._make_row_skeleton(
             group,
             source_label="STAPLE consensus",
@@ -797,9 +786,7 @@ class MetricsWorker(QObject):
             row["metrics"]["staple_bbox_fg_ratio"] = float(result.bbox_fg_ratio)
         return row
 
-    def _error_rows_for_group(
-        self, group: dict[str, Any], error_text: str
-    ) -> list[dict[str, Any]]:
+    def _error_rows_for_group(self, group: dict[str, Any], error_text: str) -> list[dict[str, Any]]:
         """A catastrophic group failure — emit one error row per row we *would* have emitted."""
         rows: list[dict[str, Any]] = []
         if group["gt_comparison"]:
@@ -946,8 +933,7 @@ class MetricsWorker(QObject):
         for ctx in patient.contexts:
             for dose in ctx.rtdoses:
                 if chosen is None or (
-                    dose.dose_summation_type == "PLAN"
-                    and chosen.dose_summation_type != "PLAN"
+                    dose.dose_summation_type == "PLAN" and chosen.dose_summation_type != "PLAN"
                 ):
                     chosen = dose
         if chosen is None:

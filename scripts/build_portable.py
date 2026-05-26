@@ -49,8 +49,7 @@ from pathlib import Path
 PY_VERSION = "3.11.9"
 PY_ARCH = "amd64"
 EMBED_URL = (
-    f"https://www.python.org/ftp/python/{PY_VERSION}/"
-    f"python-{PY_VERSION}-embed-{PY_ARCH}.zip"
+    f"https://www.python.org/ftp/python/{PY_VERSION}/python-{PY_VERSION}-embed-{PY_ARCH}.zip"
 )
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 
@@ -93,7 +92,7 @@ def _write_launcher(bundle: Path) -> None:
         b"@echo off\r\n"
         b"rem AutoSeg Evaluator portable launcher\r\n"
         b"rem Runs entirely from this folder. No Python install required.\r\n"
-        b"start \"AutoSeg Evaluator\" \"%~dp0python\\python.exe\" -m autoseg_evaluator\r\n"
+        b'start "AutoSeg Evaluator" "%~dp0python\\python.exe" -m autoseg_evaluator\r\n'
     )
 
 
@@ -104,7 +103,7 @@ def _write_readme(bundle: Path, version: str) -> None:
         "===============================================\r\n"
         "\r\n"
         "To launch the application:\r\n"
-        "  Double-click \"Run AutoSeg Evaluator.bat\".\r\n"
+        '  Double-click "Run AutoSeg Evaluator.bat".\r\n'
         "\r\n"
         "Requirements:\r\n"
         "  - Windows 10 or 11 (64-bit).\r\n"
@@ -186,9 +185,7 @@ def build(out_dir: Path, *, make_zip: bool, keep_cache: bool) -> Path:
     get_pip = out_dir / "get-pip.py"
     if not get_pip.exists() or not keep_cache:
         _download(GET_PIP_URL, get_pip)
-    subprocess.check_call(
-        [str(py_dir / "python.exe"), str(get_pip), "--no-warn-script-location"]
-    )
+    subprocess.check_call([str(py_dir / "python.exe"), str(get_pip), "--no-warn-script-location"])
 
     # ---- 4. Install runtime dependencies ------------------------------
     print("[4/6] installing runtime dependencies")

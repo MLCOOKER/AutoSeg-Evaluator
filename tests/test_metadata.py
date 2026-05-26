@@ -7,7 +7,6 @@ RTSTRUCT detection, source label cascade, and the issue list.
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 
@@ -144,7 +143,9 @@ def test_scan_single_patient_single_context():
         study_uid = generate_uid()
         for_uid = generate_uid()
 
-        _write_ct_slice(folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
+        _write_ct_slice(
+            folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+        )
         _write_rtstruct(
             folder,
             patient_id="P1",
@@ -184,9 +185,11 @@ def test_scan_groups_rtstruct_into_correct_context_via_for_uid():
         folder = Path(tmp)
         ct_study = generate_uid()
         ai_study = generate_uid()  # different study UID
-        for_uid = generate_uid()   # same FoR
+        for_uid = generate_uid()  # same FoR
 
-        _write_ct_slice(folder, patient_id="P1", study_uid=ct_study, series_uid=generate_uid(), for_uid=for_uid)
+        _write_ct_slice(
+            folder, patient_id="P1", study_uid=ct_study, series_uid=generate_uid(), for_uid=for_uid
+        )
         _write_rtstruct(
             folder,
             patient_id="P1",
@@ -243,7 +246,9 @@ def test_source_label_cascade_picks_label_when_manufacturer_missing():
         folder = Path(tmp)
         study_uid = generate_uid()
         for_uid = generate_uid()
-        _write_ct_slice(folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
+        _write_ct_slice(
+            folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+        )
         _write_rtstruct(
             folder,
             patient_id="P1",
@@ -266,7 +271,9 @@ def test_source_label_falls_through_to_filename_for_inhouse_models():
         folder = Path(tmp)
         study_uid = generate_uid()
         for_uid = generate_uid()
-        _write_ct_slice(folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
+        _write_ct_slice(
+            folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+        )
         _write_rtstruct(
             folder,
             patient_id="P1",
@@ -289,7 +296,9 @@ def test_custom_override_via_scan():
         folder = Path(tmp)
         study_uid = generate_uid()
         for_uid = generate_uid()
-        _write_ct_slice(folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
+        _write_ct_slice(
+            folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+        )
         rtss_path = _write_rtstruct(
             folder,
             patient_id="P1",
@@ -314,7 +323,9 @@ def test_rtdose_detected_with_summation_type():
         folder = Path(tmp)
         study_uid = generate_uid()
         for_uid = generate_uid()
-        _write_ct_slice(folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
+        _write_ct_slice(
+            folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+        )
         _write_rtdose(folder, patient_id="P1", study_uid=study_uid, for_uid=for_uid)
         lib = MetadataLibrary()
         lib.scan_folder(str(folder))
@@ -330,7 +341,9 @@ def test_issue_for_rtstruct_without_matching_ct():
         study_uid = generate_uid()
         ct_for = generate_uid()
         orphan_for = generate_uid()
-        _write_ct_slice(folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=ct_for)
+        _write_ct_slice(
+            folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=ct_for
+        )
         _write_rtstruct(
             folder,
             patient_id="P1",
@@ -355,7 +368,11 @@ def test_anonymisation_alias_merge_via_shared_for_uid():
 
         # Real CT + normal RTSTRUCT both under PatientID="HN1"
         _write_ct_slice(
-            folder, patient_id="HN1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+            folder,
+            patient_id="HN1",
+            study_uid=study_uid,
+            series_uid=generate_uid(),
+            for_uid=for_uid,
         )
         _write_rtstruct(
             folder,
@@ -406,7 +423,11 @@ def test_merge_picks_patient_with_images_as_canonical():
 
         # Alphabetically the 'AAA_' patient sorts first, but only 'HN1' has the CT.
         _write_ct_slice(
-            folder, patient_id="HN1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+            folder,
+            patient_id="HN1",
+            study_uid=study_uid,
+            series_uid=generate_uid(),
+            for_uid=for_uid,
         )
         _write_rtstruct(
             folder,
@@ -431,7 +452,11 @@ def test_merge_is_transitive_across_multiple_aliases():
         for_uid = generate_uid()
 
         _write_ct_slice(
-            folder, patient_id="HN1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+            folder,
+            patient_id="HN1",
+            study_uid=study_uid,
+            series_uid=generate_uid(),
+            for_uid=for_uid,
         )
         _write_rtstruct(
             folder,
@@ -488,7 +513,9 @@ def test_summary_aggregates_correctly():
         folder = Path(tmp)
         for_uid = generate_uid()
         study_uid = generate_uid()
-        _write_ct_slice(folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
+        _write_ct_slice(
+            folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+        )
         _write_rtstruct(
             folder,
             patient_id="P1",

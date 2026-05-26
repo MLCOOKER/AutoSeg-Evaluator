@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QApplication
 
-
 # VS Code-flavoured high-contrast dark palette. These are passed to qt-material
 # as Jinja template variables; the stylesheet substitutes them throughout.
 #
@@ -23,10 +22,10 @@ from PySide6.QtWidgets import QApplication
 #   secondaryTextColor     — body text on secondary backgrounds (light grey)
 _DARK_EXTRA: dict[str, str] = {
     "density_scale": "0",
-    "primaryColor": "#1f9bff",        # bright VS-Code-blue accent
+    "primaryColor": "#1f9bff",  # bright VS-Code-blue accent
     "primaryLightColor": "#5ec1ff",
-    "secondaryColor": "#1e1e1e",      # editor-background grey
-    "secondaryLightColor": "#2d2d30", # sidebar grey
+    "secondaryColor": "#1e1e1e",  # editor-background grey
+    "secondaryLightColor": "#2d2d30",  # sidebar grey
     "secondaryDarkColor": "#141414",
     "primaryTextColor": "#ffffff",
     "secondaryTextColor": "#d4d4d4",  # near-white body text

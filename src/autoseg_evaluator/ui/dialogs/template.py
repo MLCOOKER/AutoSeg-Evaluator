@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -125,9 +124,7 @@ class TemplateDialog(QDialog):
 
     def _on_accept(self) -> None:
         organs = [
-            line.strip()
-            for line in self._organs_edit.toPlainText().splitlines()
-            if line.strip()
+            line.strip() for line in self._organs_edit.toPlainText().splitlines() if line.strip()
         ]
         self._result = {
             "organs": organs,

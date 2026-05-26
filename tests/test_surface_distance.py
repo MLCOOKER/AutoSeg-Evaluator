@@ -21,7 +21,6 @@ from autoseg_evaluator.core.surface_distance import (
     create_table_neighbour_code_to_surface_area,
 )
 
-
 SPACING = (1.0, 1.0, 1.0)
 
 

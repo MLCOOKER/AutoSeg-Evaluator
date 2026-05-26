@@ -25,7 +25,6 @@ from autoseg_evaluator.core.surface_distance import (
     compute_surface_distances,
 )
 
-
 # ---- Individual metric wrappers ------------------------------------------
 
 
@@ -33,7 +32,9 @@ def dice(gt_arr: np.ndarray, test_arr: np.ndarray) -> float:
     return compute_dice_coefficient(gt_arr, test_arr)
 
 
-def hausdorff(gt_arr: np.ndarray, test_arr: np.ndarray, spacing_mm, percent: float = 100.0) -> float:
+def hausdorff(
+    gt_arr: np.ndarray, test_arr: np.ndarray, spacing_mm, percent: float = 100.0
+) -> float:
     sd = compute_surface_distances(gt_arr, test_arr, spacing_mm)
     return compute_robust_hausdorff(sd, percent)
 
@@ -220,9 +221,12 @@ def compute_geometric_metrics(
     if geom.get("dice"):
         out["dice"] = dice(gt_arr, test_arr)
 
-    needs_sd = geom.get("hausdorff100") or geom.get("hausdorff95") or geom.get(
-        "mean_surface_distance"
-    ) or geom.get("surface_dice")
+    needs_sd = (
+        geom.get("hausdorff100")
+        or geom.get("hausdorff95")
+        or geom.get("mean_surface_distance")
+        or geom.get("surface_dice")
+    )
     if needs_sd:
         sd = compute_surface_distances(gt_arr, test_arr, spacing_for_array)
         if geom.get("hausdorff100"):

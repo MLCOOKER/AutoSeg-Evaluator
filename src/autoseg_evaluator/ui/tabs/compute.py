@@ -167,9 +167,7 @@ class ComputeTab(QWidget):
     def config(self) -> dict[str, Any]:
         """Snapshot of the currently-selected metric configuration."""
         return {
-            "geometric": {
-                key: cb.isChecked() for key, cb in self._geom_checks.items()
-            },
+            "geometric": {key: cb.isChecked() for key, cb in self._geom_checks.items()},
             "tolerances": {
                 "surface_dice_tau_mm": float(self._sd_tau_spin.value()),
                 "apl_tolerance_mm": float(self._apl_tau_spin.value()),
@@ -486,9 +484,7 @@ class ComputeTab(QWidget):
         )
         self._d_pct_edit.blockSignals(False)
         self._v_gy_edit.blockSignals(True)
-        self._v_gy_edit.setText(
-            ", ".join(str(v) for v in dvh.get("v_at_doses_gy", [20, 30, 40]))
-        )
+        self._v_gy_edit.setText(", ".join(str(v) for v in dvh.get("v_at_doses_gy", [20, 30, 40])))
         self._v_gy_edit.blockSignals(False)
 
         # STAPLE config

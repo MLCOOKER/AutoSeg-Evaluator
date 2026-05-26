@@ -13,7 +13,7 @@ they prefer.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QRect
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -28,8 +28,8 @@ class SignalBar(QWidget):
 
     # Colourblind-safe palette: blue → amber, both distinct under deuteranopia,
     # protanopia, and tritanopia, with high luminance contrast against the grey.
-    COLOR_HIGH = QColor("#1976D2")   # blue
-    COLOR_LOW = QColor("#E69500")    # amber
+    COLOR_HIGH = QColor("#1976D2")  # blue
+    COLOR_LOW = QColor("#E69500")  # amber
     COLOR_EMPTY = QColor("#D0D0D0")  # neutral grey
 
     def __init__(
@@ -41,9 +41,7 @@ class SignalBar(QWidget):
         super().__init__(parent)
         self._similarity = self._clamp(similarity)
         self._below_threshold = bool(below_threshold)
-        total_width = (
-            self.PIP_COUNT * self.PIP_WIDTH + (self.PIP_COUNT - 1) * self.PIP_GAP + 2
-        )
+        total_width = self.PIP_COUNT * self.PIP_WIDTH + (self.PIP_COUNT - 1) * self.PIP_GAP + 2
         self.setFixedSize(total_width, self.PIP_HEIGHT + 2)
 
     # ---- API -------------------------------------------------------------

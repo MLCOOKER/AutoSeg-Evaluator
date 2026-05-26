@@ -15,14 +15,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PySide6.QtCore import QMimeData, Qt
-from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QDropEvent
 from PySide6.QtWidgets import QApplication
-
-from test_metadata import _write_ct_slice, _write_rtstruct  # noqa: E402
 
 from autoseg_evaluator.data.metadata import MetadataLibrary  # noqa: E402
 from autoseg_evaluator.ui.tabs.match_contours import MatchContoursTab  # noqa: E402
 from autoseg_evaluator.ui.widgets.organ_drawer import ORGAN_MIME_TYPE  # noqa: E402
+from test_metadata import _write_ct_slice, _write_rtstruct  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -41,7 +40,9 @@ def populated_library(tmp_path):
     for pid in ("HN1", "HN2"):
         study_uid = generate_uid()
         for_uid = generate_uid()
-        _write_ct_slice(folder, patient_id=pid, study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
+        _write_ct_slice(
+            folder, patient_id=pid, study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+        )
         _write_rtstruct(
             folder,
             patient_id=pid,
@@ -118,9 +119,11 @@ def test_set_gt_creates_drawer_and_marks_organ(qapp, populated_library):
     # Select the Prostate organ from HN1's manual.dcm only
     _select_organs(
         tab._tree,
-        lambda it: _patient_id(it) == "HN1"
-        and _organ_label(it) == "Prostate"
-        and "manual_HN1" in _rtss_filename(it),
+        lambda it: (
+            _patient_id(it) == "HN1"
+            and _organ_label(it) == "Prostate"
+            and "manual_HN1" in _rtss_filename(it)
+        ),
     )
     tab._on_set_ground_truth_clicked()
     assert "Prostate" in tab._drawers
@@ -165,9 +168,11 @@ def test_set_gt_idempotent_preserves_tests(qapp, populated_library):
 def _set_basic_gt(tab, organ: str = "Prostate", patient_id: str = "HN1"):
     _select_organs(
         tab._tree,
-        lambda it: _patient_id(it) == patient_id
-        and _organ_label(it) == organ
-        and "manual_" in _rtss_filename(it),
+        lambda it: (
+            _patient_id(it) == patient_id
+            and _organ_label(it) == organ
+            and "manual_" in _rtss_filename(it)
+        ),
     )
     tab._on_set_ground_truth_clicked()
 
@@ -205,12 +210,22 @@ def test_set_gt_auto_matches_have_no_threshold_filter(qapp, populated_library):
             for_uid=for_uid,
         )
         _write_rtstruct(
-            folder, patient_id="HN1", study_uid=study_uid, for_uid=for_uid,
-            manufacturer="Varian", organs=["Prostate"], filename="manual_HN1.dcm",
+            folder,
+            patient_id="HN1",
+            study_uid=study_uid,
+            for_uid=for_uid,
+            manufacturer="Varian",
+            organs=["Prostate"],
+            filename="manual_HN1.dcm",
         )
         _write_rtstruct(
-            folder, patient_id="HN1", study_uid=study_uid, for_uid=for_uid,
-            manufacturer="Junk", organs=["xyzqrt"], filename="junk_HN1.dcm",
+            folder,
+            patient_id="HN1",
+            study_uid=study_uid,
+            for_uid=for_uid,
+            manufacturer="Junk",
+            organs=["xyzqrt"],
+            filename="junk_HN1.dcm",
         )
         lib = MetadataLibrary()
         lib.scan_folder(str(folder))
@@ -241,9 +256,11 @@ def test_add_selected_no_focus_is_a_noop(qapp, populated_library):
     initial_test_count = len(tab._drawers["Prostate"].patient_subsection("HN1").tests)
     _select_organs(
         tab._tree,
-        lambda it: _patient_id(it) == "HN1"
-        and _organ_label(it) == "Prostate"
-        and "mim_HN1" in _rtss_filename(it),
+        lambda it: (
+            _patient_id(it) == "HN1"
+            and _organ_label(it) == "Prostate"
+            and "mim_HN1" in _rtss_filename(it)
+        ),
     )
     tab._on_add_selected_clicked()  # no focus
     assert len(tab._drawers["Prostate"].patient_subsection("HN1").tests) == initial_test_count
@@ -259,9 +276,11 @@ def test_add_selected_focused_drawer_routes_regardless_of_name(qapp, populated_l
     # Select an organ whose name doesn't match "Prostate"
     _select_organs(
         tab._tree,
-        lambda it: _patient_id(it) == "HN1"
-        and _organ_label(it) == "ProstateCTV"
-        and "limbus_HN1" in _rtss_filename(it),
+        lambda it: (
+            _patient_id(it) == "HN1"
+            and _organ_label(it) == "ProstateCTV"
+            and "limbus_HN1" in _rtss_filename(it)
+        ),
     )
     tab._on_add_selected_clicked()
     sub = drawer.patient_subsection("HN1")
@@ -277,9 +296,11 @@ def test_add_selected_skips_when_no_gt_for_patient(qapp, populated_library):
     # Try to add HN2's Prostate (no GT for HN2 in this drawer)
     _select_organs(
         tab._tree,
-        lambda it: _patient_id(it) == "HN2"
-        and _organ_label(it) == "Prostate"
-        and "limbus_HN2" in _rtss_filename(it),
+        lambda it: (
+            _patient_id(it) == "HN2"
+            and _organ_label(it) == "Prostate"
+            and "limbus_HN2" in _rtss_filename(it)
+        ),
     )
     tab._on_add_selected_clicked()
     sub_hn2 = tab._drawers["Prostate"].patient_subsection("HN2")
@@ -295,9 +316,11 @@ def test_add_selected_dedupes(qapp, populated_library):
     tab._drawers["Prostate"].set_focused(True)
     _select_organs(
         tab._tree,
-        lambda it: _patient_id(it) == "HN1"
-        and _organ_label(it) == "Prostate"
-        and "limbus_HN1" in _rtss_filename(it),
+        lambda it: (
+            _patient_id(it) == "HN1"
+            and _organ_label(it) == "Prostate"
+            and "limbus_HN1" in _rtss_filename(it)
+        ),
     )
     tab._on_add_selected_clicked()
     sub = tab._drawers["Prostate"].patient_subsection("HN1")
@@ -383,14 +406,26 @@ def test_replacement_rules_affect_auto_match(qapp, tmp_path):
     folder = tmp_path
     study_uid = generate_uid()
     for_uid = generate_uid()
-    _write_ct_slice(folder, patient_id="HN1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid)
-    _write_rtstruct(
-        folder, patient_id="HN1", study_uid=study_uid, for_uid=for_uid,
-        manufacturer="Varian", organs=["Musc_Constrict"], filename="manual_HN1.dcm",
+    _write_ct_slice(
+        folder, patient_id="HN1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
     )
     _write_rtstruct(
-        folder, patient_id="HN1", study_uid=study_uid, for_uid=for_uid,
-        manufacturer="VendorB", organs=["Pharyngeal_Constrictor"], filename="ai_HN1.dcm",
+        folder,
+        patient_id="HN1",
+        study_uid=study_uid,
+        for_uid=for_uid,
+        manufacturer="Varian",
+        organs=["Musc_Constrict"],
+        filename="manual_HN1.dcm",
+    )
+    _write_rtstruct(
+        folder,
+        patient_id="HN1",
+        study_uid=study_uid,
+        for_uid=for_uid,
+        manufacturer="VendorB",
+        organs=["Pharyngeal_Constrictor"],
+        filename="ai_HN1.dcm",
     )
     lib = MetadataLibrary()
     lib.scan_folder(str(folder))
@@ -434,28 +469,52 @@ def test_set_gt_uses_strict_literal_drawer_keys(qapp, tmp_path):
     folder = tmp_path
     study_uid_hn1 = generate_uid()
     for_uid_hn1 = generate_uid()
-    _write_ct_slice(folder, patient_id="HN1", study_uid=study_uid_hn1, series_uid=generate_uid(), for_uid=for_uid_hn1)
+    _write_ct_slice(
+        folder,
+        patient_id="HN1",
+        study_uid=study_uid_hn1,
+        series_uid=generate_uid(),
+        for_uid=for_uid_hn1,
+    )
     _write_rtstruct(
-        folder, patient_id="HN1", study_uid=study_uid_hn1, for_uid=for_uid_hn1,
-        manufacturer="VendorA", organs=["Brainstem"], filename="manual_HN1.dcm",
+        folder,
+        patient_id="HN1",
+        study_uid=study_uid_hn1,
+        for_uid=for_uid_hn1,
+        manufacturer="VendorA",
+        organs=["Brainstem"],
+        filename="manual_HN1.dcm",
     )
     study_uid_hn2 = generate_uid()
     for_uid_hn2 = generate_uid()
-    _write_ct_slice(folder, patient_id="HN2", study_uid=study_uid_hn2, series_uid=generate_uid(), for_uid=for_uid_hn2)
+    _write_ct_slice(
+        folder,
+        patient_id="HN2",
+        study_uid=study_uid_hn2,
+        series_uid=generate_uid(),
+        for_uid=for_uid_hn2,
+    )
     _write_rtstruct(
-        folder, patient_id="HN2", study_uid=study_uid_hn2, for_uid=for_uid_hn2,
-        manufacturer="VendorB", organs=["Brain Stem"], filename="manual_HN2.dcm",  # space variant
+        folder,
+        patient_id="HN2",
+        study_uid=study_uid_hn2,
+        for_uid=for_uid_hn2,
+        manufacturer="VendorB",
+        organs=["Brain Stem"],
+        filename="manual_HN2.dcm",  # space variant
     )
     lib = MetadataLibrary()
     lib.scan_folder(str(folder))
     tab = _make_tab(qapp, lib)
 
     _select_organs(
-        tab._tree, lambda it: _patient_id(it) == "HN1" and _organ_label(it) == "Brainstem",
+        tab._tree,
+        lambda it: _patient_id(it) == "HN1" and _organ_label(it) == "Brainstem",
     )
     tab._on_set_ground_truth_clicked()
     _select_organs(
-        tab._tree, lambda it: _patient_id(it) == "HN2" and _organ_label(it) == "Brain Stem",
+        tab._tree,
+        lambda it: _patient_id(it) == "HN2" and _organ_label(it) == "Brain Stem",
     )
     tab._on_set_ground_truth_clicked()
 
@@ -483,8 +542,12 @@ def test_loaded_contours_tree_sorts_organs_alphabetically(qapp, tmp_path):
     )
     # Write the RTSTRUCT with organs in deliberately-jumbled order
     _write_rtstruct(
-        folder, patient_id="HN1", study_uid=study_uid, for_uid=for_uid,
-        manufacturer="Varian", organs=["Rectum", "Bladder", "Prostate", "Cord"],
+        folder,
+        patient_id="HN1",
+        study_uid=study_uid,
+        for_uid=for_uid,
+        manufacturer="Varian",
+        organs=["Rectum", "Bladder", "Prostate", "Cord"],
         filename="manual.dcm",
     )
     lib = MetadataLibrary()

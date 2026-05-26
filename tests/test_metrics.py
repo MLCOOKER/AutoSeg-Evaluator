@@ -223,4 +223,13 @@ def test_dvh_config_output_keys_order():
         v_at_doses_gy=[20, 30],
     )
     keys = cfg.output_keys()
-    assert keys == ["dmin_gy", "dmean_gy", "dmax_gy", "d95_gy", "d50_gy", "d5_gy", "v20gy_cc", "v30gy_cc"]
+    assert keys == [
+        "dmin_gy",
+        "dmean_gy",
+        "dmax_gy",
+        "d95_gy",
+        "d50_gy",
+        "d5_gy",
+        "v20gy_cc",
+        "v30gy_cc",
+    ]
