@@ -5,7 +5,9 @@
 [![CI](https://github.com/MLCOOKER/AutoSeg-Evaluator/actions/workflows/ci.yml/badge.svg)](https://github.com/MLCOOKER/AutoSeg-Evaluator/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17383138.svg)](https://zenodo.org/records/17383138)
+
+
+Created by Branimir Rusanov
 
 AutoSeg Evaluator is a Python desktop application that computes segmentation
 quality metrics from DICOM image, RT Structure Set (RTSS), and RT Dose files.
@@ -171,23 +173,9 @@ schema, performance engineering, and a literature index.
 
 If you use AutoSeg Evaluator in your research, please cite:
 
-> Rusanov B, Rowshanfarzad P, Barry N, Ebert MA, Kendrick J. *AutoSeg
+> Rusanov B *AutoSeg
 > Evaluator: An Efficient GUI Tool for Segmentation Quality Assessment.*
-> Physics in Medicine and Biology Note, 2025.
 
-BibTeX:
-
-```bibtex
-@article{rusanov2025autoseg,
-  author  = {Rusanov, Branimir and Rowshanfarzad, Pejman and Barry, Nathaniel and Ebert, Martin A and Kendrick, Jake},
-  title   = {{AutoSeg Evaluator: An Efficient GUI Tool for Segmentation Quality Assessment}},
-  journal = {Physics in Medicine and Biology},
-  year    = {2025}
-}
-```
-
-A Zenodo DOI is also available:
-[10.5281/zenodo.17383138](https://zenodo.org/records/17383138).
 
 ## License
 
