@@ -1,0 +1,74 @@
+name: Release
+
+# Builds the portable Windows bundle and attaches it to a GitHub Release
+# whenever a tag matching ``v*`` is pushed (e.g. ``git tag v2.0.0 && git push --tags``).
+# The bundle is hospital-IT inspectable: a self-contained CPython 3.11
+# embeddable distribution with the project source + dependencies copied
+# alongside, launched by a one-line .bat. See scripts/build_portable.py.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-portable-windows:
+    name: Build portable Windows bundle
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python (build host)
+        uses: actions/setup-python@v5
+        with:
+          # The build host Python is only used to run build_portable.py.
+          # The bundle itself ships its own pinned CPython (see PY_VERSION
+          # in scripts/build_portable.py), independent of this version.
+          python-version: "3.11"
+
+      - name: Build portable bundle
+        run: python scripts/build_portable.py
+
+      - name: Locate built artifact
+        id: artifact
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path dist -Filter "AutoSegEvaluator-v*.zip" | Select-Object -First 1
+          if (-not $zip) { throw "No bundle zip found in dist/" }
+          "path=$($zip.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "name=$($zip.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Found: $($zip.Name) ($([math]::Round($zip.Length / 1MB, 1)) MB)"
+
+      - name: Upload bundle as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.path }}
+          retention-days: 30
+
+      - name: Attach bundle to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.artifact.outputs.path }}
+          draft: false
+          generate_release_notes: true
+          body: |
+            **Portable Windows bundle** — no Python install required.
+
+            Download `${{ steps.artifact.outputs.name }}`, extract it anywhere
+            (including a USB stick), and double-click
+            `Run AutoSeg Evaluator.bat`. The bundle ships a self-contained
+            CPython 3.11 runtime and every dependency as inspectable
+            `.py` / `.pyd` files under `python\Lib\site-packages\` — no
+            frozen executable, hospital-IT friendly.
+
+            See the [README](https://github.com/MLCOOKER/AutoSeg-Evaluator/blob/main/README.md)
+            for usage, citation, and source installation.
