@@ -4,6 +4,24 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-05-26
+
+### Added
+- **D at volume (cc)** DVH input on the Compute tab — request the dose
+  received by the hottest X cc of a structure (key shape ``d{X}cc_gy``,
+  header ``D{X}cc (Gy)``). Common OAR hotspot constraints (D0.1cc,
+  D1cc, D2cc) are now first-class metrics alongside the existing
+  ``D{X}%`` and ``V{X}Gy`` inputs.
+- Headers and CSV columns for the new metric sort into their own block:
+  D-percent (descending) → D-cc (ascending) → V-Gy (ascending).
+
+### Fixed
+- **Window title shows the correct version** at runtime —
+  ``__version__`` now reads from package metadata via
+  ``importlib.metadata.version()`` instead of a hardcoded string.
+  Future version bumps update everywhere (title bar, ``--version``,
+  any ``__version__`` reference) from pyproject.toml alone.
+
 ## [2.1.0] — 2026-05-26
 
 First public portable-bundle release. Adds the Build Consensus GT tab,

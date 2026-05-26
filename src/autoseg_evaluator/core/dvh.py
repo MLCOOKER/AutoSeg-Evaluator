@@ -1,8 +1,8 @@
 """Dose-Volume Histogram (DVH) metrics — thin wrapper around dicompylercore.
 
 For each (RTSTRUCT, RTDOSE, ROI number) triple this module computes the
-user-requested Dmean / Dmax / Dmin plus arbitrary D@volume% and V@dose(Gy)
-points. Values are returned in Gy (doses) and cc (volumes).
+user-requested Dmean / Dmax / Dmin plus arbitrary D@volume(%), D@volume(cc),
+and V@dose(Gy) points. Values are returned in Gy (doses) and cc (volumes).
 
 ``dicompylercore`` does the heavy lifting (dose-grid → mask resampling,
 DVH curve construction, statistic extraction). All errors are surfaced as
@@ -27,6 +27,7 @@ class DVHConfig:
     include_dmax: bool = True
     include_dmin: bool = False
     d_at_volumes_pct: list[float] = field(default_factory=list)
+    d_at_volumes_cc: list[float] = field(default_factory=list)
     v_at_doses_gy: list[float] = field(default_factory=list)
 
     @classmethod
@@ -36,6 +37,7 @@ class DVHConfig:
             include_dmax=bool(data.get("include_dmax", True)),
             include_dmin=bool(data.get("include_dmin", False)),
             d_at_volumes_pct=[float(x) for x in data.get("d_at_volumes_pct", []) or []],
+            d_at_volumes_cc=[float(x) for x in data.get("d_at_volumes_cc", []) or []],
             v_at_doses_gy=[float(x) for x in data.get("v_at_doses_gy", []) or []],
         )
 
@@ -45,6 +47,7 @@ class DVHConfig:
             or self.include_dmax
             or self.include_dmin
             or bool(self.d_at_volumes_pct)
+            or bool(self.d_at_volumes_cc)
             or bool(self.v_at_doses_gy)
         )
 
@@ -59,6 +62,8 @@ class DVHConfig:
             keys.append("dmax_gy")
         for v in self.d_at_volumes_pct:
             keys.append(f"d{_fmt_num(v)}_gy")
+        for v in self.d_at_volumes_cc:
+            keys.append(f"d{_fmt_num(v)}cc_gy")
         for d in self.v_at_doses_gy:
             keys.append(f"v{_fmt_num(d)}gy_cc")
         return keys
@@ -116,11 +121,16 @@ def compute_dvh_metrics(
     # (``%`` isn't a valid attribute char and the method bails with
     # AttributeError). The bare-number form ``D{X}`` is interpreted as
     # percentage and returns the dose to the hottest X% — which is what
-    # we want. ``V{X}Gy`` still needs its unit suffix because the
-    # alternative ``V{X}cc`` / ``V{X}%`` mean different things.
+    # we want. ``D{X}cc`` returns the dose to the hottest X cc (useful
+    # for small OARs where a fixed % is noisy). ``V{X}Gy`` still needs
+    # its unit suffix because ``V{X}cc`` / ``V{X}%`` mean different
+    # things.
     for v_pct in config.d_at_volumes_pct:
         key = f"d{_fmt_num(v_pct)}_gy"
         out[key] = _statistic_value(dvh, f"D{_fmt_num(v_pct)}")
+    for v_cc in config.d_at_volumes_cc:
+        key = f"d{_fmt_num(v_cc)}cc_gy"
+        out[key] = _statistic_value(dvh, f"D{_fmt_num(v_cc)}cc")
     for d_gy in config.v_at_doses_gy:
         key = f"v{_fmt_num(d_gy)}gy_cc"
         out[key] = _statistic_value(dvh, f"V{_fmt_num(d_gy)}Gy")

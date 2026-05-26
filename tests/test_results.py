@@ -82,6 +82,41 @@ def test_results_manager_add_and_metric_columns():
     assert cols.index("dice") < cols.index("surface_dice") < cols.index("hausdorff100")
 
 
+def test_metric_display_label_dvh_variants():
+    """All four DVH key shapes render with the right unit suffix."""
+    assert metric_display_label("d95_gy") == "D95 (Gy)"
+    assert metric_display_label("d2cc_gy") == "D2cc (Gy)"
+    # Non-integer cc value (D0.1cc is a common cord/chiasm constraint)
+    assert metric_display_label("d0.1cc_gy") == "D0.1cc (Gy)"
+    assert metric_display_label("v20gy_cc") == "V20Gy (cc)"
+
+
+def test_dvh_dynamic_columns_sort_into_three_blocks():
+    """D% (descending), D-cc (ascending), V-Gy (ascending) — distinct blocks."""
+    rm = ResultsManager()
+    rm.add_row(
+        _row(
+            metrics={
+                "v40gy_cc": 5.0,
+                "d2_gy": 60.0,
+                "d2cc_gy": 50.0,
+                "d95_gy": 55.0,
+                "v20gy_cc": 25.0,
+                "d0.1cc_gy": 52.0,
+            }
+        )
+    )
+    dynamic_cols = rm.metric_columns()[len(CANONICAL_METRIC_COLUMNS) :]
+    assert dynamic_cols == [
+        "d95_gy",
+        "d2_gy",
+        "d0.1cc_gy",
+        "d2cc_gy",
+        "v20gy_cc",
+        "v40gy_cc",
+    ]
+
+
 def test_results_manager_clear():
     rm = ResultsManager()
     rm.add_row(_row())

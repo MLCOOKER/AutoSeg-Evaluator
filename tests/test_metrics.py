@@ -198,6 +198,7 @@ def test_dvh_config_from_dict_round_trip():
             "include_dmax": False,
             "include_dmin": True,
             "d_at_volumes_pct": [95, 50, "5"],
+            "d_at_volumes_cc": [2, "0.1"],
             "v_at_doses_gy": [20.0, 30],
         }
     )
@@ -205,13 +206,31 @@ def test_dvh_config_from_dict_round_trip():
     assert cfg.include_dmax is False
     assert cfg.include_dmin is True
     assert cfg.d_at_volumes_pct == [95.0, 50.0, 5.0]
+    assert cfg.d_at_volumes_cc == [2.0, 0.1]
     assert cfg.v_at_doses_gy == [20.0, 30.0]
     assert cfg.any_enabled() is True
 
 
+def test_dvh_config_from_dict_backwards_compatible_no_cc():
+    """A pre-2.2 session JSON without ``d_at_volumes_cc`` must still load."""
+    cfg = DVHConfig.from_dict(
+        {
+            "include_dmean": True,
+            "d_at_volumes_pct": [95],
+            "v_at_doses_gy": [20],
+        }
+    )
+    assert cfg.d_at_volumes_cc == []
+
+
 def test_dvh_config_disabled_when_all_off():
-    cfg = DVHConfig(False, False, False, [], [])
+    cfg = DVHConfig(False, False, False, [], [], [])
     assert cfg.any_enabled() is False
+
+
+def test_dvh_config_any_enabled_with_only_cc():
+    cfg = DVHConfig(False, False, False, [], [2.0], [])
+    assert cfg.any_enabled() is True
 
 
 def test_dvh_config_output_keys_order():
@@ -220,6 +239,7 @@ def test_dvh_config_output_keys_order():
         include_dmax=True,
         include_dmin=True,
         d_at_volumes_pct=[95, 50, 5],
+        d_at_volumes_cc=[2, 0.1],
         v_at_doses_gy=[20, 30],
     )
     keys = cfg.output_keys()
@@ -230,6 +250,8 @@ def test_dvh_config_output_keys_order():
         "d95_gy",
         "d50_gy",
         "d5_gy",
+        "d2cc_gy",
+        "d0.1cc_gy",
         "v20gy_cc",
         "v30gy_cc",
     ]

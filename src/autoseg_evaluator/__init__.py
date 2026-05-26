@@ -1,3 +1,8 @@
 """AutoSeg Evaluator — segmentation quality assessment for radiotherapy."""
 
-__version__ = "2.0.0a1"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("autoseg-evaluator")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"

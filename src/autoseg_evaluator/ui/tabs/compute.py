@@ -177,6 +177,7 @@ class ComputeTab(QWidget):
                 "include_dmax": self._dose_checks["dmax"].isChecked(),
                 "include_dmin": self._dose_checks["dmin"].isChecked(),
                 "d_at_volumes_pct": _parse_number_list(self._d_pct_edit.text()),
+                "d_at_volumes_cc": _parse_number_list(self._d_cc_edit.text()),
                 "v_at_doses_gy": _parse_number_list(self._v_gy_edit.text()),
             },
             "staple": {
@@ -308,6 +309,16 @@ class ComputeTab(QWidget):
         self._d_pct_edit.editingFinished.connect(self._emit_config_changed)
         d_v_form.addRow("D at volume (%):", self._d_pct_edit)
 
+        self._d_cc_edit = QLineEdit(box)
+        self._d_cc_edit.setPlaceholderText("0.1, 1, 2")
+        self._d_cc_edit.setToolTip(
+            "DxCC: dose received by the hottest X cc of the structure (Gy). "
+            "D2cc is a common OAR hotspot constraint (cord, brainstem). "
+            "Useful for small structures where a fixed % is noisy."
+        )
+        self._d_cc_edit.editingFinished.connect(self._emit_config_changed)
+        d_v_form.addRow("D at volume (cc):", self._d_cc_edit)
+
         self._v_gy_edit = QLineEdit(box)
         self._v_gy_edit.setPlaceholderText("20, 30, 40")
         self._v_gy_edit.setToolTip(
@@ -322,8 +333,9 @@ class ComputeTab(QWidget):
             QLabel(
                 "<span style='color:#666; font-size: 9pt'>"
                 "D<sub>X</sub>%: dose to the hottest X% of the structure (Gy). "
+                "D<sub>X</sub>cc: dose to the hottest X cc of the structure (Gy). "
                 "V<sub>X</sub>Gy: volume (cc) receiving ≥ X Gy. "
-                "Examples: D95, D50, D5, D2 — V20Gy, V30Gy, V40Gy."
+                "Examples: D95, D50, D2 — D0.1cc, D1cc, D2cc — V20Gy, V30Gy."
                 "</span>",
                 box,
             )
@@ -483,6 +495,12 @@ class ComputeTab(QWidget):
             ", ".join(str(v) for v in dvh.get("d_at_volumes_pct", [95, 50, 5, 2]))
         )
         self._d_pct_edit.blockSignals(False)
+        self._d_cc_edit.blockSignals(True)
+        # Empty default for D-at-cc — clinicians who don't use it shouldn't
+        # have to clear placeholders. D2cc, D1cc, D0.1cc are common OAR
+        # constraints and shown as placeholder text instead.
+        self._d_cc_edit.setText(", ".join(str(v) for v in dvh.get("d_at_volumes_cc", []) or []))
+        self._d_cc_edit.blockSignals(False)
         self._v_gy_edit.blockSignals(True)
         self._v_gy_edit.setText(", ".join(str(v) for v in dvh.get("v_at_doses_gy", [20, 30, 40])))
         self._v_gy_edit.blockSignals(False)

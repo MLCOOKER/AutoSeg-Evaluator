@@ -133,8 +133,9 @@ def metric_display_label(
     """Return the user-facing column header for a metric key (with units).
 
     Handles the canonical static labels (above), plus dynamic DVH metrics
-    matching ``d{X}_gy`` → ``D{X} (Gy)`` and ``v{X}gy_cc`` → ``V{X}Gy (cc)``.
-    Anything else falls through as-is so non-standard keys are still visible.
+    matching ``d{X}_gy`` → ``D{X} (Gy)``, ``d{X}cc_gy`` → ``D{X}cc (Gy)``,
+    and ``v{X}gy_cc`` → ``V{X}Gy (cc)``. Anything else falls through as-is
+    so non-standard keys are still visible.
 
     When ``sd_tau_mm`` / ``apl_tau_mm`` are supplied, the Surface Dice and
     APL headers are decorated with the tolerance value so two CSVs
@@ -149,6 +150,14 @@ def metric_display_label(
         return f"Total APL @ {apl_tau_mm:.2f} mm"
     if key in _METRIC_LABELS:
         return _METRIC_LABELS[key]
+    # ``d{X}cc_gy`` must be tested before the bare ``d{X}_gy`` form since
+    # both end with ``_gy``; the cc variant carries an explicit unit
+    # suffix between the number and ``_gy``.
+    if key.startswith("d") and key.endswith("cc_gy"):
+        try:
+            return f"D{_fmt_dvh_num(key[1:-5])}cc (Gy)"
+        except ValueError:
+            pass
     if key.startswith("d") and key.endswith("_gy"):
         try:
             return f"D{int(key[1:-3])} (Gy)"
@@ -162,13 +171,29 @@ def metric_display_label(
     return key
 
 
+def _fmt_dvh_num(token: str) -> str:
+    """Format a DVH numeric token for header display (drop trailing ``.0``)."""
+    val = float(token)
+    if val.is_integer():
+        return str(int(val))
+    return token
+
+
 def _dynamic_metric_sort_key(name: str) -> tuple:
     """Sort key for metric columns not in the canonical list.
 
     Groups user-defined DVH metrics by family and numeric suffix so a list
-    like ``[v40gy_cc, d95_gy, d2_gy, v20gy_cc, custom_x]`` becomes
-    ``[d2_gy, d95_gy, v20gy_cc, v40gy_cc, custom_x]``.
+    like ``[v40gy_cc, d95_gy, d2cc_gy, d2_gy, v20gy_cc, custom_x]`` becomes
+    ``[d2_gy, d95_gy, d2cc_gy, v20gy_cc, v40gy_cc, custom_x]``.
     """
+    # D{X}cc_gy → dose to hottest X cc — sort ascending by X (D0.1cc, D1cc,
+    # D2cc are the typical order for OAR hotspot constraints). Tested first
+    # because the bare ``d{X}_gy`` form also matches the ``_gy`` suffix.
+    if name.startswith("d") and name.endswith("cc_gy"):
+        try:
+            return (1, float(name[1:-5]), name)
+        except ValueError:
+            pass
     # D{X}_gy → dose to hottest X% — sort by X descending so D95 comes before D2
     if name.startswith("d") and name.endswith("_gy"):
         try:
@@ -178,10 +203,10 @@ def _dynamic_metric_sort_key(name: str) -> tuple:
     # V{X}gy_cc → volume receiving ≥ X Gy — sort by X ascending
     if name.startswith("v") and name.endswith("gy_cc"):
         try:
-            return (1, int(name[1:-5]), name)
+            return (2, int(name[1:-5]), name)
         except ValueError:
             pass
-    return (2, 0, name)
+    return (3, 0, name)
 
 
 class ResultsManager:
