@@ -203,7 +203,14 @@ a background `ScanWorker` thread so the UI stays responsive.
 **Key UI elements:**
 - **Manage Source Labels…** opens [`ui/dialogs/source_labels.py`](../src/autoseg_evaluator/ui/dialogs/source_labels.py)
   — sortable table with bulk-apply for overriding the auto-detected
-  vendor label per RTSTRUCT.
+  vendor label per RTSTRUCT. Six raw DICOM identification fields are
+  surfaced as separate columns alongside the detected source
+  (`Manufacturer`, `StructureSetLabel`, `SoftwareVersions`,
+  `StructureSetName`, `StructureSetDescription`,
+  `ManufacturerModelName`) so the user can disambiguate two RTSSes
+  from the same vendor at a glance. Columns are user-resizable;
+  right-click any column header to show or hide individual DICOM
+  columns. File / Patient / Custom label are pinned visible.
 - **Cohort tree (left) + Issues panel (right)** — side-by-side splitter,
   default 2:1. Issues panel surfaces things like orphan RTSSes, missing
   reference CTs, anonymisation merges.
@@ -265,7 +272,14 @@ Generate replaces the entry in place.
 1. **Replacement Rules…** — site-specific `find → replace` substring
    rules applied before TG-263 canonicalisation.
 2. **Define Template…** — a list of organs to find + the GT-identification
-   criterion (`Manufacturer` substring and/or filename substring).
+   criterion (`Source label contains:` substring and/or filename
+   substring). The source-label criterion is matched against
+   `rtss.source_label` — the cascade-resolved name with any Manage
+   Source Labels override applied — so it works regardless of which
+   DICOM tag the cascade resolved through and honours user overrides.
+   Before v2.3 this matched the raw `Manufacturer` tag only; the
+   settings key migrated from `gt_manufacturer` → `gt_source_label`
+   with the legacy key still read as a fallback.
 3. **Run Auto-Match** — for each patient, identify the GT RTSS via the
    template criterion, find the best-matching ROI per organ, build an
    `OrganDrawer` per organ with the GT and one auto-matched test row per
@@ -321,8 +335,14 @@ Dice, Surface Dice, HD100, HD95, MSD, Volume, COM offset. Default OFF: APL.
 
 **DVH section:**
 - Built-in toggles: `Dmin / Dmean / Dmax`.
-- Free-text inputs for user-defined `D@volume%` (e.g. `95, 50, 5, 2`) and
-  `V@dose Gy` (e.g. `20, 30`).
+- Three free-text inputs for user-defined DVH points:
+  - `D at volume (%)` (e.g. `95, 50, 5, 2`) — dose to the hottest X%
+    of the structure, keyed `d{X}_gy`.
+  - `D at volume (cc)` (e.g. `0.1, 1, 2`) — dose to the hottest X cc
+    of the structure (small-OAR hotspot constraints), keyed
+    `d{X}cc_gy`. *(Added in v2.2.)*
+  - `V at dose (Gy)` (e.g. `20, 30`) — volume in cc receiving ≥ X Gy,
+    keyed `v{X}gy_cc`.
 
 **Compute / Cancel** at the bottom. Spinbox scroll-wheel events are
 ignored (`_NoScrollSpinBox` subclass) so scrolling the tab doesn't
@@ -373,7 +393,12 @@ MetadataLibrary
 │           │   ├── frame_of_reference_uid
 │           │   ├── organs: list[OrganEntry]
 │           │   ├── is_synthetic_consensus: bool        # ← Tab 2 synthetic
-│           │   └── constituent_groups: dict[int, list[tuple[str,int]]]
+│           │   ├── constituent_groups: dict[int, list[tuple[str,int]]]
+│           │   └── structure_set_label / software_versions /
+│           │       structure_set_name / structure_set_description /
+│           │       manufacturer_model_name        # ← v2.3 raw DICOM fields
+│           │       # exposed in Manage Source Labels for disambiguation;
+│           │       # all default to "" so older sessions load unchanged.
 │           └── rtdoses: list[RTDOSEEntry]
 └── issues: list[ScanIssue]
 ```
@@ -560,18 +585,24 @@ package on the SAMPLE DATA cohort.
 Thin wrapper around `dicompylercore.dvhcalc.get_dvh`. The wrapper:
 
 - Accepts a `DVHConfig` dataclass (`include_dmin / include_dmean /
-  include_dmax / d_at_volumes_pct / v_at_doses_gy`).
+  include_dmax / d_at_volumes_pct / d_at_volumes_cc / v_at_doses_gy`).
+  *(d_at_volumes_cc added in v2.2.)*
 - Outputs keys in canonical order: `dmin_gy, dmean_gy, dmax_gy, d{X}_gy
-  (for each X in d_at_volumes_pct), v{X}gy_cc (for each X in
-  v_at_doses_gy)`.
+  (for each X in d_at_volumes_pct), d{X}cc_gy (for each X in
+  d_at_volumes_cc), v{X}gy_cc (for each X in v_at_doses_gy)`.
 - Raises a clean `DVHError` (rather than letting `dicompylercore`'s
   internal exceptions bubble) so the worker can write a `DVH: …` error
   row instead of crashing the batch.
 
-**dicompylercore 0.5.6 syntax quirk** (already fixed): `dvh.statistic()`
-rejects `"D{X}%"` as an attribute name. The bare `"D{X}"` form is
-interpreted as a relative-volume percentage and returns dose in Gy.
-V{X}Gy still requires the unit suffix.
+**dicompylercore 0.5.6 syntax quirks** (already handled):
+- `dvh.statistic()` rejects `"D{X}%"` as an attribute name. The bare
+  `"D{X}"` form is interpreted as a relative-volume percentage and
+  returns dose in Gy.
+- `"D{X}cc"` returns dose to the hottest X cc — useful for small OARs
+  (cord, brainstem, chiasm) where a fixed % is noisy. Typical clinical
+  hotspot constraints: D0.1cc, D1cc, D2cc.
+- `"V{X}Gy"` still requires the unit suffix; the alternatives
+  `V{X}cc` / `V{X}%` mean different things in dicompyler-core.
 
 **GT-vs-dose row:** when DVH is enabled in Tab 4, the worker emits one
 extra row per (patient × organ) with the GT contour's own dose
@@ -896,9 +927,34 @@ no registry writes; no admin rights; no AV false positives.
 — per-user, survives folder replacement on update. Matches what every
 mainstream clinical app does.
 
-**Step 11 (not yet implemented)** will add `scripts/build_portable.py`
-+ a GitHub Actions workflow that builds the bundle on every tagged
-release and uploads it to the Release page with SHA-256 in the notes.
+**Build pipeline** (added v2.1):
+[`scripts/build_portable.py`](../scripts/build_portable.py) downloads
+the official CPython 3.11 embeddable distribution, patches the `._pth`
+file to enable site-packages, bootstraps pip via the upstream
+`get-pip.py`, installs the runtime dependencies from
+`requirements.txt` into the bundle's `Lib/site-packages/`, copies the
+project source into `app/autoseg_evaluator/`, and writes the `.bat`
+launcher + bundle-local `README.txt`. Output:
+`dist/AutoSegEvaluator-v{version}/` plus a matching `.zip` of the same.
+
+**Release workflow**
+([`.github/workflows/release.yml`](../.github/workflows/release.yml)):
+on every `v*` tag push, builds the portable bundle on a
+`windows-latest` runner, attaches the resulting `.zip` to a GitHub
+Release (with auto-generated release notes), and also uploads it as a
+30-day workflow artifact. The release body links the README and notes
+that no Python install is required at the end user.
+
+**CI workflow**
+([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)): ruff
+check + `ruff format --check` on Ubuntu, plus the full pytest suite on
+`windows-latest` + `ubuntu-latest` with `QT_QPA_PLATFORM=offscreen`
+for headless Qt. Runs on every push to `main` and every PR.
+
+**Version single-source-of-truth** (v2.2): `autoseg_evaluator.__version__`
+reads from package metadata via `importlib.metadata.version()`, so
+bumping `pyproject.toml` updates the window title bar and every other
+`__version__` reference automatically — no hardcoded duplicate.
 
 ---
 
@@ -917,8 +973,19 @@ release and uploads it to the Release page with SHA-256 in the notes.
   the probabilistic mask (which would require a different DVH
   formulation entirely).
 
-### Pending features (post-v2.1)
-- **Step 11**: portable Python bundle + GitHub Actions + README rewrite.
+### Shipped since v2.1
+- **v2.1.0** — Portable Windows bundle + GitHub Actions CI / release
+  pipeline + README rewrite (Linux / macOS install sections added).
+- **v2.2.0** — `D at volume (cc)` DVH input; window-title fix via
+  `importlib.metadata.version()`.
+- **v2.3.0** — Template GT identifier queries `source_label` (cascade
+  + override) instead of raw Manufacturer tag; six raw DICOM columns
+  in Manage Source Labels (Manufacturer, StructureSetLabel,
+  SoftwareVersions, StructureSetName, StructureSetDescription,
+  ManufacturerModelName); user-resizable columns + right-click
+  show/hide.
+
+### Pending features
 - **Docs**: full user guide, hospital deployment doc, metrics reference,
   developer guide.
 - Inter-rater Dice matrix as an optional results-table addition
@@ -977,4 +1044,7 @@ release and uploads it to the Release page with SHA-256 in the notes.
 
 ---
 
-*Document version 1 — generated 2026-05-25 against commit `099c180`.*
+*Document version 2 — updated 2026-05-27 against commit `39aff48` (v2.3.0).
+Tracks: portable bundle + CI/release pipeline (v2.1), `D at volume (cc)`
+DVH input + window-title fix (v2.2), template source-label match +
+expanded Manage Source Labels columns (v2.3).*
