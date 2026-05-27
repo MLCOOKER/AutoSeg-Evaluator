@@ -864,7 +864,7 @@ on the next `setValue` tick.
 
 ## Validation & test suite
 
-**Test runner:** pytest, 269 tests, ~7 s wall clock.
+**Test runner:** pytest, 277 tests, ~7 s wall clock.
 
 **Coverage highlights:**
 
@@ -884,6 +884,7 @@ on the next `setValue` tick.
 | `test_compute_tab.py` | ~10 | Compute config emission, settings round-trip |
 | `test_match_logic.py` / `test_source_labels.py` | ~10 | Smaller utility tests |
 | `test_platipy_equivalence.py` | 4 | PlatiPy mask-rasteriser equivalence on a synthetic CT + RTSTRUCT (square, donut with XOR hole, multi-slice) |
+| `test_metrics_equivalence.py` | 8 | Bit-for-bit equivalence of Dice / HD100 / HD95 / Surface Dice @ 3 mm / mean surface distance against ``google-deepmind/surface-distance`` and APL total / mean against PlatiPy 0.7.2 |
 
 **Empirical clinical validation:** every metric was cross-checked
 against the upstream package (`surface-distance`, `PlatiPy`) on the
@@ -903,6 +904,27 @@ every push. The test was also verified offline against the full HN1
 sample cohort: **110/110 ROIs voxel-exact across two RTSSes**,
 including donut-shaped Spinal_Canal, 4.9M-voxel BODY, and structures
 down to 88 voxels (Lens_L).
+
+**Bit-for-bit metric parity across seven metrics** (v2.3.2):
+[`test_metrics_equivalence.py`](../tests/test_metrics_equivalence.py)
+extends the regression net to the metric implementations themselves.
+On a synthetic GT/Test pair with non-trivial overlap (offset 12-mm
+half-width squares spanning four CT slices each), AutoSeg's output
+is asserted equal to:
+
+* `surface_distance.compute_dice_coefficient` — volumetric Dice,
+* `surface_distance.compute_robust_hausdorff` at 100% and 95% — HD100 / HD95,
+* `surface_distance.compute_surface_dice_at_tolerance` at 3 mm — Surface Dice,
+* `surface_distance.compute_average_surface_distance` — mean surface distance,
+* `platipy.imaging.label.comparison.compute_metric_total_apl` — Total APL,
+* `platipy.imaging.label.comparison.compute_metric_mean_apl` — Mean APL.
+
+The test was also verified offline on the HN1 cohort across nine
+shared organ pairs (brainstem, spinal cord, mandible, larynx, oral
+cavity, bilateral parotids, bilateral cochleae): **63/63 metric–ROI
+comparisons produced zero absolute difference** (max |Δ| = 0.000e+00
+across every metric). CI installs both `platipy>=0.7` and
+`surface-distance` so the regression test runs on every push.
 
 ---
 
