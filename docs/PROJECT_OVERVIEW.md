@@ -864,7 +864,7 @@ on the next `setValue` tick.
 
 ## Validation & test suite
 
-**Test runner:** pytest, 259 tests, ~6 s wall clock.
+**Test runner:** pytest, 269 tests, ~7 s wall clock.
 
 **Coverage highlights:**
 
@@ -883,6 +883,7 @@ on the next `setValue` tick.
 | `test_widgets.py` | ~10 | OrganDrawer mutations, drag-drop payload format |
 | `test_compute_tab.py` | ~10 | Compute config emission, settings round-trip |
 | `test_match_logic.py` / `test_source_labels.py` | ~10 | Smaller utility tests |
+| `test_platipy_equivalence.py` | 4 | PlatiPy mask-rasteriser equivalence on a synthetic CT + RTSTRUCT (square, donut with XOR hole, multi-slice) |
 
 **Empirical clinical validation:** every metric was cross-checked
 against the upstream package (`surface-distance`, `PlatiPy`) on the
@@ -890,6 +891,18 @@ SAMPLE DATA HN1 cohort. Δ = 0.00e+00 across Dice, HD100, HD95, Surface
 Dice, MSD (both directions), APL total/mean, and per-slice APL list.
 The two validation packages are kept installed in `requirements.txt`
 so CI / users can re-run the parity check at any time.
+
+**Bit-for-bit PlatiPy parity for mask rasterisation** (v2.3.1):
+[`test_platipy_equivalence.py`](../tests/test_platipy_equivalence.py)
+generates a tiny synthetic CT + RTSTRUCT and asserts AutoSeg's
+`extract_mask_for_roi` produces a numpy-equal output to PlatiPy's
+`transform_point_set_from_dicom_struct` across three ROI shapes:
+single-slice square, donut (XOR-produced hole), and multi-slice
+square. CI installs `platipy>=0.7` explicitly so this test runs on
+every push. The test was also verified offline against the full HN1
+sample cohort: **110/110 ROIs voxel-exact across two RTSSes**,
+including donut-shaped Spinal_Canal, 4.9M-voxel BODY, and structures
+down to 88 voxels (Lens_L).
 
 ---
 

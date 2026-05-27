@@ -73,5 +73,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Install PlatiPy (for equivalence test only)
+        # PlatiPy backs tests/test_platipy_equivalence.py — a regression
+        # test that pins AutoSeg's mask rasteriser as voxel-identical to
+        # PlatiPy's transform_point_set_from_dicom_struct. Kept out of
+        # the main [dev] extras to avoid forcing every contributor into
+        # PlatiPy's transitive deps (vtk, etc.); the test pytest.importorskip's
+        # itself when PlatiPy is absent so a missing-on-purpose local run
+        # still passes.
+        run: python -m pip install "platipy>=0.7"
+
       - name: Run pytest
         run: python -m pytest -q
