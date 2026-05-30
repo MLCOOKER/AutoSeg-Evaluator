@@ -66,6 +66,11 @@ class RTSTRUCTEntry:
     structure_set_name: str = ""
     structure_set_description: str = ""
     manufacturer_model_name: str = ""
+    # v2.4: additional disambiguation fields for identifying which manual
+    # observer produced an RTSS (multi-observer consensus workflow). Both
+    # default to "" so older sessions / tests load unchanged.
+    reviewer_name: str = ""  # (300E,0008) RT Approval module
+    operators_name: str = ""  # (0008,1070) General Equipment / Series
 
     # ---- Synthetic STAPLE-consensus support ---------------------------------
     # When True, this entry has no real DICOM file backing it. The masks are
@@ -83,6 +88,19 @@ class RTSTRUCTEntry:
         if self.is_synthetic_consensus:
             return "(STAPLE consensus)"
         return os.path.basename(self.file_path)
+
+    @property
+    def parent_folder(self) -> str:
+        """Name of the directory the RTSS file lives in.
+
+        A PHI-safe display token used in the Manage Source Labels window to
+        help identify which observer produced a file when the data is
+        foldered per observer. Empty for synthetic-consensus entries (no
+        backing file).
+        """
+        if self.is_synthetic_consensus or not self.file_path:
+            return ""
+        return os.path.basename(os.path.dirname(self.file_path))
 
 
 @dataclass
@@ -325,6 +343,8 @@ class MetadataLibrary:
                 structure_set_name=_get_str(ds, "StructureSetName"),
                 structure_set_description=_get_str(ds, "StructureSetDescription"),
                 manufacturer_model_name=_get_str(ds, "ManufacturerModelName"),
+                reviewer_name=_get_str(ds, "ReviewerName"),
+                operators_name=_get_str(ds, "OperatorsName"),
             )
         )
 

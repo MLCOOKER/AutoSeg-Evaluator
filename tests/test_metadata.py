@@ -74,6 +74,8 @@ def _write_rtstruct(
     structure_set_label: str = "",
     organs: list[str] | None = None,
     filename: str | None = None,
+    reviewer_name: str = "",
+    operators_name: str = "",
 ) -> Path:
     sop_uid = generate_uid()
     meta = _new_file_meta(RTStructureSetStorage, sop_uid)
@@ -89,6 +91,10 @@ def _write_rtstruct(
         ds.Manufacturer = manufacturer
     if structure_set_label:
         ds.StructureSetLabel = structure_set_label
+    if reviewer_name:
+        ds.ReviewerName = reviewer_name
+    if operators_name:
+        ds.OperatorsName = operators_name
 
     # ReferencedFrameOfReferenceSequence carries the FoR for RTSTRUCT
     for_item = Dataset()
@@ -177,6 +183,67 @@ def test_scan_single_patient_single_context():
         assert len(ctx.rtstructs) == 2
         sources = sorted(r.source_label for r in ctx.rtstructs)
         assert sources == ["Limbus AI", "Varian"]
+
+
+def test_scan_captures_reviewer_operators_and_parent_folder():
+    """v2.4 disambiguation fields populate from the dataset / file path."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # Folder-per-observer layout: <tmp>/ObserverA/<files>
+        observer_dir = Path(tmp) / "ObserverA"
+        observer_dir.mkdir()
+        study_uid = generate_uid()
+        for_uid = generate_uid()
+        _write_ct_slice(
+            observer_dir,
+            patient_id="P1",
+            study_uid=study_uid,
+            series_uid=generate_uid(),
+            for_uid=for_uid,
+        )
+        _write_rtstruct(
+            observer_dir,
+            patient_id="P1",
+            study_uid=study_uid,
+            for_uid=for_uid,
+            manufacturer="Eclipse",
+            organs=["Parotid_L"],
+            filename="rs_observerA.dcm",
+            reviewer_name="Dr Smith",
+            operators_name="JK",
+        )
+
+        lib = MetadataLibrary()
+        lib.scan_folder(str(Path(tmp)))
+
+        rtss = lib.patients["P1"].contexts[0].rtstructs[0]
+        assert rtss.reviewer_name == "Dr Smith"
+        assert rtss.operators_name == "JK"
+        # parent_folder is the immediate directory the file lives in.
+        assert rtss.parent_folder == "ObserverA"
+
+
+def test_scan_missing_reviewer_operators_default_empty():
+    """Absent ReviewerName / OperatorsName tags leave the fields empty."""
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        study_uid = generate_uid()
+        for_uid = generate_uid()
+        _write_ct_slice(
+            folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+        )
+        _write_rtstruct(
+            folder,
+            patient_id="P1",
+            study_uid=study_uid,
+            for_uid=for_uid,
+            organs=["Parotid_L"],
+            filename="rs.dcm",
+        )
+        lib = MetadataLibrary()
+        lib.scan_folder(str(folder))
+        rtss = lib.patients["P1"].contexts[0].rtstructs[0]
+        assert rtss.reviewer_name == ""
+        assert rtss.operators_name == ""
 
 
 def test_scan_groups_rtstruct_into_correct_context_via_for_uid():

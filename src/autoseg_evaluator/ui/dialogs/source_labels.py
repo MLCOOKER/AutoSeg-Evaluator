@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QItemSelection, QItemSelectionModel, QPoint, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QDialog,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -54,7 +55,10 @@ _COL_SOFTWARE_VERSIONS = 6
 _COL_STRUCT_SET_NAME = 7
 _COL_STRUCT_SET_DESCRIPTION = 8
 _COL_MANUFACTURER_MODEL = 9
-_COL_CUSTOM = 10
+_COL_REVIEWER_NAME = 10
+_COL_OPERATORS_NAME = 11
+_COL_PARENT_FOLDER = 12
+_COL_CUSTOM = 13
 _COL_HEADERS = [
     "File",
     "Patient",
@@ -66,6 +70,9 @@ _COL_HEADERS = [
     "StructureSetName",
     "StructureSetDescription",
     "ManufacturerModelName",
+    "ReviewerName",
+    "OperatorsName",
+    "Parent folder",
     "Custom label",
 ]
 
@@ -84,13 +91,57 @@ _DEFAULT_COLUMN_WIDTHS: list[int] = [
     130,  # StructureSetName
     180,  # StructureSetDescription
     170,  # ManufacturerModelName
+    140,  # ReviewerName
+    140,  # OperatorsName
+    140,  # Parent folder
     180,  # Custom label
 ]
 
 # Identity / interaction columns are always shown — hiding them would
 # leave the dialog unusable. Every other column is toggleable via the
 # header context menu.
-_NON_HIDEABLE_COLUMNS: frozenset[int] = frozenset({0, 1, 10})  # File, Patient, Custom label
+_NON_HIDEABLE_COLUMNS: frozenset[int] = frozenset({_COL_FILE, _COL_PATIENT, _COL_CUSTOM})
+
+# Field cascade for the "Select similar" assisted-propagation helper. When
+# the user picks one row and clicks "Select similar", the first field below
+# with a non-empty value on that row is used to find every other row sharing
+# the same value. Ordered most-reliable-first for identifying which manual
+# observer produced a file. ``_filename_stem`` is a synthetic attr handled
+# specially in :func:`_field_value_of`.
+_SIMILARITY_FIELDS: list[tuple[str, str]] = [
+    ("Parent folder", "parent_folder"),
+    ("OperatorsName", "operators_name"),
+    ("ReviewerName", "reviewer_name"),
+    ("StructureSetName", "structure_set_name"),
+    ("Manufacturer", "manufacturer"),
+    ("Filename", "_filename_stem"),
+]
+
+
+def _field_value_of(rtss: RTSTRUCTEntry, attr: str) -> str:
+    """Return the (stripped) value of ``attr`` on an RTSS, '' if absent.
+
+    ``_filename_stem`` is a synthetic attribute returning the filename with
+    its extension dropped — the lowest-priority distinguishing token.
+    """
+    if attr == "_filename_stem":
+        name = rtss.filename or ""
+        return name.rsplit(".", 1)[0] if name else ""
+    return (getattr(rtss, attr, "") or "").strip()
+
+
+def best_distinguishing_field(rtss: RTSTRUCTEntry) -> tuple[str, str, str]:
+    """Return ``(display_label, attr, value)`` for the first non-empty field.
+
+    Walks :data:`_SIMILARITY_FIELDS` in priority order. Returns
+    ``("", "", "")`` when the RTSS has no usable distinguishing metadata.
+    Pure + Qt-free so it can be unit tested directly.
+    """
+    for label, attr in _SIMILARITY_FIELDS:
+        value = _field_value_of(rtss, attr)
+        if value:
+            return label, attr, value
+    return "", "", ""
 
 
 class ManageSourceLabelsDialog(QDialog):
@@ -114,6 +165,9 @@ class ManageSourceLabelsDialog(QDialog):
         self._library = library
         self._existing = dict(existing_overrides)
         self._result_overrides: dict[str, str] = dict(existing_overrides)
+        # SOPInstanceUID → RTSTRUCTEntry, built during _populate_table so the
+        # "Select similar" helper can read distinguishing fields per row.
+        self._rtss_by_sop: dict[str, RTSTRUCTEntry] = {}
 
         self._build_ui()
         self._populate_table()
@@ -126,8 +180,11 @@ class ManageSourceLabelsDialog(QDialog):
             "labels persist across sessions and apply everywhere the source is "
             "shown (drawers, results CSV, etc.). Leave the field blank to keep "
             "the auto-detected value. "
-            "<i>Tip: right-click any column header to show or hide DICOM "
-            "columns, and drag the dividers to resize.</i>"
+            "<i>Tip: for multi-observer studies, give each observer a distinct "
+            "label (e.g. 'Observer A'). Select one of their files and click "
+            "<b>Select similar</b> to auto-select that observer's other files, "
+            "then Apply. Right-click any column header to show or hide "
+            "columns.</i>"
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -137,6 +194,9 @@ class ManageSourceLabelsDialog(QDialog):
         self._table.setHorizontalHeaderLabels(_COL_HEADERS)
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # Explicit ExtendedSelection so bulk-apply and "Select similar" can
+        # build a multi-row selection (Ctrl/Shift-click plus programmatic).
+        self._table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(
             QTableWidget.EditTrigger.DoubleClicked
             | QTableWidget.EditTrigger.SelectedClicked
@@ -170,6 +230,19 @@ class ManageSourceLabelsDialog(QDialog):
         # Bulk-apply row: select rows in the table, type a label, click apply.
         # Lets the user retag a whole vendor's worth of RTSSes in one step.
         bulk_row = QHBoxLayout()
+        # "Select similar" feeds this same flow by auto-populating the
+        # selection from a distinguishing field on the one selected row.
+        self._select_similar_btn = QPushButton("Select similar…", self)
+        self._select_similar_btn.setToolTip(
+            "Select exactly one row, then click to auto-select every other file "
+            "that shares its strongest distinguishing field (parent folder, "
+            "OperatorsName, ReviewerName, StructureSetName, Manufacturer, or "
+            "filename). Useful for tagging one observer's files across patients."
+        )
+        self._select_similar_btn.setEnabled(False)
+        self._select_similar_btn.clicked.connect(self._on_select_similar)
+        bulk_row.addWidget(self._select_similar_btn)
+        bulk_row.addSpacing(12)
         bulk_row.addWidget(QLabel("Bulk apply:", self))
         self._bulk_edit = QLineEdit(self)
         self._bulk_edit.setPlaceholderText(
@@ -240,11 +313,17 @@ class ManageSourceLabelsDialog(QDialog):
             self._set_readonly_cell(
                 row, _COL_MANUFACTURER_MODEL, rtss.manufacturer_model_name or ""
             )
+            # v2.4 disambiguation columns — help identify which manual
+            # observer produced a file when several share a TPS / vendor.
+            self._set_readonly_cell(row, _COL_REVIEWER_NAME, rtss.reviewer_name or "")
+            self._set_readonly_cell(row, _COL_OPERATORS_NAME, rtss.operators_name or "")
+            self._set_readonly_cell(row, _COL_PARENT_FOLDER, rtss.parent_folder or "")
 
             custom = self._existing.get(rtss.sop_instance_uid, "")
             edit_item = QTableWidgetItem(custom)
             edit_item.setData(Qt.ItemDataRole.UserRole, rtss.sop_instance_uid)
             self._table.setItem(row, _COL_CUSTOM, edit_item)
+            self._rtss_by_sop[rtss.sop_instance_uid] = rtss
 
         self._table.setSortingEnabled(was_sorted)
 
@@ -297,6 +376,93 @@ class ManageSourceLabelsDialog(QDialog):
         n = len(self._selected_data_rows())
         self._bulk_btn.setText(f"Apply to selected ({n})")
         self._bulk_btn.setEnabled(n > 0)
+        # "Select similar" only makes sense from a single anchor row.
+        self._select_similar_btn.setEnabled(n == 1)
+
+    # ---- Assisted propagation ("Select similar") -------------------------
+
+    def _rtss_for_row(self, row: int) -> RTSTRUCTEntry | None:
+        item = self._table.item(row, _COL_CUSTOM)
+        if item is None:
+            return None
+        sop = item.data(Qt.ItemDataRole.UserRole)
+        return self._rtss_by_sop.get(sop) if sop else None
+
+    def _select_rows(self, rows: list[int]) -> None:
+        """Replace the current selection with exactly ``rows`` (full-row)."""
+        model = self._table.model()
+        last_col = self._table.columnCount() - 1
+        selection = QItemSelection()
+        for r in rows:
+            selection.merge(
+                QItemSelection(model.index(r, 0), model.index(r, last_col)),
+                QItemSelectionModel.SelectionFlag.Select,
+            )
+        sel_model = self._table.selectionModel()
+        sel_model.clearSelection()
+        sel_model.select(selection, QItemSelectionModel.SelectionFlag.Select)
+
+    def _rows_matching(self, attr: str, value: str) -> list[int]:
+        """Row indices whose RTSS has ``attr == value`` (the synthetic
+        ``_filename_stem`` attr is handled by :func:`_field_value_of`)."""
+        return [
+            r
+            for r in range(self._table.rowCount())
+            if (rt := self._rtss_for_row(r)) is not None and _field_value_of(rt, attr) == value
+        ]
+
+    def _on_select_similar(self) -> None:
+        """Show a menu of distinguishing fields → select rows matching the
+        anchor on the chosen field.
+
+        Rather than silently picking one field (parent_folder can be the
+        *patient* directory, not the observer), we present every non-empty
+        field with its value + how many files share it, so the user chooses
+        the one that identifies the observer. The cascade-recommended field
+        is marked with ★.
+        """
+        rows = self._selected_data_rows()
+        if len(rows) != 1:
+            QMessageBox.information(
+                self,
+                "Select similar",
+                "Select exactly one row first, then click 'Select similar'.",
+            )
+            return
+        anchor = self._rtss_for_row(rows[0])
+        if anchor is None:
+            return
+        _rec_label, rec_attr, _rec_value = best_distinguishing_field(anchor)
+
+        menu = QMenu(self)
+        added = False
+        for label, attr in _SIMILARITY_FIELDS:
+            value = _field_value_of(anchor, attr)
+            if not value:
+                continue
+            matching = self._rows_matching(attr, value)
+            text = f"{label} = '{value}'   ({len(matching)} file(s))"
+            if attr == rec_attr:
+                text += "  ★"
+            action = QAction(text, menu)
+            # Disable fields that only match the anchor itself.
+            action.setEnabled(len(matching) > 1)
+            action.triggered.connect(lambda _checked=False, rs=matching: self._select_rows(rs))
+            menu.addAction(action)
+            added = True
+
+        if not added:
+            QMessageBox.information(
+                self,
+                "Select similar",
+                "The selected file has no distinguishing metadata to match on "
+                "(no folder, OperatorsName, ReviewerName, StructureSetName, "
+                "Manufacturer, or filename).",
+            )
+            return
+
+        btn = self._select_similar_btn
+        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _on_bulk_apply(self) -> None:
         rows = self._selected_data_rows()
