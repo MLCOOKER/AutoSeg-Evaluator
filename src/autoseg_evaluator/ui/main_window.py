@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self._load_tab.libraryLoaded.connect(self._on_library_loaded)
         self._load_tab.overridesChanged.connect(self._on_overrides_changed)
         self._consensus_tab.consensusGenerated.connect(self._on_consensus_generated)
+        self._consensus_tab.observerLabelsChanged.connect(self._on_observer_labels_changed)
         self._match_tab.replacementRulesChanged.connect(self._on_replacement_rules_changed)
         self._match_tab.templateChanged.connect(self._on_template_changed)
         self._compute_tab.metricConfigChanged.connect(self._on_metric_config_changed)
@@ -110,6 +111,10 @@ class MainWindow(QMainWindow):
 
     def _on_overrides_changed(self, overrides: dict[str, str]) -> None:
         self._settings["custom_source_labels"] = dict(overrides)
+        save_settings(self._settings)
+
+    def _on_observer_labels_changed(self, labels: list) -> None:
+        self._settings["consensus_observer_labels"] = list(labels)
         save_settings(self._settings)
 
     def _on_replacement_rules_changed(self, rules: list) -> None:

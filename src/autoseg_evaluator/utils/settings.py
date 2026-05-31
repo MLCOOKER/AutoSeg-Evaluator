@@ -45,6 +45,10 @@ _DEFAULTS: dict[str, Any] = {
         "apl_total": False,
     },
     "custom_source_labels": {},  # keyed by SOP Instance UID
+    # Source labels designated as manual observers for the Build Consensus GT
+    # tab (v2.4). Each patient's RTSSes carrying one of these labels are
+    # combined into a STAPLE consensus, with each label treated as a rater.
+    "consensus_observer_labels": [],  # list[str]
     # User-defined Find→Replace rules applied to organ names before matching
     "replacement_rules": [],  # list of {"find": str, "replace": str}
     # Last-used auto-match template (organ list + GT identifier criteria)

@@ -101,6 +101,9 @@ class BuildConsensusTab(QWidget):
     """
 
     consensusGenerated = Signal()
+    # Emitted (with the new list of observer labels) when the user changes the
+    # observer selection, so MainWindow can persist it to settings.json.
+    observerLabelsChanged = Signal(list)
 
     def __init__(
         self, settings: dict[str, Any] | None = None, parent: QWidget | None = None
@@ -108,20 +111,69 @@ class BuildConsensusTab(QWidget):
         super().__init__(parent)
         self._settings = settings or {}
         self._library: MetadataLibrary | None = None
-        # group_key = (patient_id, source_label) — the unit of consensus building.
-        # group_drawers[group_key] = {organ_canonical_name: [(rtss_sop_uid, roi_number, roi_name), ...]}
-        self._group_drawers: dict[tuple[str, str], dict[str, list[tuple[str, int, str]]]] = {}
+        # v2.4 model: the consensus unit is the PATIENT. Each manual observer
+        # is identified by a DISTINCT source label (assigned in Tab 1); the
+        # user selects which labels are observers (``consensus_observer_labels``
+        # in settings) and the group for a patient = its RTSSes whose source
+        # label is in that set. So group_drawers is keyed by patient_id:
+        #   group_drawers[patient_id] = {organ_name: [(sop_uid, roi_number, roi_name), ...]}
+        self._group_drawers: dict[str, dict[str, list[tuple[str, int, str]]]] = {}
+        # Warnings raised during eligibility detection (e.g. duplicate observer
+        # label on one patient). Surfaced in the status line on each refresh.
+        self._eligibility_warnings: list[str] = []
         self._synonyms_flat = self._load_synonyms()
         self._build_ui()
         self._refresh_state()
 
     # ---- Public API -------------------------------------------------------
 
+    def set_settings(self, settings: dict[str, Any]) -> None:
+        """Inject the live settings dict (MainWindow shares one instance)."""
+        self._settings = settings if settings is not None else {}
+
     def set_library(self, library: MetadataLibrary | None) -> None:
         """Called by MainWindow after a folder scan completes."""
         self._library = library
         self._group_drawers.clear()
         self._refresh_state()
+
+    # ---- Observer-label selection ----------------------------------------
+
+    def _all_source_labels(self) -> list[str]:
+        """Sorted distinct non-synthetic source labels across the library."""
+        if self._library is None:
+            return []
+        labels: set[str] = set()
+        for patient in self._library.patients.values():
+            for ctx in patient.contexts:
+                for r in ctx.rtstructs:
+                    if not r.is_synthetic_consensus and r.source_label:
+                        labels.add(r.source_label)
+        return sorted(labels)
+
+    def _selected_observer_labels(self) -> list[str]:
+        """The labels the user designated as manual observers (persisted).
+
+        Intersected with the labels actually present so a stale selection
+        from a previous cohort doesn't leak in.
+        """
+        stored = self._settings.get("consensus_observer_labels", []) or []
+        available = set(self._all_source_labels())
+        return [s for s in stored if s in available]
+
+    def _set_selected_observer_labels(self, labels: list[str]) -> None:
+        self._settings["consensus_observer_labels"] = list(labels)
+
+    def _source_label_for(self, sop_uid: str) -> str:
+        """Source label (= observer identity) for a real RTSS SOP UID."""
+        if self._library is None:
+            return "?"
+        for patient in self._library.patients.values():
+            for ctx in patient.contexts:
+                for r in ctx.rtstructs:
+                    if r.sop_instance_uid == sop_uid:
+                        return r.source_label or "?"
+        return "?"
 
     def replacement_rules(self) -> list[ReplacementRule]:
         rules = list(self._settings.get("replacement_rules", []) or [])
@@ -136,11 +188,11 @@ class BuildConsensusTab(QWidget):
     def session_state(self) -> list[dict[str, Any]]:
         """Snapshot every currently-registered synthetic consensus for saving.
 
-        Returns a list of dicts shaped like::
+        Returns a list of dicts shaped like (session schema v4)::
 
             [{
                 "patient_id": ...,
-                "source_label": ...,           # the manual-rater label
+                "observer_labels": ["Observer A", "Observer B", ...],  # raters
                 "for_uid": ...,                # FrameOfReferenceUID
                 "synthetic_sop_uid": ...,      # the synthetic UID we minted
                 "organs": [                    # one per synthetic ROI
@@ -153,9 +205,12 @@ class BuildConsensusTab(QWidget):
                 ],
             }, ...]
 
-        The next session restore re-creates the same synthetic RTSSes by
-        calling :meth:`apply_session_state` with this list AFTER the
-        library has been rescanned.
+        ``observer_labels`` is informational (the synthetic entry is rebuilt
+        from ``constituents``); pre-v4 sessions carried a single
+        ``source_label`` instead, which :meth:`apply_session_state` still
+        tolerates. The next restore re-creates the same synthetic RTSSes by
+        calling :meth:`apply_session_state` with this list AFTER the library
+        has been rescanned.
         """
         out: list[dict[str, Any]] = []
         if self._library is None:
@@ -163,6 +218,7 @@ class BuildConsensusTab(QWidget):
         for pid, for_uid, syn in self._library.synthetic_consensus_entries():
             organs_payload: list[dict[str, Any]] = []
             organ_by_roi_number = {o.roi_number: o for o in syn.organs}
+            constituent_sops: set[str] = set()
             for roi_number, constituents in syn.constituent_groups.items():
                 organ = organ_by_roi_number.get(roi_number)
                 if organ is None:
@@ -177,10 +233,12 @@ class BuildConsensusTab(QWidget):
                         ],
                     }
                 )
+                constituent_sops.update(str(sop) for sop, _roi in constituents)
+            observer_labels = sorted({self._source_label_for(sop) for sop in constituent_sops})
             out.append(
                 {
                     "patient_id": pid,
-                    "source_label": syn.source_label,
+                    "observer_labels": observer_labels,
                     "for_uid": for_uid,
                     "synthetic_sop_uid": syn.sop_instance_uid,
                     "organs": organs_payload,
@@ -207,7 +265,9 @@ class BuildConsensusTab(QWidget):
                 continue
             for_uid = str(group.get("for_uid", "") or "")
             synthetic_sop = str(group.get("synthetic_sop_uid", "") or "")
-            source_label = str(group.get("source_label", "") or CONSENSUS_SOURCE_LABEL)
+            # Synthetic entries always carry the consensus source label. The
+            # payload's observer_labels (v4) / source_label (pre-v4) are
+            # informational only — the entry is rebuilt from constituents.
             if not synthetic_sop:
                 continue
             # Validate constituents and build OrganEntry + constituent_groups.
@@ -234,7 +294,7 @@ class BuildConsensusTab(QWidget):
                 sop_instance_uid=synthetic_sop,
                 file_path="",
                 manufacturer=CONSENSUS_SOURCE_LABEL,
-                source_label=source_label,
+                source_label=CONSENSUS_SOURCE_LABEL,
                 source_origin="synthetic",
                 frame_of_reference_uid=for_uid,
                 study_instance_uid="",
@@ -261,6 +321,15 @@ class BuildConsensusTab(QWidget):
         self._status_label = QLabel("", self)
         self._status_label.setStyleSheet("color: #666;")
         toolbar.addWidget(self._status_label, stretch=1)
+        # Observer selection lives in a popup (keeps the tab compact). Button
+        # text shows how many labels are currently selected as observers.
+        self._observers_btn = QPushButton("Manual observers…", self)
+        self._observers_btn.setToolTip(
+            "Choose which source labels represent manual observers. Each "
+            "selected label is treated as one rater in the STAPLE consensus."
+        )
+        self._observers_btn.clicked.connect(self._on_select_observers_clicked)
+        toolbar.addWidget(self._observers_btn)
         self._help_btn = QPushButton("Help", self)
         self._help_btn.setToolTip("Show a workflow explanation for this tab")
         self._help_btn.clicked.connect(self._on_help_clicked)
@@ -269,14 +338,16 @@ class BuildConsensusTab(QWidget):
 
         # ---- Empty-state placeholder ----
         self._empty_label = QLabel(
-            "<i>This tab activates when the loaded folder contains two or more RTSSes "
-            "sharing a source label (e.g. multiple manual contours). Use Manage Source "
-            "Labels in Tab 1 to retag files if needed.</i>",
+            "<i>Click <b>Manual observers…</b> above to choose which source "
+            "labels are manual observers. This tab then builds a STAPLE "
+            "consensus per patient from the observers that have contours in "
+            "that patient (2+ required). If no labels appear, load data in "
+            "Tab 1 and give each observer a distinct source label.</i>",
             self,
         )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
-        self._empty_label.setStyleSheet("color: #888; padding: 48px;")
+        self._empty_label.setStyleSheet("color: #888; padding: 36px;")
         outer.addWidget(self._empty_label)
 
         # ---- Main split (groups on left, drawers on right) ----
@@ -287,11 +358,11 @@ class BuildConsensusTab(QWidget):
         group_pane = QFrame(self._splitter)
         group_layout = QVBoxLayout(group_pane)
         group_layout.setContentsMargins(0, 0, 0, 0)
-        group_layout.addWidget(QLabel("<b>Eligible groups</b>", group_pane))
+        group_layout.addWidget(QLabel("<b>Eligible patients</b>", group_pane))
         group_layout.addWidget(
             QLabel(
                 "<span style='color:#666; font-size: 9pt'>"
-                "Each row = one patient + source label with 2+ RTSSes. "
+                "Each row = one patient with 2+ observers. "
                 "Click to inspect the organ matches on the right.</span>",
                 group_pane,
             )
@@ -403,8 +474,33 @@ class BuildConsensusTab(QWidget):
 
     # ---- State management -------------------------------------------------
 
+    def _on_select_observers_clicked(self) -> None:
+        """Open the observer-selection popup; persist + refresh on accept."""
+        labels = self._all_source_labels()
+        if not labels:
+            self._show_status_msg(
+                "Manual observers",
+                "No source labels in the current library. Load data in Tab 1 first.",
+            )
+            return
+        dlg = _ObserverSelectionDialog(labels, self._selected_observer_labels(), parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dlg.selected_labels()
+        self._set_selected_observer_labels(chosen)
+        self.observerLabelsChanged.emit(chosen)
+        self._group_drawers.clear()
+        self._refresh_state()
+
     def _refresh_state(self) -> None:
-        """Detect eligible groups, populate the left list, drive grey/active states."""
+        """Detect eligible patients, populate the lists, drive grey/active states."""
+        has_any_labels = bool(self._all_source_labels())
+        n_selected = len(self._selected_observer_labels())
+        self._observers_btn.setEnabled(has_any_labels)
+        self._observers_btn.setText(
+            f"Manual observers ({n_selected})…" if has_any_labels else "Manual observers…"
+        )
+
         eligible = self._eligible_groups()
         active = bool(eligible)
         self._empty_label.setVisible(not active)
@@ -414,49 +510,77 @@ class BuildConsensusTab(QWidget):
         self._inter_manual_btn.setEnabled(active)
         self._groups_list.clear()
         if not active:
-            self._status_label.setText("No eligible groups in the current library.")
+            if not has_any_labels:
+                self._status_label.setText("Load data in Tab 1 to begin.")
+            elif not self._selected_observer_labels():
+                self._status_label.setText("Click 'Manual observers…' to choose observers.")
+            else:
+                self._status_label.setText("No patient has 2+ of the selected observers.")
             self._clear_drawers()
             return
-        for (pid, label), rtsses in eligible.items():
-            item = QListWidgetItem(f"{pid}   {label}   ({len(rtsses)} RTSS)")
-            item.setData(Qt.ItemDataRole.UserRole, (pid, label))
-            item.setToolTip("\n".join(f"• {r.filename}" for r in rtsses))
+        for pid, members in eligible.items():
+            n = len(members)
+            item = QListWidgetItem(f"{pid}   ({n} observer{'s' if n != 1 else ''})")
+            item.setData(Qt.ItemDataRole.UserRole, pid)
+            item.setToolTip("\n".join(f"• {r.source_label}  ({r.filename})" for r in members))
             self._groups_list.addItem(item)
-        self._status_label.setText(
-            f"{len(eligible)} eligible group(s) — select one to inspect its organ matches."
-        )
-        # Auto-select first group + auto-match all groups so drawers populate.
-        for (pid, label), _ in eligible.items():
-            self._auto_match_group(pid, label)
+        status = f"{len(eligible)} eligible patient(s) — select one to inspect organ matches."
+        if self._eligibility_warnings:
+            status += f"  ⚠ {len(self._eligibility_warnings)} labelling warning(s)."
+            self._groups_list.setToolTip("\n".join(self._eligibility_warnings))
+        else:
+            self._groups_list.setToolTip("")
+        self._status_label.setText(status)
+        # Auto-match all patients so drawers populate; select the first.
+        for pid in eligible:
+            self._auto_match_group(pid)
         self._groups_list.setCurrentRow(0)
 
-    def _eligible_groups(self) -> dict[tuple[str, str], list[RTSTRUCTEntry]]:
-        """Return ``{(patient_id, source_label): [RTSTRUCTEntry, …]}`` for groups with 2+ RTSSes.
+    def _eligible_groups(self) -> dict[str, list[RTSTRUCTEntry]]:
+        """Return ``{patient_id: [observer RTSSes]}`` for the consensus workflow.
 
-        Excludes synthetic consensus entries from consideration so we don't
-        chain consensus-of-consensus accidentally.
+        v2.4 model: a patient is eligible when it has 2+ RTSSes whose source
+        label is in the user-selected observer set. Each observer is expected
+        to contribute exactly one RTSS per patient (distinct label per
+        observer). If a label appears more than once for a patient, that's a
+        Tab-1 labelling error — we keep the first and record a warning rather
+        than silently double-counting a rater (which would bias STAPLE).
+
+        Synthetic consensus entries are excluded so we never chain
+        consensus-of-consensus.
         """
-        out: dict[tuple[str, str], list[RTSTRUCTEntry]] = {}
+        out: dict[str, list[RTSTRUCTEntry]] = {}
+        self._eligibility_warnings = []
         if self._library is None:
             return out
+        observers = set(self._selected_observer_labels())
+        if not observers:
+            return out
         for pid, patient in self._library.patients.items():
-            grouped: dict[str, list[RTSTRUCTEntry]] = defaultdict(list)
+            by_label: dict[str, list[RTSTRUCTEntry]] = defaultdict(list)
             for ctx in patient.contexts:
                 for r in ctx.rtstructs:
                     if r.is_synthetic_consensus:
                         continue
-                    if not r.source_label:
-                        continue
-                    grouped[r.source_label].append(r)
-            for label, rs in grouped.items():
-                if len(rs) >= 2:
-                    out[(pid, label)] = rs
+                    if r.source_label in observers:
+                        by_label[r.source_label].append(r)
+            members: list[RTSTRUCTEntry] = []
+            for label, rs in by_label.items():
+                if len(rs) > 1:
+                    self._eligibility_warnings.append(
+                        f"{pid}: {len(rs)} RTSSes labelled '{label}' — using the first. "
+                        "Give each observer a distinct label in Tab 1."
+                    )
+                members.append(rs[0])
+            if len(members) >= 2:
+                # Stable order so rater rows / matrix columns are deterministic.
+                out[pid] = sorted(members, key=lambda r: r.source_label)
         return out
 
     # ---- Auto-match -------------------------------------------------------
 
-    def _auto_match_group(self, patient_id: str, source_label: str) -> None:
-        """Group ROIs across the RTSSes in (patient_id, source_label) into organ buckets.
+    def _auto_match_group(self, patient_id: str) -> None:
+        """Group ROIs across the patient's observer RTSSes into organ buckets.
 
         Uses **best-score-first threshold clustering**: for each RTSS, every
         organ is pre-scored against every existing bucket, then organs are
@@ -477,8 +601,9 @@ class BuildConsensusTab(QWidget):
         its own bucket — or stays single-rater and gets dropped from
         the final consensus, which is the correct behaviour.
         """
-        rtsses = self._eligible_groups().get((patient_id, source_label), [])
+        rtsses = self._eligible_groups().get(patient_id, [])
         if not rtsses:
+            self._group_drawers[patient_id] = {}
             return
         rules = self.replacement_rules()
         threshold = float(self._threshold_spin.value())
@@ -551,12 +676,12 @@ class BuildConsensusTab(QWidget):
                     suffix += 1
                 display = f"{display} #{suffix}"
             kept[display] = members
-        self._group_drawers[(patient_id, source_label)] = kept
+        self._group_drawers[patient_id] = kept
 
     def _on_threshold_changed(self, _value: float) -> None:
         """Re-cluster every eligible group whenever the threshold spinbox moves."""
-        for pid, label in list(self._group_drawers.keys()):
-            self._auto_match_group(pid, label)
+        for pid in list(self._group_drawers.keys()):
+            self._auto_match_group(pid)
         # Re-render the currently-selected group's drawers if any.
         current = self._groups_list.currentItem()
         if current is not None:
@@ -568,13 +693,13 @@ class BuildConsensusTab(QWidget):
         self._clear_drawers()
         if current is None:
             return
-        key = current.data(Qt.ItemDataRole.UserRole)
-        if not key:
+        pid = current.data(Qt.ItemDataRole.UserRole)
+        if not pid:
             return
-        drawers = self._group_drawers.get(tuple(key), {})
+        drawers = self._group_drawers.get(str(pid), {})
         if not drawers:
             placeholder = QLabel(
-                "<i>No organs match across 2+ of this group's RTSSes. "
+                "<i>No organs match across 2+ of this patient's observers. "
                 "STAPLE requires at least 2 raters per organ.</i>",
                 self._drawers_container,
             )
@@ -609,10 +734,15 @@ class BuildConsensusTab(QWidget):
         )
         layout.addWidget(header)
         for sop_uid, roi_number, roi_name in raters:
+            # Identify each contributing rater by its source label (= observer
+            # name) — consistent across patients. Filename is shown as a
+            # secondary hint in case two observers were mislabelled.
+            observer = self._source_label_for(sop_uid)
             filename = self._rtstruct_filename_for(sop_uid)
             line = QLabel(
-                f"<span style='color:#444'>• {roi_name}</span>"
-                f"   <span style='color:#888; font-size: 9pt'>({filename}, ROI #{roi_number})</span>",
+                f"<span style='color:#444'>• <b>{observer}</b>: {roi_name}</span>"
+                f"   <span style='color:#888; font-size: 9pt'>"
+                f"({filename}, ROI #{roi_number})</span>",
                 row,
             )
             layout.addWidget(line)
@@ -639,70 +769,70 @@ class BuildConsensusTab(QWidget):
     # ---- Actions ----------------------------------------------------------
 
     def _on_generate_clicked(self) -> None:
-        """Generate synthetic consensus RTSSes for EVERY eligible group.
+        """Generate synthetic consensus RTSSes for EVERY eligible patient.
 
         Wipes any previously-generated synthetic entries first so the
         result reflects the current group-drawer state without leftovers
-        from a stale configuration (e.g. a group that's no longer
-        eligible after the user re-labelled an RTSS).
+        from a stale configuration (e.g. a patient no longer eligible after
+        the user changed the observer selection).
         """
         if self._library is None or not self._group_drawers:
             QMessageBox.information(
                 self,
                 "Generate Consensus GT",
-                "No eligible groups to generate consensus for.",
+                "No eligible patients to generate consensus for.",
             )
             return
         self._library.clear_synthetic_consensus()
-        keys = list(self._group_drawers.keys())
-        created, skipped = self._register_consensus_for(keys)
+        pids = list(self._group_drawers.keys())
+        created, skipped = self._register_consensus_for(pids)
         self._report_generation_result(created, skipped, scope="ALL")
 
     def _on_generate_selected_clicked(self) -> None:
-        """Generate synthetic consensus only for groups highlighted on the left.
+        """Generate synthetic consensus only for patients highlighted on the left.
 
-        Does NOT wipe existing synthetic entries — so other groups'
-        consensus RTSSes remain intact. Per-group regeneration replaces
+        Does NOT wipe existing synthetic entries — so other patients'
+        consensus RTSSes remain intact. Per-patient regeneration replaces
         the existing entry in place via the deterministic
         ``_mint_synthetic_uid`` token.
         """
         if self._library is None or not self._group_drawers:
             self._show_status_msg(
                 "Generate Consensus GT",
-                "No eligible groups to generate consensus for.",
+                "No eligible patients to generate consensus for.",
             )
             return
-        selected_keys: list[tuple[str, str]] = []
+        selected_pids: list[str] = []
         for item in self._groups_list.selectedItems():
             data = item.data(Qt.ItemDataRole.UserRole)
             if data:
-                selected_keys.append(tuple(data))
-        if not selected_keys:
+                selected_pids.append(str(data))
+        if not selected_pids:
             self._show_status_msg(
                 "Generate Consensus GT",
-                "No groups selected — Ctrl/Shift-click one or more groups on the left first.",
+                "No patients selected — Ctrl/Shift-click one or more on the left first.",
             )
             return
-        created, skipped = self._register_consensus_for(selected_keys)
+        created, skipped = self._register_consensus_for(selected_pids)
         self._report_generation_result(created, skipped, scope="SELECTED")
 
-    def _register_consensus_for(self, keys: list[tuple[str, str]]) -> tuple[int, list[str]]:
-        """Register synthetic consensus RTSSes for the given (patient, label) keys.
+    def _register_consensus_for(self, pids: list[str]) -> tuple[int, list[str]]:
+        """Register synthetic consensus RTSSes for the given patient ids.
 
         Returns ``(created_count, skipped_messages)``. Re-registration of
-        an existing (patient, label) replaces the entry in place because
+        an existing patient replaces the entry in place because
         ``_mint_synthetic_uid`` is deterministic.
         """
         created = 0
         skipped: list[str] = []
-        for pid, label in keys:
-            buckets = self._group_drawers.get((pid, label), {})
+        for pid in pids:
+            buckets = self._group_drawers.get(pid, {})
             if not buckets:
-                skipped.append(f"{pid}/{label}: no matched organs")
+                skipped.append(f"{pid}: no matched organs")
                 continue
-            entry = self._build_synthetic_entry(pid, label, buckets)
+            entry = self._build_synthetic_entry(pid, buckets)
             if entry is None:
-                skipped.append(f"{pid}/{label}: no shared FrameOfReferenceUID")
+                skipped.append(f"{pid}: no shared FrameOfReferenceUID")
                 continue
             ok = self._library.register_synthetic_consensus(
                 pid, entry.frame_of_reference_uid, entry
@@ -710,13 +840,13 @@ class BuildConsensusTab(QWidget):
             if ok:
                 created += 1
             else:
-                skipped.append(f"{pid}/{label}: register failed")
+                skipped.append(f"{pid}: register failed")
         return created, skipped
 
     def _report_generation_result(self, created: int, skipped: list[str], scope: str) -> None:
         msg = [
             f"Generated {created} consensus RTSS entr{'y' if created == 1 else 'ies'} "
-            f"({scope} groups)."
+            f"({scope} patients)."
         ]
         if skipped:
             msg.append("Skipped:")
@@ -728,16 +858,14 @@ class BuildConsensusTab(QWidget):
     def _build_synthetic_entry(
         self,
         patient_id: str,
-        source_label: str,
         buckets: dict[str, list[tuple[str, int, str]]],
     ) -> RTSTRUCTEntry | None:
-        """Assemble the synthetic RTSTRUCTEntry that represents this group's consensus."""
+        """Assemble the synthetic RTSTRUCTEntry representing this patient's consensus."""
         if self._library is None:
             return None
-        # All constituent RTSSes must share a FrameOfReferenceUID for STAPLE to work.
-        # The eligible_groups detector groups by (patient, source_label) but a
-        # single source label could span contexts — pick the FoR with the
-        # most contributors here.
+        # All constituent RTSSes must share a FrameOfReferenceUID for STAPLE to
+        # work. The observers could in principle span contexts — pick the FoR
+        # with the most contributors here.
         for_uid_counts: dict[str, int] = defaultdict(int)
         constituent_uids = {sop for raters in buckets.values() for (sop, _, _) in raters}
         patient = self._library.patients.get(patient_id)
@@ -764,7 +892,7 @@ class BuildConsensusTab(QWidget):
             constituent_groups[synthetic_roi_number] = [
                 (sop, int(roi_num)) for (sop, roi_num, _name) in raters
             ]
-        synthetic_sop = self._mint_synthetic_uid(patient_id, source_label)
+        synthetic_sop = self._mint_synthetic_uid(patient_id)
         return RTSTRUCTEntry(
             sop_instance_uid=synthetic_sop,
             file_path="",
@@ -778,17 +906,17 @@ class BuildConsensusTab(QWidget):
             constituent_groups=constituent_groups,
         )
 
-    def _mint_synthetic_uid(self, patient_id: str, source_label: str) -> str:
-        """Generate a deterministic UID for a synthetic RTSS.
+    def _mint_synthetic_uid(self, patient_id: str) -> str:
+        """Generate a deterministic UID for a patient's synthetic consensus RTSS.
 
         Not a real DICOM UID — uses our own prefix so it can never collide
-        with anything pydicom would read off disk. Same (patient, source)
-        pair always produces the same UID, so re-running Generate replaces
-        the existing entry in place via ``MetadataLibrary.
-        register_synthetic_consensus`` rather than minting a sibling that
-        leaves a stale orphan behind.
+        with anything pydicom would read off disk. The same patient always
+        produces the same UID (one consensus per patient in the v2.4 model),
+        so re-running Generate replaces the existing entry in place via
+        ``MetadataLibrary.register_synthetic_consensus`` rather than minting
+        a sibling that leaves a stale orphan behind.
         """
-        token = f"{patient_id}|{source_label}"
+        token = f"{patient_id}|consensus"
         return f"AUTOSEG.SYNTHETIC.{abs(hash(token)) % (10**18)}"
 
     # ---- Inter-manual metrics --------------------------------------------
@@ -816,20 +944,20 @@ class BuildConsensusTab(QWidget):
             if current is None:
                 self._show_status_msg(
                     "Inter-observer variability",
-                    "Select one or more groups on the left first "
+                    "Select one or more patients on the left first "
                     "(Ctrl/Shift-click for multi-select).",
                 )
                 return
             selected_items = [current]
-        selected_keys: list[tuple[str, str]] = []
+        selected_pids: list[str] = []
         for item in selected_items:
             data = item.data(Qt.ItemDataRole.UserRole)
             if data:
-                selected_keys.append(tuple(data))
+                selected_pids.append(str(data))
 
         # Settings dialog — defaults from Tab 4's tolerances + all geom on.
         settings_dlg = _InterObserverSettingsDialog(
-            n_groups=len(selected_keys),
+            n_groups=len(selected_pids),
             default_sd_tau_mm=float(
                 (self._settings.get("tolerances") or {}).get("surface_dice_tau_mm", 3.0)
             ),
@@ -847,12 +975,12 @@ class BuildConsensusTab(QWidget):
         # + metric loop sits — finer-grained ticks would dwarf the bar with
         # micro-updates between rater pairs.
         total_units = 0
-        for key in selected_keys:
-            total_units += len(self._group_drawers.get(key, {}))
+        for pid in selected_pids:
+            total_units += len(self._group_drawers.get(pid, {}))
         if total_units == 0:
             self._show_status_msg(
                 "Inter-observer variability",
-                "No matched organs to evaluate across the selected group(s).",
+                "No matched organs to evaluate across the selected patient(s).",
             )
             return
 
@@ -879,11 +1007,11 @@ class BuildConsensusTab(QWidget):
         all_rows: list[dict[str, Any]] = []
         cancelled = False
         units_done = 0
-        for pid, source_label in selected_keys:
+        for pid in selected_pids:
             if cancel_check():
                 cancelled = True
                 break
-            buckets = self._group_drawers.get((pid, source_label), {})
+            buckets = self._group_drawers.get(pid, {})
             if not buckets:
                 continue
             group_rows = self._compute_inter_manual_rows(
@@ -892,18 +1020,17 @@ class BuildConsensusTab(QWidget):
                 config,
                 # Bind loop variables as default args so the lambda captures
                 # their values at the current iteration, not by reference
-                # (the lambda is currently called synchronously so this is
-                # belt-and-braces, but it removes the B023 footgun outright).
-                progress_cb=lambda done_in_group, _u=units_done, _p=pid, _s=source_label: (
-                    self._tick_progress(progress, _u + done_in_group, total_units, _p, _s)
+                # (removes the B023 footgun outright).
+                progress_cb=lambda done_in_group, _u=units_done, _p=pid: self._tick_progress(
+                    progress, _u + done_in_group, total_units, _p
                 ),
                 cancel_check=cancel_check,
             )
-            # Stamp every row with the source group identity so the merged
-            # results table can distinguish which patient/label produced it.
+            # Stamp every row with the patient id so the merged results table
+            # can distinguish which patient produced it. Rater identity is
+            # already carried by rater_a / rater_b (the observer source labels).
             for r in group_rows:
                 r["patient_id"] = pid
-                r["source_label"] = source_label
             all_rows.extend(group_rows)
             units_done += len(buckets)
             if not cancel_check():
@@ -925,7 +1052,7 @@ class BuildConsensusTab(QWidget):
             return
         dlg = _InterManualMetricsDialog(
             all_rows,
-            n_groups=len(selected_keys),
+            n_groups=len(selected_pids),
             cancelled=cancelled,
             sd_tau_mm=float(config["tolerances"]["surface_dice_tau_mm"]),
             apl_tau_mm=float(config["tolerances"]["apl_tolerance_mm"]),
@@ -939,7 +1066,6 @@ class BuildConsensusTab(QWidget):
         done: int,
         total: int,
         pid: str,
-        source_label: str,
     ) -> None:
         """Advance the QProgressDialog and pump events so Cancel stays live.
 
@@ -952,8 +1078,7 @@ class BuildConsensusTab(QWidget):
             return
         progress.setValue(min(done, total))
         progress.setLabelText(
-            f"Computing inter-observer metrics — {pid} / {source_label}\n"
-            f"{done} / {total} organ buckets done"
+            f"Computing inter-observer metrics — {pid}\n{done} / {total} organ buckets done"
         )
         QApplication.processEvents()
 
@@ -1060,7 +1185,9 @@ class BuildConsensusTab(QWidget):
                 m = mask_cache[key]
                 if m is None:
                     continue
-                rater_masks.append((self._rtstruct_filename_for(sop_uid), m))
+                # Rater identity = source label (= observer name), consistent
+                # across patients. This is what shows in the matrix columns.
+                rater_masks.append((self._source_label_for(sop_uid), m))
             # Pairwise comparisons — also cancellable so a click during a
             # long rater stack (e.g. 5 raters = 10 pairs per organ)
             # doesn't have to wait for the full quadratic loop to finish.
@@ -1133,21 +1260,27 @@ class BuildConsensusTab(QWidget):
             self,
             "Build Consensus GT — workflow",
             "<p><b>What this tab does</b></p>"
-            "<p>When you have <b>2 or more RTSS files</b> for the same patient that "
-            "share a source label (e.g. multiple manual contours from different "
-            "clinicians, or repeat exports from one TPS), this tab combines them "
-            "into a single STAPLE-derived <b>synthetic ground truth</b> that you can "
-            "use in the downstream Match Contours / Compute workflow.</p>"
+            "<p>When several <b>manual observers</b> have each contoured the same "
+            "patients, this tab combines their structures into a single "
+            "STAPLE-derived <b>synthetic ground truth</b> per patient, which you "
+            "can use in the downstream Match Contours / Compute workflow.</p>"
             "<p><b>How to use it</b></p>"
             "<ol>"
-            "<li>Load your data in Tab 1. If your manual contours don't already "
-            "share a label, use <i>Manage Source Labels</i> to tag them with a "
-            "common label (e.g. 'Manual').</li>"
-            "<li>Switch to this tab — eligible groups appear on the left.</li>"
-            "<li>Click a group to inspect the auto-matched organs on the right. "
-            "Single-rater organs are excluded automatically (STAPLE needs ≥2 raters).</li>"
-            "<li>Click <b>Generate Consensus GT for ALL groups</b>. Each group's "
-            "synthetic RTSS appears in Tab 3 with source label "
+            "<li>In Tab 1 → <i>Manage Source Labels</i>, give <b>each observer a "
+            "distinct source label</b> (e.g. 'Observer A', 'Observer B'). The "
+            "<i>Select similar</i> helper makes it quick to tag one observer's "
+            "files across all patients.</li>"
+            "<li>On this tab, tick those labels in <b>Manual observers</b> at the "
+            "top. Each ticked label is treated as one rater.</li>"
+            "<li>Each patient with 2+ of the selected observers appears on the "
+            "left. Click one to inspect the auto-matched organs on the right — "
+            "every rater is identified by its observer label. Single-rater "
+            "organs are excluded (STAPLE needs ≥2 raters).</li>"
+            "<li>Optionally compute <b>inter-observer variability</b> first — the "
+            "pairwise matrix labels raters by observer consistently across "
+            "patients.</li>"
+            "<li>Click <b>Generate Consensus GT for ALL patients</b>. One "
+            "synthetic RTSS per patient appears in Tab 3 with source label "
             f"<i>'{CONSENSUS_SOURCE_LABEL}'</i> and can be designated as the GT.</li>"
             "</ol>"
             "<p><b>What happens at compute time</b></p>"
@@ -1173,6 +1306,79 @@ class BuildConsensusTab(QWidget):
             return flatten_synonyms(raw)
         except Exception:  # noqa: BLE001
             return {}
+
+
+# ---- Observer-selection dialog ------------------------------------------
+
+
+class _ObserverSelectionDialog(QDialog):
+    """Popup to pick which source labels are manual observers.
+
+    A checkbox per source label (in a scroll area for large cohorts), plus
+    Select-all / Select-none helpers. Returns the chosen labels via
+    :meth:`selected_labels` after Accept.
+    """
+
+    def __init__(
+        self,
+        all_labels: list[str],
+        selected: list[str],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select manual observers")
+        self.resize(380, 440)
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                "Tick the source labels that represent manual observers. Each "
+                "ticked label is treated as one rater in the STAPLE consensus, "
+                "consistently across all patients.",
+                self,
+            )
+        )
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.StyledPanel)
+        container = QWidget()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(6, 6, 6, 6)
+        v.setSpacing(3)
+        self._checks: list[QCheckBox] = []
+        chosen = set(selected)
+        for label in all_labels:
+            cb = QCheckBox(label, container)
+            cb.setChecked(label in chosen)
+            v.addWidget(cb)
+            self._checks.append(cb)
+        v.addStretch(1)
+        scroll.setWidget(container)
+        layout.addWidget(scroll, stretch=1)
+
+        helper_row = QHBoxLayout()
+        all_btn = QPushButton("Select all", self)
+        all_btn.clicked.connect(lambda: self._set_all(True))
+        none_btn = QPushButton("Select none", self)
+        none_btn.clicked.connect(lambda: self._set_all(False))
+        helper_row.addWidget(all_btn)
+        helper_row.addWidget(none_btn)
+        helper_row.addStretch(1)
+        layout.addLayout(helper_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _set_all(self, checked: bool) -> None:
+        for cb in self._checks:
+            cb.setChecked(checked)
+
+    def selected_labels(self) -> list[str]:
+        return [cb.text() for cb in self._checks if cb.isChecked()]
 
 
 # ---- Inter-manual metrics dialog ----------------------------------------
@@ -1322,7 +1528,9 @@ class _InterManualMetricsDialog(QDialog):
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        meta_headers = ["Patient", "Source label", "Organ", "Rater A", "Rater B"]
+        # Rater A / Rater B carry the observer source labels, so no separate
+        # source-label column is needed (v2.4 — distinct label per observer).
+        meta_headers = ["Patient", "Organ", "Rater A", "Rater B"]
         metric_headers = [label for _, label in self._inter_manual_columns]
         all_headers = meta_headers + metric_headers
         self._table = _InterManualTable(self)
@@ -1341,13 +1549,12 @@ class _InterManualMetricsDialog(QDialog):
         for r_idx, row in enumerate(rows):
             metrics = row.get("metrics") or {}
             self._set_cell(r_idx, 0, str(row.get("patient_id", "")))
-            self._set_cell(r_idx, 1, str(row.get("source_label", "")))
-            self._set_cell(r_idx, 2, str(row.get("organ", "")))
-            self._set_cell(r_idx, 3, str(row.get("rater_a", "")))
-            self._set_cell(r_idx, 4, str(row.get("rater_b", "")))
+            self._set_cell(r_idx, 1, str(row.get("organ", "")))
+            self._set_cell(r_idx, 2, str(row.get("rater_a", "")))
+            self._set_cell(r_idx, 3, str(row.get("rater_b", "")))
             for col_offset, (key, _label) in enumerate(self._inter_manual_columns):
                 value = metrics.get(key, "")
-                self._set_cell(r_idx, 5 + col_offset, self._fmt(value))
+                self._set_cell(r_idx, 4 + col_offset, self._fmt(value))
         self._table.setSortingEnabled(was_sorted)
         layout.addWidget(self._table, stretch=1)
 

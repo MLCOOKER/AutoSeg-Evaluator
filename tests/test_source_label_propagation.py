@@ -8,14 +8,31 @@ decide which distinguishing field identifies an observer:
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from autoseg_evaluator.data.metadata import RTSTRUCTEntry  # noqa: E402
+import pytest  # noqa: E402
+from pydicom.uid import generate_uid  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from autoseg_evaluator.data.metadata import MetadataLibrary, RTSTRUCTEntry  # noqa: E402
 from autoseg_evaluator.ui.dialogs.source_labels import (  # noqa: E402
+    ManageSourceLabelsDialog,
     _field_value_of,
+    _GroupByColumnDialog,
     best_distinguishing_field,
+    recommend_group_attr,
 )
+from test_metadata import _write_ct_slice, _write_rtstruct  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    app = QApplication.instance() or QApplication(sys.argv)
+    yield app
 
 
 def _rtss(**overrides) -> RTSTRUCTEntry:
@@ -121,3 +138,142 @@ def test_operators_name_identifies_one_observer_across_patients():
     matched = [r for r in everyone if _field_value_of(r, attr) == value]
     assert len(matched) == 3
     assert {r.sop_instance_uid for r in matched} == {"A0", "A1", "A2"}
+
+
+# ---- Dialog _rows_matching: single-field + AND combinations --------------
+
+
+@pytest.fixture
+def labelled_dialog(qapp, tmp_path):
+    """A Manage Source Labels dialog over 4 RTSSes with overlapping fields."""
+    folder = tmp_path
+    study_uid = generate_uid()
+    for_uid = generate_uid()
+    _write_ct_slice(
+        folder, patient_id="P1", study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+    )
+    specs = [
+        ("Eclipse", "Lee", "a.dcm"),
+        ("Eclipse", "Smith", "b.dcm"),
+        ("Eclipse", "Lee", "c.dcm"),
+        ("MIM", "Lee", "d.dcm"),
+    ]
+    for mfr, reviewer, fname in specs:
+        _write_rtstruct(
+            folder,
+            patient_id="P1",
+            study_uid=study_uid,
+            for_uid=for_uid,
+            manufacturer=mfr,
+            reviewer_name=reviewer,
+            organs=["Parotid_L"],
+            filename=fname,
+        )
+    lib = MetadataLibrary()
+    lib.scan_folder(str(folder))
+    return ManageSourceLabelsDialog(lib, {})
+
+
+def test_rows_matching_single_field(labelled_dialog):
+    rows = labelled_dialog._rows_matching([("manufacturer", "Eclipse")])
+    assert len(rows) == 3  # a, b, c
+
+
+def test_rows_matching_and_combination_narrows(labelled_dialog):
+    rows = labelled_dialog._rows_matching([("manufacturer", "Eclipse"), ("reviewer_name", "Lee")])
+    assert len(rows) == 2  # a, c (b is Smith, d is MIM)
+
+
+def test_rows_matching_other_single_field(labelled_dialog):
+    rows = labelled_dialog._rows_matching([("reviewer_name", "Lee")])
+    assert len(rows) == 3  # a, c, d
+
+
+# ---- Group-by-column: recommendation + assignment ------------------------
+
+
+def _obs_rtss(sop, pid, **fields):
+    base = {
+        "sop_instance_uid": sop,
+        "file_path": f"/data/{pid}/{sop}.dcm",
+        "manufacturer": "",
+        "source_label": "x",
+        "source_origin": "mfr",
+        "frame_of_reference_uid": "for",
+        "study_instance_uid": "study",
+    }
+    base.update(fields)
+    return RTSTRUCTEntry(**base)
+
+
+def test_recommend_prefers_clean_stable_column():
+    """OperatorsName has 3 stable values, one per patient → recommended over
+    filename (which is also per-patient-distinct but has many global values)."""
+    rtss, patient_of = [], {}
+    for pid in ("HN1", "HN2", "HN3"):
+        for obs in ("JK", "PR", "ML"):
+            sop = f"{pid}_{obs}"
+            rtss.append(_obs_rtss(sop, pid, operators_name=obs))
+            patient_of[sop] = pid
+    assert recommend_group_attr(rtss, patient_of) == "operators_name"
+
+
+def test_recommend_none_when_no_clean_column():
+    """If a patient has two files with the SAME value for every column, no
+    column cleanly separates them → no recommendation."""
+    rtss, patient_of = [], {}
+    # HN1 has two files both with operators_name 'JK' (duplicate within patient)
+    for sop in ("HN1_a", "HN1_b"):
+        rtss.append(_obs_rtss(sop, "HN1", operators_name="JK"))
+        patient_of[sop] = "HN1"
+    assert recommend_group_attr(rtss, patient_of) is None
+
+
+def test_group_by_dialog_auto_assigns_observer_labels(qapp, tmp_path):
+    folder = tmp_path
+    # 2 patients × 2 observers (OperatorsName JK / PR), distinct per patient.
+    # Each patient gets its OWN FrameOfReferenceUID — a shared FoR would
+    # trigger the scanner's anonymisation merge into one patient.
+    for pid in ("HN1", "HN2"):
+        study_uid = generate_uid()
+        for_uid = generate_uid()
+        _write_ct_slice(
+            folder, patient_id=pid, study_uid=study_uid, series_uid=generate_uid(), for_uid=for_uid
+        )
+        for obs in ("JK", "PR"):
+            _write_rtstruct(
+                folder,
+                patient_id=pid,
+                study_uid=study_uid,
+                for_uid=for_uid,
+                operators_name=obs,
+                organs=["Parotid_L"],
+                filename=f"{pid}_{obs}.dcm",
+            )
+    lib = MetadataLibrary()
+    lib.scan_folder(str(folder))
+    rtss_list, patient_of, patients = [], {}, set()
+    for pid, patient in lib.patients.items():
+        for ctx in patient.contexts:
+            for r in ctx.rtstructs:
+                rtss_list.append(r)
+                patient_of[r.sop_instance_uid] = pid
+                patients.add(pid)
+
+    dlg = _GroupByColumnDialog(rtss_list, patient_of, len(patients))
+    # Recommended column should be OperatorsName.
+    assert dlg._current_attr() == "operators_name"
+    # Two groups (JK, PR), auto-filled Observer A / Observer B.
+    dlg._on_apply()
+    assigned = dlg.assignments()
+    # Every file got a label; exactly two distinct labels, one per observer.
+    assert len(assigned) == 4
+    assert set(assigned.values()) == {"Observer A", "Observer B"}
+    # All JK-operator files share one label (the consistent-across-patients
+    # observer identity); likewise all PR files.
+    op_of = {r.sop_instance_uid: r.operators_name for r in rtss_list}
+    jk_labels = {assigned[sop] for sop, op in op_of.items() if op == "JK"}
+    pr_labels = {assigned[sop] for sop, op in op_of.items() if op == "PR"}
+    assert len(jk_labels) == 1
+    assert len(pr_labels) == 1
+    assert jk_labels != pr_labels
