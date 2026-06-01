@@ -42,8 +42,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import QMimeData, Qt, Signal
+from PySide6.QtGui import QAction, QDrag, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -57,9 +57,11 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -91,6 +93,85 @@ from autoseg_evaluator.utils.paths import synonyms_path
 # Source label assigned to every synthetic consensus RTSS we generate.
 CONSENSUS_SOURCE_LABEL = "STAPLE Consensus"
 
+# Default per-patient organ-matching similarity threshold.
+_DEFAULT_THRESHOLD = 0.60
+
+# Drag-and-drop payload type for moving an unmatched ROI onto an organ bucket.
+_CONSENSUS_ROI_MIME = "application/x-autoseg-consensus-roi"
+
+
+def _encode_roi(sop: str, roi: int) -> bytes:
+    return f"{sop}\x1f{roi}".encode()
+
+
+def _decode_roi(raw: bytes) -> tuple[str, int]:
+    sop, roi = bytes(raw).decode().split("\x1f")
+    return sop, int(roi)
+
+
+class _RoiDragLabel(QFrame):
+    """An unmatched-ROI row that can be dragged onto an organ bucket."""
+
+    def __init__(self, sop: str, roi: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._sop = sop
+        self._roi = roi
+        self._press_pos = None
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if self._press_pos is None:
+            return
+        if (event.position().toPoint() - self._press_pos).manhattanLength() < (
+            QApplication.startDragDistance()
+        ):
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(_CONSENSUS_ROI_MIME, _encode_roi(self._sop, self._roi))
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+        self._press_pos = None
+
+
+class _OrganBucketFrame(QFrame):
+    """An organ bucket that accepts dropped unmatched ROIs."""
+
+    _BASE_STYLE = "QFrame#ConsensusOrganRow { border: 1px solid #ddd; border-radius: 3px; }"
+    _HOVER_STYLE = (
+        "QFrame#ConsensusOrganRow { border: 2px solid #4a90d9; "
+        "border-radius: 3px; background: #eef5fc; }"
+    )
+
+    def __init__(self, on_drop, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._on_drop = on_drop  # callable(sop: str, roi: int)
+        self.setObjectName("ConsensusOrganRow")
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(self._BASE_STYLE)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if event.mimeData().hasFormat(_CONSENSUS_ROI_MIME):
+            event.acceptProposedAction()
+            self.setStyleSheet(self._HOVER_STYLE)
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        self.setStyleSheet(self._BASE_STYLE)
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        self.setStyleSheet(self._BASE_STYLE)
+        data = event.mimeData().data(_CONSENSUS_ROI_MIME)
+        if not data:
+            return
+        sop, roi = _decode_roi(data)
+        self._on_drop(sop, roi)
+        event.acceptProposedAction()
+
 
 class BuildConsensusTab(QWidget):
     """Generate synthetic STAPLE-consensus RTSSes from same-source-label groups.
@@ -118,9 +199,27 @@ class BuildConsensusTab(QWidget):
         # label is in that set. So group_drawers is keyed by patient_id:
         #   group_drawers[patient_id] = {organ_name: [(sop_uid, roi_number, roi_name), ...]}
         self._group_drawers: dict[str, dict[str, list[tuple[str, int, str]]]] = {}
+        # Per-patient "unmatched" ROIs — contours that didn't cluster into a
+        # 2+ rater bucket. Surfaced in a tray so the user can manually assign
+        # them (Phase 3). Shape mirrors a bucket: [(sop_uid, roi_number, name)].
+        self._unmatched: dict[str, list[tuple[str, int, str]]] = {}
+        # Patients the user has manually edited (moved an ROI). Such patients
+        # are LOCKED from threshold re-clustering until "Reset to auto-match".
+        self._manual_edited: set[str] = set()
+        # Per-patient match threshold — each patient keeps its own value. The
+        # footer spinbox edits the currently-selected patient's threshold.
+        self._patient_thresholds: dict[str, float] = {}
+        # Per-bucket "representative" name — the seed organ name each bucket was
+        # clustered against. The displayed match score is each rater's
+        # similarity to THIS (the actual clustering decision), not to the
+        # most-frequent display name. Keyed: pid → {bucket_display_name → rep}.
+        self._bucket_representatives: dict[str, dict[str, str]] = {}
+        # The patient currently shown in the drawer panel (for re-render).
+        self._current_pid: str | None = None
         # Warnings raised during eligibility detection (e.g. duplicate observer
-        # label on one patient). Surfaced in the status line on each refresh.
-        self._eligibility_warnings: list[str] = []
+        # label on one patient), keyed by patient id. Surfaced in the status
+        # line and as a banner on the patient's organ-groupings column.
+        self._eligibility_warnings: dict[str, list[str]] = {}
         self._synonyms_flat = self._load_synonyms()
         self._build_ui()
         self._refresh_state()
@@ -135,6 +234,12 @@ class BuildConsensusTab(QWidget):
         """Called by MainWindow after a folder scan completes."""
         self._library = library
         self._group_drawers.clear()
+        # A new cohort invalidates manual edits / unmatched trays from the old.
+        self._unmatched.clear()
+        self._manual_edited.clear()
+        self._patient_thresholds.clear()
+        self._bucket_representatives.clear()
+        self._current_pid = None
         self._refresh_state()
 
     # ---- Observer-label selection ----------------------------------------
@@ -350,62 +455,66 @@ class BuildConsensusTab(QWidget):
         self._empty_label.setStyleSheet("color: #888; padding: 36px;")
         outer.addWidget(self._empty_label)
 
-        # ---- Main split (groups on left, drawers on right) ----
+        # ---- Main split: 3 independent columns ----
+        #   [ Eligible patients | Organ groupings | Unmatched tray ]
+        # Each column has its own scroll zone.
         self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self._splitter.setChildrenCollapsible(False)
 
-        # Groups list
+        # 1) Eligible patients (narrow)
         group_pane = QFrame(self._splitter)
         group_layout = QVBoxLayout(group_pane)
         group_layout.setContentsMargins(0, 0, 0, 0)
+        group_layout.setSpacing(2)
         group_layout.addWidget(QLabel("<b>Eligible patients</b>", group_pane))
-        group_layout.addWidget(
-            QLabel(
-                "<span style='color:#666; font-size: 9pt'>"
-                "Each row = one patient with 2+ observers. "
-                "Click to inspect the organ matches on the right.</span>",
-                group_pane,
-            )
-        )
         self._groups_list = QListWidget(group_pane)
-        # ExtendedSelection so the user can Ctrl/Shift-click multiple groups
-        # to compute inter-observer metrics across several patients at once.
-        # The drawer-preview panel still tracks the *current* item (the last
-        # one clicked) so single-group browsing still works.
+        self._groups_list.setToolTip(
+            "Each row = one patient with 2+ observers. Click to inspect its "
+            "organ matches. Ctrl/Shift-click to select several for "
+            "inter-observer metrics."
+        )
         self._groups_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._groups_list.currentItemChanged.connect(self._on_group_selected)
         group_layout.addWidget(self._groups_list, stretch=1)
         self._splitter.addWidget(group_pane)
 
-        # Drawers area
+        # 2) Organ groupings (own scroll)
         drawers_pane = QFrame(self._splitter)
         drawers_layout = QVBoxLayout(drawers_pane)
         drawers_layout.setContentsMargins(0, 0, 0, 0)
-        drawers_layout.addWidget(
-            QLabel("<b>Organ groupings for the selected group</b>", drawers_pane)
-        )
-        drawers_layout.addWidget(
-            QLabel(
-                "<span style='color:#666; font-size: 9pt'>"
-                "Each line = one organ that has contours in 2+ of the selected RTSSes "
-                "(single-rater organs are excluded — STAPLE needs ≥2 raters). "
-                "Auto-matched via Levenshtein + cosine + TG-263 dictionary.</span>",
-                drawers_pane,
-            )
-        )
+        drawers_layout.setSpacing(2)
+        drawers_layout.addWidget(QLabel("<b>Organ groupings</b>", drawers_pane))
         self._drawers_scroll = QScrollArea(drawers_pane)
         self._drawers_scroll.setWidgetResizable(True)
         self._drawers_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._drawers_container = QWidget()
         self._drawers_v = QVBoxLayout(self._drawers_container)
-        self._drawers_v.setContentsMargins(4, 4, 4, 4)
-        self._drawers_v.setSpacing(4)
+        self._drawers_v.setContentsMargins(3, 3, 3, 3)
+        self._drawers_v.setSpacing(3)
         self._drawers_v.addStretch(1)
         self._drawers_scroll.setWidget(self._drawers_container)
         drawers_layout.addWidget(self._drawers_scroll, stretch=1)
         self._splitter.addWidget(drawers_pane)
 
-        self._splitter.setSizes([300, 700])
+        # 3) Unmatched tray (own scroll) — drop target for drag-and-drop.
+        unmatched_pane = QFrame(self._splitter)
+        unmatched_layout = QVBoxLayout(unmatched_pane)
+        unmatched_layout.setContentsMargins(0, 0, 0, 0)
+        unmatched_layout.setSpacing(2)
+        unmatched_layout.addWidget(QLabel("<b>Unmatched</b>", unmatched_pane))
+        self._unmatched_scroll = QScrollArea(unmatched_pane)
+        self._unmatched_scroll.setWidgetResizable(True)
+        self._unmatched_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._unmatched_container = QWidget()
+        self._unmatched_v = QVBoxLayout(self._unmatched_container)
+        self._unmatched_v.setContentsMargins(3, 3, 3, 3)
+        self._unmatched_v.setSpacing(3)
+        self._unmatched_v.addStretch(1)
+        self._unmatched_scroll.setWidget(self._unmatched_container)
+        unmatched_layout.addWidget(self._unmatched_scroll, stretch=1)
+        self._splitter.addWidget(unmatched_pane)
+
+        self._splitter.setSizes([190, 380, 280])
         outer.addWidget(self._splitter, stretch=1)
 
         # ---- Footer (threshold + actions) ----
@@ -415,21 +524,20 @@ class BuildConsensusTab(QWidget):
         # only if their similarity score is at or above this value. Default
         # 0.60 matches Tab 3's auto-match default. Higher values demand more
         # name agreement; lower values fold near-matches together.
-        footer.addWidget(QLabel("Match threshold:", self))
+        footer.addWidget(QLabel("Match threshold (this patient):", self))
         self._threshold_spin = QDoubleSpinBox(self)
         self._threshold_spin.setDecimals(2)
         self._threshold_spin.setRange(0.0, 1.0)
         self._threshold_spin.setSingleStep(0.05)
-        self._threshold_spin.setValue(0.60)
+        self._threshold_spin.setValue(_DEFAULT_THRESHOLD)
         self._threshold_spin.setToolTip(
             "Two ROI names are grouped together if their hybrid Levenshtein + "
             "cosine similarity (with TG-263 dictionary) meets or exceeds this "
-            "value. Lower → more aggressive grouping (more false positives). "
-            "Higher → stricter (more false negatives). Default 0.60 matches "
-            "the Match Contours auto-match default."
+            "value. This threshold applies to the CURRENTLY SELECTED patient "
+            "only — each patient keeps its own. Lower → more aggressive "
+            "grouping; higher → stricter. Default 0.60."
         )
-        # Re-cluster all groups when the threshold changes so the drawers
-        # update live.
+        # Re-cluster only the current patient when its threshold changes.
         self._threshold_spin.valueChanged.connect(self._on_threshold_changed)
         footer.addWidget(self._threshold_spin)
 
@@ -451,7 +559,7 @@ class BuildConsensusTab(QWidget):
         footer.addWidget(self._inter_manual_btn)
 
         footer.addStretch(1)
-        self._generate_selected_btn = QPushButton("Generate Consensus GT for SELECTED groups", self)
+        self._generate_selected_btn = QPushButton("Generate STAPLE for selected patients", self)
         self._generate_selected_btn.setToolTip(
             "Register a synthetic STAPLE-consensus RTSS for ONLY the groups "
             "currently highlighted on the left (Ctrl/Shift-click for "
@@ -461,7 +569,7 @@ class BuildConsensusTab(QWidget):
         )
         self._generate_selected_btn.clicked.connect(self._on_generate_selected_clicked)
         footer.addWidget(self._generate_selected_btn)
-        self._generate_btn = QPushButton("Generate Consensus GT for ALL groups", self)
+        self._generate_btn = QPushButton("Generate STAPLE for all patients", self)
         self._generate_btn.setToolTip(
             "Register one synthetic STAPLE-consensus RTSS per eligible group. "
             "Wipes any previously-generated synthetic entries first, then "
@@ -525,9 +633,14 @@ class BuildConsensusTab(QWidget):
             item.setToolTip("\n".join(f"• {r.source_label}  ({r.filename})" for r in members))
             self._groups_list.addItem(item)
         status = f"{len(eligible)} eligible patient(s) — select one to inspect organ matches."
-        if self._eligibility_warnings:
-            status += f"  ⚠ {len(self._eligibility_warnings)} labelling warning(s)."
-            self._groups_list.setToolTip("\n".join(self._eligibility_warnings))
+        n_warn = sum(len(v) for v in self._eligibility_warnings.values())
+        if n_warn:
+            status += f"  ⚠ {n_warn} labelling warning(s)."
+            self._groups_list.setToolTip(
+                "\n".join(
+                    f"{pid}: {m}" for pid, msgs in self._eligibility_warnings.items() for m in msgs
+                )
+            )
         else:
             self._groups_list.setToolTip("")
         self._status_label.setText(status)
@@ -550,7 +663,7 @@ class BuildConsensusTab(QWidget):
         consensus-of-consensus.
         """
         out: dict[str, list[RTSTRUCTEntry]] = {}
-        self._eligibility_warnings = []
+        self._eligibility_warnings = {}
         if self._library is None:
             return out
         observers = set(self._selected_observer_labels())
@@ -567,9 +680,10 @@ class BuildConsensusTab(QWidget):
             members: list[RTSTRUCTEntry] = []
             for label, rs in by_label.items():
                 if len(rs) > 1:
-                    self._eligibility_warnings.append(
-                        f"{pid}: {len(rs)} RTSSes labelled '{label}' — using the first. "
-                        "Give each observer a distinct label in Tab 1."
+                    self._eligibility_warnings.setdefault(pid, []).append(
+                        f"Observer '{label}' has {len(rs)} files for this patient — "
+                        "using the first; the other's contours are excluded. Give "
+                        "each observer a distinct label in Tab 1."
                     )
                 members.append(rs[0])
             if len(members) >= 2:
@@ -606,7 +720,7 @@ class BuildConsensusTab(QWidget):
             self._group_drawers[patient_id] = {}
             return
         rules = self.replacement_rules()
-        threshold = float(self._threshold_spin.value())
+        threshold = self._threshold_for(patient_id)
         # Buckets: list of (representative_name, [(sop_uid, roi_number, roi_name), ...])
         bucket_names: list[str] = []
         bucket_members: list[list[tuple[str, int, str]]] = []
@@ -657,101 +771,361 @@ class BuildConsensusTab(QWidget):
                     bucket_names.append(name)
                     bucket_members.append([(r.sop_instance_uid, int(organ.roi_number), name)])
                     rtss_used_buckets.add(len(bucket_names) - 1)
-        # Drop single-rater buckets, then key the result by the most
-        # frequent ROI name within each bucket (so the drawer header
-        # reads as something meaningful to the user).
+        # Key 2+ rater buckets by their most frequent ROI name; collect
+        # single-rater (unclustered) ROIs into the unmatched tray so the
+        # user can manually assign them (Phase 3) instead of losing them.
         kept: dict[str, list[tuple[str, int, str]]] = {}
-        for _rep, members in zip(bucket_names, bucket_members):
+        reps: dict[str, str] = {}
+        unmatched: list[tuple[str, int, str]] = []
+        for rep, members in zip(bucket_names, bucket_members):
             if len(members) < 2:
+                unmatched.extend(members)
                 continue
-            name_counts: dict[str, int] = defaultdict(int)
-            for _sop, _roi, n in members:
-                name_counts[n] += 1
-            display = max(name_counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
-            # If two buckets ended up with the same display name (rare), suffix
-            # the second so they don't collapse in the drawer dict.
+            # Title the bucket by its REPRESENTATIVE — the seed name it was
+            # clustered against. This keeps one canonical name per bucket:
+            #   * the displayed match scores are each rater's similarity to the
+            #     title (so the title's own member always reads 1.00), and
+            #   * the Tab 3 synthetic-organ name equals the title (see
+            #     _build_synthetic_entry).
+            display = rep
+            # If two buckets somehow share a seed name (very rare), suffix the
+            # second so they don't collapse in the drawer dict.
             if display in kept:
                 suffix = 2
                 while f"{display} #{suffix}" in kept:
                     suffix += 1
                 display = f"{display} #{suffix}"
             kept[display] = members
+            reps[display] = rep
         self._group_drawers[patient_id] = kept
+        self._bucket_representatives[patient_id] = reps
+        self._unmatched[patient_id] = unmatched
 
-    def _on_threshold_changed(self, _value: float) -> None:
-        """Re-cluster every eligible group whenever the threshold spinbox moves."""
-        for pid in list(self._group_drawers.keys()):
+    def _threshold_for(self, pid: str) -> float:
+        """The match threshold for a patient (its own value, or the default)."""
+        return self._patient_thresholds.get(pid, _DEFAULT_THRESHOLD)
+
+    def _on_threshold_changed(self, value: float) -> None:
+        """Apply the spinbox value to the CURRENT patient only and re-cluster it.
+
+        Each patient keeps its own threshold, so adjusting one patient never
+        disturbs another. A manually-edited (locked) patient stores the new
+        value but is not re-clustered (its hand-curated grouping is preserved
+        until 'Reset to auto-match').
+        """
+        pid = self._current_pid
+        if pid is None:
+            return
+        self._patient_thresholds[pid] = float(value)
+        if pid not in self._manual_edited:
             self._auto_match_group(pid)
-        # Re-render the currently-selected group's drawers if any.
+        self._rerender_current()
+
+    # ---- Manual editing (Phase 3) ----------------------------------------
+
+    def _rerender_current(self) -> None:
         current = self._groups_list.currentItem()
         if current is not None:
             self._on_group_selected(current, None)
+
+    def _find_in_buckets(self, pid: str, sop: str, roi: int) -> tuple[str, int] | None:
+        """Return (organ_name, index) of the ROI within the patient's buckets."""
+        for organ, members in self._group_drawers.get(pid, {}).items():
+            for i, (s, r, _n) in enumerate(members):
+                if s == sop and r == roi:
+                    return organ, i
+        return None
+
+    def _evict_roi(self, pid: str, sop: str, roi: int) -> None:
+        """Move an ROI out of its organ bucket into the unmatched tray."""
+        loc = self._find_in_buckets(pid, sop, roi)
+        if loc is None:
+            return
+        organ, idx = loc
+        member = self._group_drawers[pid][organ].pop(idx)
+        if not self._group_drawers[pid][organ]:
+            del self._group_drawers[pid][organ]
+            self._bucket_representatives.get(pid, {}).pop(organ, None)
+        self._unmatched.setdefault(pid, []).append(member)
+        self._manual_edited.add(pid)
+        self._rerender_current()
+
+    def _assign_roi(self, pid: str, sop: str, roi: int, organ_name: str) -> None:
+        """Move an ROI from the unmatched tray into an organ bucket.
+
+        ``organ_name`` may be an existing bucket or a brand-new organ name.
+        A no-op if the target bucket already holds a contour from the same
+        observer (one rater per organ for a valid STAPLE).
+        """
+        tray = self._unmatched.get(pid, [])
+        member = None
+        for i, (s, r, _n) in enumerate(tray):
+            if s == sop and r == roi:
+                member = tray.pop(i)
+                break
+        if member is None:
+            return
+        bucket = self._group_drawers.setdefault(pid, {}).setdefault(organ_name, [])
+        if any(s == sop for s, _r, _n in bucket):
+            # Same observer already in this organ — put it back, warn.
+            tray.append(member)
+            self._show_status_msg(
+                "Assign ROI",
+                f"'{self._source_label_for(sop)}' already has a contour in "
+                f"'{organ_name}'. One rater per organ is required for STAPLE.",
+            )
+            return
+        bucket.append(member)
+        # A newly-created bucket is its own representative (the name the user
+        # gave it); an existing bucket keeps its seed representative.
+        self._bucket_representatives.setdefault(pid, {}).setdefault(organ_name, organ_name)
+        self._manual_edited.add(pid)
+        self._rerender_current()
+
+    def _reset_patient_to_auto(self, pid: str) -> None:
+        """Discard manual edits for a patient and re-run auto-match."""
+        self._manual_edited.discard(pid)
+        self._auto_match_group(pid)
+        self._rerender_current()
 
     # ---- Drawer rendering -------------------------------------------------
 
     def _on_group_selected(self, current: QListWidgetItem | None, _previous) -> None:
         self._clear_drawers()
+        self._clear_unmatched()
         if current is None:
             return
         pid = current.data(Qt.ItemDataRole.UserRole)
         if not pid:
             return
-        drawers = self._group_drawers.get(str(pid), {})
+        pid = str(pid)
+        self._current_pid = pid
+        # Reflect this patient's own threshold in the footer spinbox without
+        # firing _on_threshold_changed (which would re-cluster).
+        self._threshold_spin.blockSignals(True)
+        self._threshold_spin.setValue(self._threshold_for(pid))
+        self._threshold_spin.blockSignals(False)
+        drawers = self._group_drawers.get(pid, {})
+        tray = self._unmatched.get(pid, [])
+
+        # ---- Middle column: warning + edit banners + organ buckets ----
+        warnings = self._eligibility_warnings.get(pid, [])
+        if warnings:
+            self._drawers_v.insertWidget(
+                self._drawers_v.count() - 1, self._build_warning_banner(warnings)
+            )
+        if pid in self._manual_edited:
+            self._drawers_v.insertWidget(self._drawers_v.count() - 1, self._build_edit_banner(pid))
         if not drawers:
             placeholder = QLabel(
-                "<i>No organs match across 2+ of this patient's observers. "
-                "STAPLE requires at least 2 raters per organ.</i>",
+                "<i>No organs match across 2+ of this patient's observers.</i>",
                 self._drawers_container,
             )
-            placeholder.setStyleSheet("color: #888; padding: 12px;")
+            placeholder.setStyleSheet("color: #888; padding: 8px;")
+            placeholder.setWordWrap(True)
             self._drawers_v.insertWidget(self._drawers_v.count() - 1, placeholder)
-            return
-        # Render one row per organ bucket
-        for canon, raters in sorted(drawers.items()):
-            self._drawers_v.insertWidget(
-                self._drawers_v.count() - 1,
-                self._build_organ_row(canon, raters),
+        else:
+            for canon, raters in sorted(drawers.items()):
+                self._drawers_v.insertWidget(
+                    self._drawers_v.count() - 1,
+                    self._build_organ_row(pid, canon, raters),
+                )
+
+        # ---- Right column: unmatched tray, grouped by observer ----
+        if not tray:
+            empty = QLabel("<i>Nothing unmatched.</i>", self._unmatched_container)
+            empty.setStyleSheet("color: #aaa; padding: 8px;")
+            self._unmatched_v.insertWidget(self._unmatched_v.count() - 1, empty)
+        else:
+            hint = QLabel(
+                "<span style='color:#888; font-size: 9pt'>Drag an item onto an "
+                "organ, or use its Assign menu.</span>",
+                self._unmatched_container,
             )
+            hint.setWordWrap(True)
+            self._unmatched_v.insertWidget(self._unmatched_v.count() - 1, hint)
+            by_observer: dict[str, list[tuple[str, int, str]]] = defaultdict(list)
+            for sop_uid, roi_number, roi_name in tray:
+                by_observer[self._source_label_for(sop_uid)].append((sop_uid, roi_number, roi_name))
+            for observer in sorted(by_observer):
+                obs_header = QLabel(f"<b>{observer}</b>", self._unmatched_container)
+                obs_header.setStyleSheet("color: #555; margin-top: 4px;")
+                self._unmatched_v.insertWidget(self._unmatched_v.count() - 1, obs_header)
+                # Sort each observer's unmatched organs alphabetically by name.
+                for sop_uid, roi_number, roi_name in sorted(
+                    by_observer[observer], key=lambda t: t[2].lower()
+                ):
+                    self._unmatched_v.insertWidget(
+                        self._unmatched_v.count() - 1,
+                        self._build_unmatched_item(pid, sop_uid, roi_number, roi_name),
+                    )
+
+    def _build_warning_banner(self, warnings: list[str]) -> QWidget:
+        bar = QFrame(self._drawers_container)
+        bar.setStyleSheet(
+            "QFrame { background: #fde8e8; border: 1px solid #f5c2c2; border-radius: 3px; }"
+        )
+        v = QVBoxLayout(bar)
+        v.setContentsMargins(6, 3, 6, 3)
+        v.setSpacing(1)
+        for w in warnings:
+            lab = QLabel(f"⚠ {w}", bar)
+            lab.setWordWrap(True)
+            lab.setStyleSheet("color: #a33;")
+            v.addWidget(lab)
+        return bar
+
+    def _build_edit_banner(self, pid: str) -> QWidget:
+        bar = QFrame(self._drawers_container)
+        bar.setStyleSheet(
+            "QFrame { background: #fff3cd; border: 1px solid #ffe69c; border-radius: 3px; }"
+        )
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(6, 2, 6, 2)
+        h.setSpacing(4)
+        h.addWidget(QLabel("<b>✎ Edited</b> — auto-match off.", bar))
+        h.addStretch(1)
+        reset = QPushButton("Reset", bar)
+        reset.setToolTip("Discard manual edits and re-run auto-match for this patient.")
+        reset.clicked.connect(lambda _checked=False, p=pid: self._reset_patient_to_auto(p))
+        h.addWidget(reset)
+        return bar
+
+    def _roi_line_html(self, sop_uid: str, roi_name: str) -> str:
+        observer = self._source_label_for(sop_uid)
+        return f"<span style='color:#444'><b>{observer}</b>: {roi_name}</span>"
 
     def _build_organ_row(
         self,
+        pid: str,
         canonical_name: str,
         raters: list[tuple[str, int, str]],
     ) -> QWidget:
-        """Compact row showing the organ + its contributing RTSSes."""
-        row = QFrame(self._drawers_container)
-        row.setObjectName("ConsensusOrganRow")
-        row.setFrameShape(QFrame.Shape.StyledPanel)
-        row.setStyleSheet(
-            "QFrame#ConsensusOrganRow { border: 1px solid #ddd; border-radius: 4px; padding: 6px; }"
+        """Compact organ bucket: header + a removable line per rater. Drop target."""
+        row = _OrganBucketFrame(
+            lambda s, r, p=pid, o=canonical_name: self._assign_roi(p, s, r, o),
+            self._drawers_container,
         )
         layout = QVBoxLayout(row)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(2)
-        header = QLabel(
-            f"<b>{canonical_name}</b>  <span style='color:#888'>({len(raters)} raters)</span>",
-            row,
-        )
-        layout.addWidget(header)
-        for sop_uid, roi_number, roi_name in raters:
-            # Identify each contributing rater by its source label (= observer
-            # name) — consistent across patients. Filename is shown as a
-            # secondary hint in case two observers were mislabelled.
-            observer = self._source_label_for(sop_uid)
-            filename = self._rtstruct_filename_for(sop_uid)
-            line = QLabel(
-                f"<span style='color:#444'>• <b>{observer}</b>: {roi_name}</span>"
-                f"   <span style='color:#888; font-size: 9pt'>"
-                f"({filename}, ROI #{roi_number})</span>",
+        layout.setContentsMargins(5, 2, 4, 3)
+        layout.setSpacing(1)
+        n = len(raters)
+        if n < 2:
+            header = QLabel(
+                f"<b>{canonical_name}</b>  "
+                f"<span style='color:#c47f00; font-size: 8pt'>⚠ {n} rater</span>",
                 row,
             )
-            layout.addWidget(line)
+        else:
+            header = QLabel(
+                f"<b>{canonical_name}</b>  "
+                f"<span style='color:#999; font-size: 8pt'>{n} raters</span>",
+                row,
+            )
+        layout.addWidget(header)
+        rules = self.replacement_rules()
+        # The bucket was clustered against its representative (seed) name — the
+        # scores below are each rater's similarity to THAT, i.e. the actual
+        # auto-match decision (falls back to the display name if unknown).
+        representative = self._bucket_representatives.get(self._current_pid or "", {}).get(
+            canonical_name, canonical_name
+        )
+        for sop_uid, roi_number, roi_name in raters:
+            line = QHBoxLayout()
+            line.setSpacing(2)
+            lbl = QLabel(self._roi_line_html(sop_uid, roi_name), row)
+            line.addWidget(lbl, stretch=1)
+            score = similarity(
+                roi_name, representative, rules=rules, synonyms_flat=self._synonyms_flat
+            ).score
+            colour = "#2a7" if score >= 0.8 else ("#888" if score >= 0.6 else "#c47f00")
+            score_lbl = QLabel(f"<span style='color:{colour}'>{score:.2f}</span>", row)
+            score_lbl.setToolTip(
+                f"Auto-match score: similarity of '{roi_name}' to the bucket's "
+                f"representative name '{representative}'."
+            )
+            line.addWidget(score_lbl)
+            remove = QPushButton("X", row)
+            remove.setFixedSize(18, 18)
+            remove.setToolTip("Remove this contour (→ Unmatched).")
+            remove.clicked.connect(
+                lambda _checked=False, s=sop_uid, r=roi_number: self._evict_roi(pid, s, r)
+            )
+            line.addWidget(remove)
+            layout.addLayout(line)
         return row
 
+    def _build_unmatched_item(
+        self, pid: str, sop_uid: str, roi_number: int, roi_name: str
+    ) -> QWidget:
+        """A draggable unmatched-ROI row with an Assign-to menu fallback.
+
+        Grouped under an observer header, so the row shows only the ROI name.
+        The text label is made transparent to mouse events so a press-drag on
+        it reaches the draggable frame underneath (the Assign button keeps its
+        own clicks).
+        """
+        item = _RoiDragLabel(sop_uid, roi_number, self._unmatched_container)
+        item.setObjectName("UnmatchedItem")
+        item.setFrameShape(QFrame.Shape.StyledPanel)
+        item.setStyleSheet(
+            "QFrame#UnmatchedItem { border: 1px dashed #bbb; border-radius: 3px; "
+            "background: #fafafa; }"
+        )
+        item.setToolTip("Drag onto an organ bucket, or use Assign.")
+        item.setCursor(Qt.CursorShape.OpenHandCursor)
+        layout = QHBoxLayout(item)
+        layout.setContentsMargins(8, 2, 4, 2)
+        layout.setSpacing(2)
+        name_lbl = QLabel(roi_name, item)
+        name_lbl.setStyleSheet("color: #444;")
+        name_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout.addWidget(name_lbl, stretch=1)
+        assign = QPushButton("Assign ▾", item)
+        assign.setToolTip("Add this contour to an organ bucket.")
+        menu = QMenu(assign)
+        for organ in sorted(self._group_drawers.get(pid, {})):
+            act = QAction(organ, menu)
+            act.triggered.connect(
+                lambda _checked=False, s=sop_uid, r=roi_number, o=organ: self._assign_roi(
+                    pid, s, r, o
+                )
+            )
+            menu.addAction(act)
+        if self._group_drawers.get(pid):
+            menu.addSeparator()
+        new_act = QAction("New organ…", menu)
+        new_act.triggered.connect(
+            lambda _checked=False, s=sop_uid, r=roi_number, nm=roi_name: self._assign_to_new_organ(
+                pid, s, r, nm
+            )
+        )
+        menu.addAction(new_act)
+        assign.setMenu(menu)
+        layout.addWidget(assign)
+        return item
+
+    def _assign_to_new_organ(self, pid: str, sop: str, roi: int, suggested: str) -> None:
+        name, ok = QInputDialog.getText(
+            self.window() or self,
+            "New organ",
+            "Organ name for the new bucket:",
+            text=suggested,
+        )
+        if ok and name.strip():
+            self._assign_roi(pid, sop, roi, name.strip())
+
     def _clear_drawers(self) -> None:
-        # Remove every widget except the trailing stretch
-        while self._drawers_v.count() > 1:
-            item = self._drawers_v.takeAt(0)
+        self._clear_layout(self._drawers_v)
+
+    def _clear_unmatched(self) -> None:
+        self._clear_layout(self._unmatched_v)
+
+    @staticmethod
+    def _clear_layout(layout: QVBoxLayout) -> None:
+        # Remove every widget except the trailing stretch.
+        while layout.count() > 1:
+            item = layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
@@ -832,7 +1206,7 @@ class BuildConsensusTab(QWidget):
                 continue
             entry = self._build_synthetic_entry(pid, buckets)
             if entry is None:
-                skipped.append(f"{pid}: no shared FrameOfReferenceUID")
+                skipped.append(f"{pid}: no organ with 2+ raters (or no shared FrameOfReferenceUID)")
                 continue
             ok = self._library.register_synthetic_consensus(
                 pid, entry.frame_of_reference_uid, entry
@@ -863,6 +1237,11 @@ class BuildConsensusTab(QWidget):
         """Assemble the synthetic RTSTRUCTEntry representing this patient's consensus."""
         if self._library is None:
             return None
+        # Only organs with 2+ raters are valid STAPLE inputs. After manual
+        # edits a bucket can drop below 2 — exclude those here.
+        buckets = {organ: raters for organ, raters in buckets.items() if len(raters) >= 2}
+        if not buckets:
+            return None
         # All constituent RTSSes must share a FrameOfReferenceUID for STAPLE to
         # work. The observers could in principle span contexts — pick the FoR
         # with the most contributors here.
@@ -879,16 +1258,13 @@ class BuildConsensusTab(QWidget):
             return None
         chosen_for = max(for_uid_counts.items(), key=lambda kv: kv[1])[0]
         # Build OrganEntry list — one synthetic ROI per bucket, with a new
-        # roi_number starting from 1.
+        # roi_number starting from 1. The organ NAME is the bucket title (its
+        # representative), so the name shown in Tab 3 matches the Tab 2 bucket
+        # title exactly.
         organs: list[OrganEntry] = []
         constituent_groups: dict[int, list[tuple[str, int]]] = {}
-        for synthetic_roi_number, (_canon, raters) in enumerate(sorted(buckets.items()), start=1):
-            # Display name: use the most common original ROI name across raters.
-            name_counts: dict[str, int] = defaultdict(int)
-            for _sop, _roi, roi_name in raters:
-                name_counts[roi_name] += 1
-            display_name = max(name_counts.items(), key=lambda kv: kv[1])[0]
-            organs.append(OrganEntry(roi_number=synthetic_roi_number, roi_name=display_name))
+        for synthetic_roi_number, (canon, raters) in enumerate(sorted(buckets.items()), start=1):
+            organs.append(OrganEntry(roi_number=synthetic_roi_number, roi_name=canon))
             constituent_groups[synthetic_roi_number] = [
                 (sop, int(roi_num)) for (sop, roi_num, _name) in raters
             ]
@@ -1274,12 +1650,17 @@ class BuildConsensusTab(QWidget):
             "top. Each ticked label is treated as one rater.</li>"
             "<li>Each patient with 2+ of the selected observers appears on the "
             "left. Click one to inspect the auto-matched organs on the right — "
-            "every rater is identified by its observer label. Single-rater "
-            "organs are excluded (STAPLE needs ≥2 raters).</li>"
+            "every rater is identified by its observer label.</li>"
+            "<li>Fix any mismatches: <b>Remove</b> a contour from an organ to "
+            "send it to the <b>Unmatched</b> tray, and <b>Assign</b> an "
+            "unmatched contour to the correct organ (or a new one). Editing a "
+            "patient locks it from the threshold slider — use <b>Reset to "
+            "auto-match</b> to undo. Organs with fewer than 2 raters are "
+            "excluded from the consensus.</li>"
             "<li>Optionally compute <b>inter-observer variability</b> first — the "
             "pairwise matrix labels raters by observer consistently across "
             "patients.</li>"
-            "<li>Click <b>Generate Consensus GT for ALL patients</b>. One "
+            "<li>Click <b>Generate STAPLE for all patients</b>. One "
             "synthetic RTSS per patient appears in Tab 3 with source label "
             f"<i>'{CONSENSUS_SOURCE_LABEL}'</i> and can be designated as the GT.</li>"
             "</ol>"
