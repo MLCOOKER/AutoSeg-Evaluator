@@ -238,8 +238,12 @@ def sensitivity_specificity_vs_reference(
         p_max=cfg.bbox_padding_max_voxels,
     )
     bbox = _bbox_from_union(union_mask, image_size_xyz, padding=chosen_padding)
-    ref = sitk.GetArrayViewFromImage(_crop(reference, bbox)) > 0
-    tst = sitk.GetArrayViewFromImage(_crop(test, bbox)) > 0
+    # NB: GetArrayFromImage (a copy), not GetArrayViewFromImage. A view aliases
+    # the source image's buffer without keeping it alive; binding it to the
+    # temporary returned by _crop() is a use-after-free that reads freed memory
+    # on some platforms (garbage counts on Linux, "lucky" correct on Windows).
+    ref = sitk.GetArrayFromImage(_crop(reference, bbox)) > 0
+    tst = sitk.GetArrayFromImage(_crop(test, bbox)) > 0
     not_ref = np.logical_not(ref)
     not_tst = np.logical_not(tst)
     tp = int(np.logical_and(ref, tst).sum())
