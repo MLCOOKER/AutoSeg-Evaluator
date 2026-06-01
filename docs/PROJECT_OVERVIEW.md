@@ -235,33 +235,53 @@ See `MetadataLibrary._merge_anonymisation_aliases` in
 
 **File:** [`src/autoseg_evaluator/ui/tabs/build_consensus.py`](../src/autoseg_evaluator/ui/tabs/build_consensus.py)
 
-**Greyed out** unless the library contains at least one patient with 2+
-RTSSes sharing a source label (e.g. multiple manual contours from
-different clinicians, or repeat exports from the same TPS).
+**v2.4 multi-observer model.** The consensus unit is the **patient**, and
+each manual observer is identified by a **distinct source label** assigned
+in Tab 1 (the source label *is* the rater identity, so it stays consistent
+across patients for free). The user clicks **Manual observers…** to pick
+which source labels count as observers (persisted as
+`consensus_observer_labels` in `settings.json`); a patient is *eligible*
+when it has 2+ RTSSes whose source label is in that set. This inverts the
+pre-v2.4 model, which grouped by `(patient, same source_label)` — multiple
+files sharing *one* label — and so could not tell two clinicians apart.
 
-**Workflow:**
-1. The left panel lists eligible groups (`patient × source_label`).
-   Multi-select via Ctrl/Shift-click.
-2. The right panel auto-clusters each group's ROIs into per-organ
-   "buckets" using **best-score-first threshold clustering** (default
-   τ = 0.60, user-adjustable). For each RTSS in the group, every organ
-   is pre-scored against every existing bucket; organs are processed in
-   descending best-score order so a perfect 1.0 match always claims its
-   preferred bucket before a noisier 0.65 near-match steals it.
-3. **Inter-observer variability dialog** (via `_InterObserverSettingsDialog`)
-   computes pairwise Dice / Surface Dice / HD100 / HD95 / MSD / Volume /
-   COM-offset between every rater pair for every matched organ in the
-   selected groups. Progress dialog + cancel. Results table sortable;
-   CSV export + Ctrl+A+C with headers.
-4. **Generate Consensus GT for SELECTED** or **for ALL** registers
-   synthetic `RTSTRUCTEntry` objects in `MetadataLibrary` with source
-   label `"STAPLE Consensus"`. Downstream tabs see these like any other
-   RTSS but the actual STAPLE consensus is computed *on-the-fly at
-   compute time* using Tab 4's STAPLE config.
+**Three-column layout, each with its own scroll zone:**
+- **Eligible patients** (narrow, left) — one row per patient with 2+ of the
+  selected observers. A `labelling warning(s)` badge appears if a patient
+  has a duplicate observer label (the same observer label on >1 file).
+- **Organ groupings** (centre) — the selected patient's ROIs auto-clustered
+  into per-organ "buckets" via **best-score-first threshold clustering**.
+  Every organ is pre-scored against every existing bucket and processed in
+  descending best-score order, so a perfect 1.0 match claims its bucket
+  before a noisier 0.65 near-match can steal it. Each bucket shows the
+  fuzzy score of each member against the bucket's **representative** (the
+  seed organ name — the actual clustering decision, and the name the
+  consensus carries into Tab 3). Buckets are **editable**: an `X` button
+  removes a contour to the tray, and `Assign ▾` / drag-drop moves contours
+  in. Editing a patient **locks** it from threshold re-clustering until
+  **Reset** (which discards edits and re-runs auto-match).
+- **Unmatched** tray (right) — contours that didn't cluster into a 2+ rater
+  bucket, grouped by source label and sorted alphabetically, draggable back
+  onto any bucket.
+
+**Per-patient match threshold.** Each patient keeps its own fuzzy-match
+threshold (footer spinbox edits the selected patient's value); changing it
+re-clusters only that patient.
+
+**Inter-observer variability dialog** (via `_InterObserverSettingsDialog`)
+computes pairwise Dice / Surface Dice / HD100 / HD95 / MSD / Volume /
+COM-offset between every observer pair for every matched organ. Progress
+dialog + cancel. Results table sortable; CSV export + Ctrl+A+C with headers.
+
+**Generate STAPLE for selected patients** / **for all patients** registers
+synthetic `RTSTRUCTEntry` objects in `MetadataLibrary` with source label
+`"STAPLE Consensus"`. Downstream tabs see these like any other RTSS but the
+actual STAPLE consensus is computed *on-the-fly at compute time* using
+Tab 4's STAPLE config.
 
 **Synthetic RTSS model:** `is_synthetic_consensus=True`, `file_path=""`,
 `constituent_groups: dict[synthetic_roi_number, list[(real_sop_uid, real_roi_number)]]`.
-The UID is deterministic on `(patient_id|source_label)` so re-running
+The UID is deterministic on `(patient_id|representative_organ)` so re-running
 Generate replaces the entry in place.
 
 ### Tab 3 — Match Contours
@@ -659,19 +679,41 @@ IEEE TMI 2004). For each call:
 **Two ways to use STAPLE in the app:**
 
 1. **Per-drawer `vs STAPLE` mode** (Tab 3) — treats GT + tests as
-   raters. Each rater gets a row with `staple_sensitivity` /
-   `staple_specificity`; a summary row carries the consensus volume +
-   uncertainty metrics. The `GT in pool` sub-toggle controls whether
-   the designated GT contributes to the EM (default ON — "no true
-   truth" framing per Warfield 2004; OFF for evaluating AI ensemble
-   vs reference framing).
+   raters. The `GT in pool` sub-toggle controls whether the designated
+   GT contributes to the EM (default ON — "no true truth" framing per
+   Warfield 2004; OFF for evaluating AI ensemble vs reference framing).
 
 2. **Synthetic GT (Tab 2 → Tab 3 → Tab 4)** — Tab 2 builds a STAPLE
-   consensus from 2+ manual contours, registers it as a synthetic
+   consensus from 2+ manual observers, registers it as a synthetic
    RTSS, and Tab 3 designates it as the GT. The worker rasterises
    constituents on-the-fly and runs STAPLE at compute time using
    Tab 4's STAPLE config. The drawer's `vs STAPLE` auto-disables
    (running STAPLE on STAPLE is methodologically meaningless).
+
+**Result-row schema (v2.4).** Every STAPLE computation, from either
+path, emits a dedicated **STAPLE Details** row (`mode = "STAPLE
+Details"`) carrying the consensus volume + uncertainty diagnostics
+(`mean_entropy`, `uncertain_band_cc`, `rater_disagreement_cc`,
+`bbox_padding`, `bbox_fg_ratio`, iterations, convergence) and **no dose
+columns**. Rows are tagged by provenance in the `Mode` column:
+
+| Mode | Source |
+|---|---|
+| `Multi-observer STAPLE` | Tab 2 consensus used as GT |
+| `Generic STAPLE with GT` | Tab 3 per-drawer `vs STAPLE`, `GT in pool` ON |
+| `Generic STAPLE no GT` | Tab 3 per-drawer `vs STAPLE`, `GT in pool` OFF |
+| `STAPLE Details` | the diagnostics row accompanying any of the above |
+
+The `GT RTSS` column is left **blank** for all STAPLE computations (a
+synthetic consensus has no source file). When a consensus is used as GT,
+**each test contour's row also carries its own `staple_sensitivity` /
+`staple_specificity`** versus that consensus — computed by
+`sensitivity_specificity_vs_reference` over the same adaptive bbox the
+EM uses — so reviewers see how each AI/test structure reproduces the
+consensus alongside the geometric metrics. When dose is requested, the
+consensus's own DVH is emitted as a separate `gt dose` row (parity
+across both Tab 2 and Tab 3 paths), and `D at volume (cc)` points are
+populated for synthetic-mask DVHs.
 
 ---
 
@@ -688,25 +730,28 @@ User loads folder
    Tab 1 scans → MetadataLibrary
         │
         ▼
-   Tab 2 detects patients with 2+ same-source-label RTSSes
+   User picks which source labels are observers (Manual observers…)
         │
         ▼
-   For each (patient, source_label) group:
+   Tab 2 detects patients with 2+ RTSSes among the selected observers
+        │
+        ▼
+   For each eligible patient (members = RTSSes in the observer set):
        │
        ▼
    _auto_match_group   ← uses best-score-first threshold clustering
-   (similarity-threshold clustering with TG-263 dictionary)
+   (per-patient similarity threshold, TG-263 dictionary)
        │
        ▼
    Per-organ buckets: {organ_display_name: [(sop_uid, roi_number, roi_name), ...]}
-   (single-rater buckets dropped silently)
+   (single-rater buckets → Unmatched tray for manual assignment)
        │
        ▼
-   User reviews buckets, optionally clicks "Compute inter-observer
-   variability for group(s)…" to see pairwise metrics.
+   User reviews/edits buckets, optionally clicks "Compute inter-observer
+   variability…" to see pairwise metrics.
        │
        ▼
-   Generate Consensus GT for SELECTED / ALL groups:
+   Generate STAPLE for SELECTED / ALL patients:
        │
        ▼
    _build_synthetic_entry → RTSTRUCTEntry(is_synthetic_consensus=True, …)
@@ -1029,6 +1074,21 @@ bumping `pyproject.toml` updates the window title bar and every other
   SoftwareVersions, StructureSetName, StructureSetDescription,
   ManufacturerModelName); user-resizable columns + right-click
   show/hide.
+- **v2.4.0** — Tab 2 redesigned around a **multi-observer model**:
+  observers are distinct source labels selected by the user; eligibility
+  and grouping are per-patient over that observer set. Three-column
+  layout (Eligible patients / editable Organ groupings / Unmatched
+  tray) with independent scroll zones, per-patient match threshold,
+  lock-on-edit + Reset, drag-drop and `Assign ▾`, representative-based
+  bucket scoring, and labelling-warning badges. Source-label
+  disambiguation columns + assisted propagation (so each observer gets
+  a distinct label). Results gained a dedicated **STAPLE Details** row,
+  provenance-tagged modes (`Multi-observer STAPLE`, `Generic STAPLE
+  with/no GT`), per-test sensitivity/specificity vs a consensus GT,
+  `gt dose` parity across Tab 2/Tab 3 STAPLE, and `D at volume (cc)`
+  for synthetic-mask DVHs. Fixed a `GetArrayViewFromImage`
+  use-after-free in the sens/spec helper that produced garbage on
+  Linux; STAPLE constituents are freed + `gc.collect()`-ed to cap RAM.
 
 ### Pending features
 - **Docs**: full user guide, hospital deployment doc, metrics reference,
@@ -1089,7 +1149,8 @@ bumping `pyproject.toml` updates the window title bar and every other
 
 ---
 
-*Document version 2 — updated 2026-05-27 against commit `39aff48` (v2.3.0).
+*Document version 3 — updated 2026-06-01 against commit `1e18d44` (v2.4.0).
 Tracks: portable bundle + CI/release pipeline (v2.1), `D at volume (cc)`
 DVH input + window-title fix (v2.2), template source-label match +
-expanded Manage Source Labels columns (v2.3).*
+expanded Manage Source Labels columns (v2.3), and the Tab 2 multi-observer
+consensus redesign + STAPLE result-row parity (v2.4).*

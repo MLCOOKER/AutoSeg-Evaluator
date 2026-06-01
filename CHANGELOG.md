@@ -4,6 +4,64 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] — Unreleased
+
+### Changed
+- **Tab 2 (Build Consensus GT) redesigned around a multi-observer model.**
+  Each manual observer is now identified by a **distinct source label**
+  (assigned in Tab 1); the user selects which labels are observers via
+  **Manual observers…** (persisted as ``consensus_observer_labels``). A
+  patient is eligible when it has 2+ RTSSes among the selected observers,
+  and grouping is per-patient over that observer set. This replaces the
+  pre-v2.4 model that grouped by ``(patient, same source_label)`` and could
+  not distinguish two clinicians.
+- The consensus synthetic-RTSS UID is now deterministic on
+  ``(patient_id | representative_organ)`` rather than
+  ``(patient_id | source_label)``.
+
+### Added
+- **Three-column Tab 2 layout** — *Eligible patients* / *Organ groupings* /
+  *Unmatched* tray, each with an independent scroll zone.
+- **Editable organ groupings** — remove a contour with the ``X`` button,
+  add via ``Assign ▾`` or drag-drop (including from the Unmatched tray).
+  Editing a patient **locks** it from threshold re-clustering until
+  **Reset** re-runs auto-match.
+- **Per-patient match threshold** — each patient keeps its own fuzzy-match
+  threshold; changing it re-clusters only that patient.
+- **Representative-based bucket scoring** — each member shows its fuzzy
+  score against the bucket's seed (representative) organ name, which is the
+  actual clustering decision and the name the consensus carries into Tab 3.
+- **Labelling-warning badges** when a patient has a duplicate observer
+  label (same observer on >1 file).
+- **Source-label disambiguation columns + assisted propagation** so two
+  RTSSes from the same vendor can each get a distinct observer label.
+- **STAPLE Details results row** (``mode = "STAPLE Details"``) for every
+  STAPLE computation from either path, carrying consensus volume +
+  uncertainty diagnostics (mean entropy, uncertain-band, rater
+  disagreement, bbox padding/ratio, iterations, convergence) and **no
+  dose columns**.
+- **Provenance-tagged STAPLE modes** in the ``Mode`` column:
+  ``Multi-observer STAPLE`` (Tab 2 consensus), ``Generic STAPLE with GT``
+  and ``Generic STAPLE no GT`` (Tab 3 per-drawer, by ``GT in pool``).
+- **Per-test sensitivity / specificity vs a consensus GT** — when a Tab 2
+  consensus is the GT, every test contour's row also carries
+  ``staple_sensitivity`` / ``staple_specificity`` versus that consensus.
+
+### Fixed
+- **``GetArrayViewFromImage`` use-after-free** in
+  ``sensitivity_specificity_vs_reference``: the view aliased the temporary
+  cropped image's buffer without keeping it alive, producing garbage counts
+  on Linux (sensitivity ~0.028 instead of 0.5) while reading intact memory
+  on Windows. Switched to ``GetArrayFromImage`` (a copy).
+- **STAPLE RAM** — constituent masks are freed and ``gc.collect()``-ed
+  after each synthesis to cap peak memory.
+- **Dose parity** — Tab 3 STAPLE now emits a separate ``gt dose`` row like
+  Tab 2 (dose was previously folded into / missing from the details row),
+  and ``D at volume (cc)`` points are populated for synthetic-mask DVHs
+  (previously always blank).
+- The ``GT RTSS`` column is left blank for all STAPLE computations (a
+  synthetic consensus has no source file).
+
 ## [2.3.0] — 2026-05-26
 
 ### Fixed

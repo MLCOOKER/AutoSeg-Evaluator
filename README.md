@@ -26,16 +26,23 @@ command-line or coding expertise.
   [`dicompyler-core`](https://github.com/dicompyler/dicompyler-core) — Dmin /
   Dmean / Dmax plus user-defined `D{X}_gy` (dose to hottest X%) and
   `V{X}gy_cc` (volume receiving ≥ X Gy) points.
-- **STAPLE consensus**: per-drawer Simultaneous Truth and Performance Level
-  Estimation (Warfield 2004) with per-rater sensitivity / specificity plus
-  consensus uncertainty metrics (uncertain-band volume, mean entropy, rater
-  disagreement, rater volume range).
+- **STAPLE consensus**: Simultaneous Truth and Performance Level Estimation
+  (Warfield 2004) with per-rater sensitivity / specificity plus consensus
+  uncertainty metrics (uncertain-band volume, mean entropy, rater
+  disagreement, rater volume range), surfaced in the results table as a
+  dedicated **STAPLE Details** row. Results are tagged by mode —
+  *Multi-observer STAPLE* (Tab 2 consensus), *Generic STAPLE with GT* and
+  *Generic STAPLE no GT* (Tab 3 per-drawer) — and every test contour scored
+  against a consensus GT also carries its own sensitivity / specificity.
+- **Multi-observer consensus ground truth**: assign each manual observer a
+  distinct source label in Tab 1, select which labels are observers, and
+  build a per-patient STAPLE consensus from them. The consensus is written
+  back as a synthetic RTSS and flows into the evaluation pipeline as the
+  designated ground truth — editable organ groupings, an unmatched tray for
+  manual re-assignment, and an independent fuzzy-match threshold per patient.
 - **Inter-observer variability**: pairwise Dice / surface-distance / APL
-  matrices over manual rater groups with configurable metric selection +
+  matrices over the selected observers with configurable metric selection +
   tolerance overrides.
-- **Synthetic consensus GT generation**: build STAPLE-derived consensus
-  contours, write them back as a synthetic RTSS, and feed them into the
-  evaluation pipeline as the designated ground truth.
 - **Smart auto-matching**: hybrid Levenshtein + cosine matcher backed by a
   TG-263 synonym dictionary (~17 000 variants from the official worksheet),
   user-defined replacement rules, and template-driven batch selection.
@@ -44,7 +51,9 @@ command-line or coding expertise.
 - **Source identification**: cascading fallback (Manufacturer →
   StructureSetLabel → SoftwareVersions → filename) handles in-house models
   that lack metadata, with a manual override dialog persisted in
-  `settings.json`.
+  `settings.json`. Six raw DICOM identification columns plus assisted
+  propagation let you disambiguate two RTSSes from the same vendor — e.g.
+  giving each manual observer a distinct label for consensus building.
 - **Modern UI**: 5-tab workflow with accordion organ drawers, colourblind-safe
   similarity indicators, banded results table, dark / light themes, full undo
   stack on Match Contours.
@@ -130,7 +139,7 @@ For Arch:
 sudo pacman -S python git qt6-base libxkbcommon-x11
 ```
 
-The full 259-test suite is exercised on `windows-latest` and
+The full 317-test suite is exercised on `windows-latest` and
 `ubuntu-latest` in CI on every push — macOS is not in CI, but the same
 PySide6 / SimpleITK / pydicom stack ships official wheels for macOS so
 the app is expected to run identically there.
@@ -152,9 +161,11 @@ The application is organised into five sequential tabs:
 1. **Load Data** — point at a folder of DICOM data; the app recursively scans
    and groups by patient, study, and frame-of-reference. Source labels can be
    overridden per RTSS via *Manage Source Labels*.
-2. **Build Consensus GT** *(optional)* — cluster manually contoured raters,
-   compute inter-observer variability metrics, and optionally generate a
-   STAPLE-derived synthetic ground-truth RTSS that flows into Tab 3.
+2. **Build Consensus GT** *(optional)* — pick which source labels are your
+   manual observers (each observer = one distinct label), review the
+   auto-clustered per-organ groupings for each eligible patient, compute
+   inter-observer variability metrics, and generate a STAPLE-derived
+   synthetic ground-truth RTSS per patient that flows into Tab 3.
 3. **Match Contours** — define replacement rules and an organ template, then
    run auto-match to populate accordion drawers grouped by organ. Per-drawer
    toggles control truncation, vs-GT vs vs-STAPLE mode, and whether the
