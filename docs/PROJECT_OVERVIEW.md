@@ -909,7 +909,7 @@ on the next `setValue` tick.
 
 ## Validation & test suite
 
-**Test runner:** pytest, 277 tests, ~7 s wall clock.
+**Test runner:** pytest, 322 tests, ~8 s wall clock.
 
 **Coverage highlights:**
 
@@ -930,13 +930,25 @@ on the next `setValue` tick.
 | `test_match_logic.py` / `test_source_labels.py` | ~10 | Smaller utility tests |
 | `test_platipy_equivalence.py` | 4 | PlatiPy mask-rasteriser equivalence on a synthetic CT + RTSTRUCT (square, donut with XOR hole, multi-slice) |
 | `test_metrics_equivalence.py` | 8 | Bit-for-bit equivalence of Dice / HD100 / HD95 / Surface Dice @ 3 mm / mean surface distance against ``google-deepmind/surface-distance`` and APL total / mean against PlatiPy 0.7.2 |
+| `test_staple_equivalence.py` | 3 | Bit-for-bit equivalence of AutoSeg's STAPLE wrapper (per-rater sensitivity/specificity + binary consensus) against a direct ``SimpleITK.STAPLEImageFilter`` invocation, on a synthetic 3-rater fixture |
+| `test_dvh_equivalence.py` | 2 | Bit-for-bit equivalence of AutoSeg's DVH statistics (Dmin/Dmean/Dmax, D% , Dcc, VGy) against ``dicompyler-core`` on a synthetic CT + RTSS + analytic gradient RTDOSE |
 
-**Empirical clinical validation:** every metric was cross-checked
-against the upstream package (`surface-distance`, `PlatiPy`) on the
-SAMPLE DATA HN1 cohort. Δ = 0.00e+00 across Dice, HD100, HD95, Surface
-Dice, MSD (both directions), APL total/mean, and per-slice APL list.
-The two validation packages are kept installed in `requirements.txt`
-so CI / users can re-run the parity check at any time.
+**Empirical clinical validation:** every numerical engine was cross-checked
+against its upstream reference on the SAMPLE DATA HN1 cohort, each producing
+a PHI-safe markdown report under `docs/` and reproducible via a script under
+`scripts/`:
+
+| Engine | Reference | Result | Report |
+|---|---|---|---|
+| Mask rasterisation | PlatiPy 0.7.2 | 110/110 ROIs voxel-exact | `VALIDATION_REPORT.md` |
+| 7 geometric metrics | surface-distance + PlatiPy | 63/63 comparisons Δ = 0 | `VALIDATION_REPORT.md` |
+| STAPLE consensus | `SimpleITK.STAPLEImageFilter` | 55/55 consensus runs bit-exact (sens/spec + voxels) | `STAPLE_VALIDATION_REPORT.md` |
+| DVH dose statistics | `dicompyler-core` 0.5.6 | 2970/2970 stat comparisons Δ = 0 (297 ROIs) | `DVH_VALIDATION_REPORT.md` |
+
+The STAPLE and DVH reference libraries (`SimpleITK`, `dicompyler-core`) are
+core dependencies, so their equivalence tests run in CI with no extra
+install; `surface-distance` and `platipy` are installed explicitly in the CI
+workflow for the mask/metric equivalence tests.
 
 **Bit-for-bit PlatiPy parity for mask rasterisation** (v2.3.1):
 [`test_platipy_equivalence.py`](../tests/test_platipy_equivalence.py)

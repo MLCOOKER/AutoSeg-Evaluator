@@ -4,6 +4,27 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **STAPLE consensus validation.** New
+  `scripts/validate_staple_against_upstream.py` +
+  `docs/STAPLE_VALIDATION_REPORT.md` demonstrate that AutoSeg's
+  `compute_staple` reproduces `SimpleITK.STAPLEImageFilter` (Warfield et
+  al. 2004) bit-for-bit — per-rater sensitivity/specificity and the binary
+  consensus mask — on the HN1 multi-observer cohort (55/55 organs exact,
+  up to 6 raters each). Locked in CI by `tests/test_staple_equivalence.py`.
+- **DVH dose-statistic validation.** New
+  `scripts/validate_dvh_against_upstream.py` +
+  `docs/DVH_VALIDATION_REPORT.md` demonstrate that AutoSeg's
+  `compute_dvh_metrics` reproduces `dicompyler-core` 0.5.6 exactly across
+  Dmin/Dmean/Dmax, D95/D50/D2 %, D0.1cc/D2cc, and V20Gy/V30Gy on the HN1
+  CT + RT Dose + RT Structure cohort (2970/2970 comparisons exact, 297
+  ROIs). Locked in CI by `tests/test_dvh_equivalence.py`.
+- Both reports are PHI-safe (organ names + numeric values only) and
+  reproducible by any user against their own data; the reference libraries
+  are core dependencies, so the new equivalence tests need no extra install.
+
 ## [2.4.0] — 2026-06-01
 
 ### Changed
