@@ -204,6 +204,55 @@ def compute_staple(
     )
 
 
+def sensitivity_specificity_vs_reference(
+    reference: sitk.Image,
+    test: sitk.Image,
+    config: StapleConfig | None = None,
+) -> tuple[float, float] | None:
+    """Sensitivity / specificity of ``test`` measured against ``reference``.
+
+    Treats ``reference`` (e.g. a STAPLE consensus used as ground truth) as the
+    truth and quantifies how well ``test`` reproduces it::
+
+        sensitivity = TP / (TP + FN)   # fraction of the reference recovered
+        specificity = TN / (TN + FP)   # fraction of true background kept clear
+
+    Specificity is computed within the padded union bounding box — the same
+    adaptive sizing :func:`compute_staple` uses — so it stays informative
+    rather than trivially ~1 over a whole-image background. Returns ``None``
+    when the reference is empty (sensitivity undefined).
+    """
+    cfg = config or StapleConfig()
+    if reference is None or test is None:
+        return None
+    if test.GetSize() != reference.GetSize() or test.GetSpacing() != reference.GetSpacing():
+        raise ValueError("reference and test masks must share geometry.")
+    image_size_xyz = reference.GetSize()
+    union_mask = _build_union_mask([reference, test])
+    chosen_padding, _ = _choose_adaptive_padding(
+        union_mask,
+        image_shape_zyx=image_size_xyz[::-1],
+        min_ratio=cfg.target_fg_ratio_min,
+        max_ratio=cfg.target_fg_ratio_max,
+        p_min=cfg.bbox_padding_min_voxels,
+        p_max=cfg.bbox_padding_max_voxels,
+    )
+    bbox = _bbox_from_union(union_mask, image_size_xyz, padding=chosen_padding)
+    ref = sitk.GetArrayViewFromImage(_crop(reference, bbox)) > 0
+    tst = sitk.GetArrayViewFromImage(_crop(test, bbox)) > 0
+    not_ref = np.logical_not(ref)
+    not_tst = np.logical_not(tst)
+    tp = int(np.logical_and(ref, tst).sum())
+    fn = int(np.logical_and(ref, not_tst).sum())
+    fp = int(np.logical_and(not_ref, tst).sum())
+    tn = int(np.logical_and(not_ref, not_tst).sum())
+    if (tp + fn) == 0:
+        return None
+    sensitivity = tp / (tp + fn)
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 1.0
+    return float(sensitivity), float(specificity)
+
+
 # ---- Helpers --------------------------------------------------------------
 
 

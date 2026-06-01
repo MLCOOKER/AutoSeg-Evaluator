@@ -20,7 +20,7 @@ from typing import Any
 import pydicom
 from PySide6.QtCore import QObject, Signal, Slot
 
-from autoseg_evaluator.core.dvh import DVHConfig, DVHError, compute_dvh_metrics
+from autoseg_evaluator.core.dvh import DVHConfig, DVHError, _fmt_num, compute_dvh_metrics
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
     find_reference_image_folder,
@@ -29,7 +29,20 @@ from autoseg_evaluator.core.masks import (
     truncate_to_gt_z_extent,
 )
 from autoseg_evaluator.core.metrics import compute_geometric_metrics
-from autoseg_evaluator.core.staple import StapleConfig, compute_staple
+from autoseg_evaluator.core.staple import (
+    StapleConfig,
+    compute_staple,
+    sensitivity_specificity_vs_reference,
+)
+
+# "Mode" value for the per-organ STAPLE summary row (sensitivity/specificity
+# live on the per-rater rows; this row carries the aggregate consensus metrics
+# — volume, entropy, disagreement, bbox padding, iterations, convergence).
+_STAPLE_DETAILS_MODE = "STAPLE Details"
+# "Mode" values that designate a STAPLE-consensus comparison.
+_MODE_MULTI_OBSERVER = "Multi-observer STAPLE"
+_MODE_GENERIC_STAPLE_GT = "Generic STAPLE with GT"
+_MODE_GENERIC_STAPLE_NO_GT = "Generic STAPLE no GT"
 
 
 class MetricsWorker(QObject):
@@ -74,6 +87,10 @@ class MetricsWorker(QObject):
         self._ct_cache: dict[str, Any] = {}
         self._mask_cache: dict[tuple[str, str, int], Any] = {}
         self._dose_cache: dict[str, Any] = {}
+        # STAPLE summary scalars captured while synthesising a multi-observer
+        # consensus GT (Tab 2), keyed by (patient_id, synthetic_sop, roi_number).
+        # Lets the GT branch emit a "STAPLE Details" row without re-running EM.
+        self._synthetic_staple_summaries: dict[tuple[str, str, int], dict[str, Any]] = {}
 
     @Slot()
     def cancel(self) -> None:
@@ -254,6 +271,12 @@ class MetricsWorker(QObject):
         isn't used by the metrics themselves — only by the rasteriser — so
         this trims peak RAM by ~200 MB during the slowest phase.
         """
+        # Whether this drawer's GT is a multi-observer synthetic consensus
+        # (Tab 2). Drives the "Multi-observer STAPLE" mode label and the blank
+        # GT-RTSS column for the GT-comparison rows.
+        gt_entry = self._find_rtstruct_entry(group["patient_id"], group["gt_sop"])
+        group["_gt_synthetic"] = bool(gt_entry is not None and gt_entry.is_synthetic_consensus)
+
         # Catastrophic load failures degrade to a single error row per test.
         try:
             ct = self._load_ct(group["patient_id"], group["gt_sop"])
@@ -352,6 +375,14 @@ class MetricsWorker(QObject):
                 self.progress.emit(idx + r_idx, total, state)
                 rows.append(self._compute_gt_row(group, rec, gt_mask))
 
+        # When the GT is a multi-observer synthetic consensus (Tab 2), emit a
+        # "STAPLE Details" row describing the consensus that backs this GT.
+        synth_summary = self._synthetic_staple_summaries.get(
+            (group["patient_id"], group["gt_sop"], int(group["gt_roi_number"]))
+        )
+        if synth_summary:
+            rows.append(self._make_staple_details_row(group, synth_summary))
+
         if group["staple_consensus"]:
             if self._cancelled:
                 return rows
@@ -373,6 +404,10 @@ class MetricsWorker(QObject):
     ) -> dict[str, Any]:
         """One row: a single test vs the designated GT."""
         test = record["meta"]
+        # Against a multi-observer synthetic consensus GT, label the mode
+        # "Multi-observer STAPLE" to distinguish it from an ordinary manual-GT
+        # comparison and from Tab 3's "Generic STAPLE …".
+        gt_mode = _MODE_MULTI_OBSERVER if group.get("_gt_synthetic") else "gt"
         row = self._make_row_skeleton(
             group,
             source_label=test["source_label"],
@@ -380,13 +415,23 @@ class MetricsWorker(QObject):
             test_roi_number=test["roi_number"],
             test_sop=test["rtstruct_sop_uid"],
             similarity=test["similarity"],
-            comparison_mode="gt",
+            comparison_mode=gt_mode,
             was_designated_gt=False,
         )
         row["truncated_slices"] = int(record["extent_info"]["slices_removed"])
         row["truncated_extent_mm"] = float(record["extent_info"]["extent_removed_mm"])
         try:
             row["metrics"].update(compute_geometric_metrics(gt_mask, record["mask"], self._config))
+            # When the GT is a multi-observer STAPLE consensus, also report each
+            # test's sensitivity / specificity against that consensus (treating
+            # the consensus as truth) — alongside the geometric metrics.
+            if group.get("_gt_synthetic"):
+                ss = sensitivity_specificity_vs_reference(
+                    gt_mask, record["mask"], self._staple_config
+                )
+                if ss is not None:
+                    row["metrics"]["staple_sensitivity"] = ss[0]
+                    row["metrics"]["staple_specificity"] = ss[1]
             if self._dvh_config.any_enabled():
                 dose_ds = self._load_dose(group["patient_id"])
                 if dose_ds is not None:
@@ -525,15 +570,16 @@ class MetricsWorker(QObject):
         # results table isn't misled about what the comparison was
         # against. Mode also encodes the GT-in-pool choice for clarity.
         include_gt = bool(group.get("staple_include_gt", True))
-        staple_mode_label = (
-            "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
-        )
+        staple_mode_label = _MODE_GENERIC_STAPLE_GT if include_gt else _MODE_GENERIC_STAPLE_NO_GT
 
         # ``result.sensitivities`` / ``.specificities`` are aligned to the
         # ``staple_pool`` indices, NOT the full ``raters`` list. Build a
         # lookup so raters outside the pool can still appear in results
         # (with empty sens/spec) compared against the consensus.
         pool_idx_by_id = {id(r): i for i, r in enumerate(staple_pool)}
+        # Dose is computed per rater (each source label's own contour), so the
+        # results carry dose for every rater — not just the consensus.
+        dose_ds = self._load_dose(group["patient_id"]) if self._dvh_config.any_enabled() else None
         out: list[dict[str, Any]] = []
         for rater in raters:
             if self._cancelled:
@@ -568,22 +614,29 @@ class MetricsWorker(QObject):
                 # else: GT excluded from pool — sens/spec stay empty since the
                 # EM never saw this rater's mask. Geometric vs consensus still
                 # populated so the user can quantify GT-vs-AI-ensemble agreement.
+                # Per-rater dose (this source label's own contour).
+                if dose_ds is not None and rater.get("rtss") is not None:
+                    try:
+                        row["metrics"].update(
+                            compute_dvh_metrics(
+                                rater["rtss"], dose_ds, rater["roi_number"], self._dvh_config
+                            )
+                        )
+                    except DVHError as dvh_exc:
+                        row["error"] = f"DVH: {dvh_exc}"
             except Exception as exc:  # noqa: BLE001
                 row["error"] = f"{type(exc).__name__}: {exc}"
             out.append(row)
 
-        # Consensus summary row: DVH computed on the binary thresholded consensus
-        # against the rater-zero RTSS file (we just need *some* RTSS for the
-        # plan-link discovery; the contour we evaluate is the consensus mask).
-        summary = self._make_staple_summary_row(group, result, "")
+        # Per-organ STAPLE Details row (aggregate consensus metrics only — the
+        # consensus dose goes on a separate gt_dose row, added below).
+        out.append(self._make_staple_summary_row(group, result, ""))
+
+        # Consensus dose row (gt_dose): DVH of the binary thresholded consensus.
         if self._dvh_config.any_enabled():
             dose_ds = self._load_dose(group["patient_id"])
             if dose_ds is not None:
-                try:
-                    summary["metrics"].update(self._dvh_for_consensus_mask(consensus_mask, dose_ds))
-                except DVHError as dvh_exc:
-                    summary["error"] = f"DVH: {dvh_exc}"
-        out.append(summary)
+                out.append(self._make_consensus_dose_row(group, consensus_mask, dose_ds))
         return out
 
     def _dvh_for_consensus_mask(self, consensus_mask, dose_ds) -> dict[str, float]:
@@ -637,13 +690,22 @@ class MetricsWorker(QObject):
             out["dmin_gy"] = float(voxel_doses.min())
         if self._dvh_config.include_dmax:
             out["dmax_gy"] = float(voxel_doses.max())
+        total_vox = int(voxel_doses.size)
         for v_pct in self._dvh_config.d_at_volumes_pct:
-            # D at hottest v%: percentile of dose at (100 - v)
+            # D at the hottest v% of volume: percentile of dose at (100 - v).
             q = max(0.0, min(100.0, 100.0 - float(v_pct)))
-            out[f"d{int(v_pct)}_gy"] = float(np.percentile(voxel_doses, q))
+            out[f"d{_fmt_num(v_pct)}_gy"] = float(np.percentile(voxel_doses, q))
+        for v_cc in self._dvh_config.d_at_volumes_cc:
+            # D at the hottest v cc of volume: convert the cc to a volume
+            # fraction of the mask, then take the dose at that upper percentile.
+            if voxel_cc <= 0:
+                continue
+            frac = min(1.0, (float(v_cc) / voxel_cc) / total_vox)
+            q = max(0.0, min(100.0, 100.0 * (1.0 - frac)))
+            out[f"d{_fmt_num(v_cc)}cc_gy"] = float(np.percentile(voxel_doses, q))
         for d_gy in self._dvh_config.v_at_doses_gy:
-            v_cc = float((voxel_doses >= float(d_gy)).sum()) * voxel_cc
-            out[f"v{int(d_gy)}gy_cc"] = v_cc
+            v_received = float((voxel_doses >= float(d_gy)).sum()) * voxel_cc
+            out[f"v{_fmt_num(d_gy)}gy_cc"] = v_received
         return out
 
     def _dose_image_from_ds(self, dose_ds):
@@ -684,7 +746,9 @@ class MetricsWorker(QObject):
         return {
             "drawer": group["organ_name"],
             "patient_id": group["patient_id"],
-            "gt_rtstruct_filename": group["gt_filename"],
+            # GT RTSS is blank when the GT is a synthetic consensus (no file);
+            # STAPLE branch rows blank it explicitly too.
+            "gt_rtstruct_filename": "" if group.get("_gt_synthetic") else group["gt_filename"],
             "gt_source_label": group["gt_source"],
             "gt_roi_name": group["gt_roi_name"],
             "gt_roi_number": group["gt_roi_number"],
@@ -707,10 +771,10 @@ class MetricsWorker(QObject):
         # before we know which comparison mode actually ran. Prefer gt
         # labelling when both modes are on (gt is the user's primary).
         if group["gt_comparison"]:
-            mode_label = "gt"
+            mode_label = _MODE_MULTI_OBSERVER if group.get("_gt_synthetic") else "gt"
         else:
             include_gt = bool(group.get("staple_include_gt", True))
-            mode_label = "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
+            mode_label = _MODE_GENERIC_STAPLE_GT if include_gt else _MODE_GENERIC_STAPLE_NO_GT
         row = self._make_row_skeleton(
             group,
             source_label=test["source_label"],
@@ -730,7 +794,7 @@ class MetricsWorker(QObject):
         self, group: dict[str, Any], rater: dict[str, Any], error_text: str
     ) -> dict[str, Any]:
         include_gt = bool(group.get("staple_include_gt", True))
-        mode_label = "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
+        mode_label = _MODE_GENERIC_STAPLE_GT if include_gt else _MODE_GENERIC_STAPLE_NO_GT
         row = self._make_row_skeleton(
             group,
             source_label=rater["source_label"],
@@ -750,11 +814,38 @@ class MetricsWorker(QObject):
         row["error"] = error_text
         return row
 
-    def _make_staple_summary_row(
-        self, group: dict[str, Any], result, error_text: str
+    @staticmethod
+    def _staple_summary_metrics(result) -> dict[str, Any]:
+        """Aggregate consensus scalars from a STAPLE result (empty if None).
+
+        These are the metrics shown on the per-organ "STAPLE Details" row —
+        no dose (it lives on the gt_dose row) and no per-rater sensitivity /
+        specificity (those go on the individual rater rows).
+        """
+        if result is None:
+            return {}
+        return {
+            "consensus_volume_cc": float(result.consensus_volume_cc),
+            "uncertain_band_cc": float(result.uncertain_band_cc),
+            "mean_entropy": float(result.mean_entropy),
+            "rater_disagreement_cc": float(result.rater_disagreement_cc),
+            "rater_volume_range_cc": float(result.rater_volume_range_cc),
+            "n_raters": int(result.n_raters),
+            "staple_iterations": int(result.elapsed_iterations),
+            "staple_converged": bool(result.converged),
+            "staple_bbox_padding": int(result.bbox_padding_used),
+            "staple_bbox_fg_ratio": float(result.bbox_fg_ratio),
+        }
+
+    def _make_staple_details_row(
+        self, group: dict[str, Any], metrics: dict[str, Any], error_text: str = ""
     ) -> dict[str, Any]:
-        include_gt = bool(group.get("staple_include_gt", True))
-        mode_label = "STAPLE consensus with GT" if include_gt else "STAPLE consensus without GT"
+        """The per-organ STAPLE summary ("STAPLE Details") row.
+
+        Carries the aggregate consensus metrics in ``metrics``; the Mode column
+        reads "STAPLE Details" and the GT columns are blanked (the reference is
+        the consensus, not a file).
+        """
         row = self._make_row_skeleton(
             group,
             source_label="STAPLE consensus",
@@ -762,10 +853,9 @@ class MetricsWorker(QObject):
             test_roi_number=0,
             test_sop="",
             similarity=0.0,
-            comparison_mode=mode_label,
+            comparison_mode=_STAPLE_DETAILS_MODE,
             was_designated_gt=False,
         )
-        # Summary row IS the consensus — the "GT" columns mirror that.
         row["gt_source_label"] = "STAPLE consensus"
         row["gt_rtstruct_filename"] = ""
         row["gt_roi_name"] = group["organ_name"]
@@ -773,17 +863,42 @@ class MetricsWorker(QObject):
         row["truncated_slices"] = 0
         row["truncated_extent_mm"] = 0.0
         row["error"] = error_text
-        if result is not None:
-            row["metrics"]["consensus_volume_cc"] = float(result.consensus_volume_cc)
-            row["metrics"]["uncertain_band_cc"] = float(result.uncertain_band_cc)
-            row["metrics"]["mean_entropy"] = float(result.mean_entropy)
-            row["metrics"]["rater_disagreement_cc"] = float(result.rater_disagreement_cc)
-            row["metrics"]["rater_volume_range_cc"] = float(result.rater_volume_range_cc)
-            row["metrics"]["n_raters"] = int(result.n_raters)
-            row["metrics"]["staple_iterations"] = int(result.elapsed_iterations)
-            row["metrics"]["staple_converged"] = bool(result.converged)
-            row["metrics"]["staple_bbox_padding"] = int(result.bbox_padding_used)
-            row["metrics"]["staple_bbox_fg_ratio"] = float(result.bbox_fg_ratio)
+        row["metrics"].update(metrics)
+        return row
+
+    def _make_staple_summary_row(
+        self, group: dict[str, Any], result, error_text: str
+    ) -> dict[str, Any]:
+        return self._make_staple_details_row(
+            group, self._staple_summary_metrics(result), error_text
+        )
+
+    def _make_consensus_dose_row(self, group: dict[str, Any], consensus_mask, dose_ds):
+        """A gt_dose row carrying the STAPLE consensus's own dose statistics.
+
+        Separates the consensus dose from the STAPLE Details row so dose lives
+        consistently on a gt_dose row (matching the manual-GT dose row).
+        """
+        row = self._make_row_skeleton(
+            group,
+            source_label="STAPLE consensus",
+            test_organ=group["organ_name"],
+            test_roi_number=0,
+            test_sop="",
+            similarity=1.0,
+            comparison_mode="gt_dose",
+            was_designated_gt=True,
+        )
+        row["gt_source_label"] = "STAPLE consensus"
+        row["gt_rtstruct_filename"] = ""
+        row["gt_roi_name"] = group["organ_name"]
+        row["gt_roi_number"] = 0
+        row["truncated_slices"] = 0
+        row["truncated_extent_mm"] = 0.0
+        try:
+            row["metrics"].update(self._dvh_for_consensus_mask(consensus_mask, dose_ds))
+        except DVHError as exc:
+            row["error"] = f"DVH: {exc}"
         return row
 
     def _error_rows_for_group(self, group: dict[str, Any], error_text: str) -> list[dict[str, Any]]:
@@ -917,9 +1032,22 @@ class MetricsWorker(QObject):
         if len(masks) < 2:
             return None
         result = compute_staple(masks, self._staple_config)
-        if result is None:
-            return None
-        return result.consensus_mask
+        consensus = result.consensus_mask if result is not None else None
+        # Capture the aggregate consensus scalars (cheap) so the GT branch can
+        # emit a "STAPLE Details" row without re-running EM.
+        self._synthetic_staple_summaries[(patient_id, entry.sop_instance_uid, int(roi_number))] = (
+            self._staple_summary_metrics(result)
+        )
+        # The N constituent masks were rasterised at full CT resolution purely
+        # to build this GT, and STAPLE allocated float probability volumes on
+        # top. They're SimpleITK C++-backed (outside Python's normal GC
+        # pressure), so release them explicitly + collect now rather than
+        # letting them stack with the test masks loaded next. This caps the
+        # synthetic-GT transient at the STAPLE call itself.
+        del masks
+        result = None
+        gc.collect()
+        return consensus
 
     def _load_dose(self, patient_id: str):
         if patient_id in self._dose_cache:
