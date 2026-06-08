@@ -139,7 +139,7 @@ For Arch:
 sudo pacman -S python git qt6-base libxkbcommon-x11
 ```
 
-The full 322-test suite is exercised on `windows-latest` and
+The full 331-test suite is exercised on `windows-latest` and
 `ubuntu-latest` in CI on every push — macOS is not in CI, but the same
 PySide6 / SimpleITK / pydicom stack ships official wheels for macOS so
 the app is expected to run identically there.
