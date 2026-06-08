@@ -24,6 +24,29 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 - Both reports are PHI-safe (organ names + numeric values only) and
   reproducible by any user against their own data; the reference libraries
   are core dependencies, so the new equivalence tests need no extra install.
+- **DVH difference-vs-GT columns.** Every DVH metric on a test row now also
+  reports its deviation from the ground truth — a `{metric} Δ vs GT` column
+  (test − GT) alongside the absolute value (e.g. `D2cc (Gy) Δ vs GT`). The
+  Δ columns cluster after the absolute DVH columns in the table and CSV.
+- **Single-slice OAR DVH.** Structures contoured on a single slice now yield
+  DVH statistics. dicompyler-core derives slice thickness from the gap
+  between adjacent contour planes, so a single-plane structure got thickness
+  0 → zero volume → no DVH; AutoSeg now passes an explicit slab thickness
+  (the dose grid's z-spacing) for that case so the DVH is computed.
+
+### Fixed
+- **Portable bundle reported version `0.0.0+unknown`.** The Windows bundle
+  copies the package source instead of pip-installing it, so there was no
+  dist-info for `importlib.metadata` to read. `build_portable.py` now stamps
+  a `_version.py` into the bundled package and `__init__` falls back to it,
+  so the title bar shows the real version.
+- **Tab 4 progress bar and "Drawers complete" counter.** The bar was driven
+  by a stale row-count estimate that no longer matched the rows actually
+  emitted (gt-dose / STAPLE-detail / per-rater), leaving it stuck or short.
+  Progress is now measured in (drawer × patient) work units weighted by
+  rater count — known exactly up front and monotonic. The counter now shows
+  every drawer×patient evaluation completed (total work), not the deduped
+  number of unique organs.
 
 ## [2.4.0] — 2026-06-01
 

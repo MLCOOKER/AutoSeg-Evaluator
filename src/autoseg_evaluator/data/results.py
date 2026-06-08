@@ -141,7 +141,13 @@ def metric_display_label(
     APL headers are decorated with the tolerance value so two CSVs
     computed at different tolerances can't be silently mixed up (e.g.
     ``Surface Dice @ 3.00 mm`` vs ``Surface Dice @ 5.00 mm``).
+
+    DVH difference columns (``{base}_diff``, e.g. ``d2cc_gy_diff``) reuse the
+    base metric's label suffixed with ``Δ vs GT`` (the value is test − GT).
     """
+    if key.endswith("_diff"):
+        base = metric_display_label(key[:-5], sd_tau_mm=sd_tau_mm, apl_tau_mm=apl_tau_mm)
+        return f"{base} Δ vs GT"
     if key == "surface_dice" and sd_tau_mm is not None:
         return f"Surface Dice @ {sd_tau_mm:.2f} mm"
     if key == "apl_mean" and apl_tau_mm is not None:
@@ -186,27 +192,32 @@ def _dynamic_metric_sort_key(name: str) -> tuple:
     like ``[v40gy_cc, d95_gy, d2cc_gy, d2_gy, v20gy_cc, custom_x]`` becomes
     ``[d2_gy, d95_gy, d2cc_gy, v20gy_cc, v40gy_cc, custom_x]``.
     """
+    # DVH difference columns sort by the SAME family logic as their base
+    # metric, but all land after the absolute columns (offset +10) so the
+    # table reads "every absolute, then every Δ-vs-GT".
+    base = name[:-5] if name.endswith("_diff") else name
+    diff_offset = 10 if name.endswith("_diff") else 0
     # D{X}cc_gy → dose to hottest X cc — sort ascending by X (D0.1cc, D1cc,
     # D2cc are the typical order for OAR hotspot constraints). Tested first
     # because the bare ``d{X}_gy`` form also matches the ``_gy`` suffix.
-    if name.startswith("d") and name.endswith("cc_gy"):
+    if base.startswith("d") and base.endswith("cc_gy"):
         try:
-            return (1, float(name[1:-5]), name)
+            return (1 + diff_offset, float(base[1:-5]), name)
         except ValueError:
             pass
     # D{X}_gy → dose to hottest X% — sort by X descending so D95 comes before D2
-    if name.startswith("d") and name.endswith("_gy"):
+    if base.startswith("d") and base.endswith("_gy"):
         try:
-            return (0, -int(name[1:-3]), name)
+            return (0 + diff_offset, -int(base[1:-3]), name)
         except ValueError:
             pass
     # V{X}gy_cc → volume receiving ≥ X Gy — sort by X ascending
-    if name.startswith("v") and name.endswith("gy_cc"):
+    if base.startswith("v") and base.endswith("gy_cc"):
         try:
-            return (2, int(name[1:-5]), name)
+            return (2 + diff_offset, int(base[1:-5]), name)
         except ValueError:
             pass
-    return (3, 0, name)
+    return (3 + diff_offset, 0, name)
 
 
 class ResultsManager:

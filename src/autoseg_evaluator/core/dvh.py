@@ -101,8 +101,16 @@ def compute_dvh_metrics(
     except ImportError as exc:  # pragma: no cover — only triggered without dicompyler-core
         raise DVHError(f"dicompyler-core not installed: {exc}") from exc
 
+    # dicompyler derives slice thickness from the gap between adjacent contour
+    # planes, so a structure contoured on a *single* slice gets thickness 0 →
+    # volume 0 → no DVH (a known dicompyler-core limitation). For that case we
+    # pass an explicit thickness — the dose grid's z-spacing, the slab the DVH
+    # is sampled on — so single-slice OARs still yield dose statistics.
+    thickness = _single_plane_thickness(rtstruct_ds, rtdose_ds, roi_number)
     try:
-        dvh = dvhcalc.get_dvh(rtstruct_ds, rtdose_ds, roi_number, calculate_full_volume=True)
+        dvh = dvhcalc.get_dvh(
+            rtstruct_ds, rtdose_ds, roi_number, calculate_full_volume=True, thickness=thickness
+        )
     except Exception as exc:  # noqa: BLE001 — surface anything as a clean DVHError
         raise DVHError(f"dvhcalc.get_dvh failed: {exc}") from exc
     if dvh is None or getattr(dvh, "volume", 0) == 0:
@@ -158,3 +166,48 @@ def _fmt_num(value: float) -> str:
     if isinstance(value, (int, float)) and float(value).is_integer():
         return str(int(value))
     return str(value)
+
+
+def _single_plane_thickness(rtstruct_ds, rtdose_ds, roi_number: int) -> float | None:
+    """Thickness to pass ``get_dvh`` for single-slice ROIs (else ``None``).
+
+    Returns ``None`` when the ROI spans 2+ contour planes — dicompyler then
+    infers the thickness from the inter-plane gap as usual. For a single-plane
+    ROI (where that inference yields 0 → no DVH) it returns the dose grid's
+    z-spacing as an explicit slab thickness so a DVH can still be computed.
+    Returns ``None`` if the plane count or dose spacing can't be determined,
+    in which case behaviour is unchanged from plain dicompyler.
+    """
+    n_planes = _contour_plane_count(rtstruct_ds, roi_number)
+    if n_planes is None or n_planes >= 2:
+        return None
+    return _dose_z_spacing(rtdose_ds)
+
+
+def _contour_plane_count(rtstruct_ds, roi_number: int) -> int | None:
+    """Number of distinct z-planes the ROI is contoured on (``None`` if unknown)."""
+    try:
+        roi_contours = rtstruct_ds.ROIContourSequence
+    except AttributeError:
+        return None
+    for roi_contour in roi_contours:
+        if int(getattr(roi_contour, "ReferencedROINumber", -1)) != int(roi_number):
+            continue
+        zs: set[float] = set()
+        for item in getattr(roi_contour, "ContourSequence", []) or []:
+            data = getattr(item, "ContourData", None)
+            if data and len(data) >= 3:
+                # ContourData is a flat [x0,y0,z0, x1,y1,z1, …] list; all points
+                # in a CLOSED_PLANAR contour share one z. Round to fold float noise.
+                zs.add(round(float(data[2]), 2))
+        return len(zs)
+    return None
+
+
+def _dose_z_spacing(rtdose_ds) -> float | None:
+    """Z-spacing (mm) of the dose grid from its GridFrameOffsetVector."""
+    offsets = getattr(rtdose_ds, "GridFrameOffsetVector", None)
+    if offsets is None or len(offsets) < 2:
+        return None
+    spacing = abs(float(offsets[1]) - float(offsets[0]))
+    return spacing if spacing > 0 else None

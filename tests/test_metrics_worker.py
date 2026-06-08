@@ -67,6 +67,30 @@ def test_mode_labels_are_distinct():
     assert _MODE_MULTI_OBSERVER == "Multi-observer STAPLE"
 
 
+def test_group_weight_tracks_test_rater_count():
+    """Progress weight = rater count (floored at 1) so the bar is proportional
+    to real work and a row-count estimate can't drift from it."""
+    w = MetricsWorker(library=None, drawers_state=[], config={})
+    assert w._group_weight({"tests": []}) == 1  # floored at 1
+    assert w._group_weight({"tests": [{}, {}, {}]}) == 3
+    # The bar total is the sum of weights — exact and known up front.
+    groups = [{"tests": [{}, {}]}, {"tests": []}, {"tests": [{}, {}, {}, {}]}]
+    assert sum(w._group_weight(g) for g in groups) == 2 + 1 + 4
+
+
+def test_dvh_diff_metrics_test_minus_gt():
+    """Each DVH metric gets a {key}_diff = test - GT, skipping missing pairs."""
+    keys = ["dmean_gy", "dmax_gy", "d2cc_gy", "v20gy_cc"]
+    test_metrics = {"dmean_gy": 30.0, "dmax_gy": 41.0, "d2cc_gy": 39.5}  # no v20gy_cc
+    gt_dvh = {"dmean_gy": 28.0, "dmax_gy": 40.0, "d2cc_gy": 38.0, "v20gy_cc": 12.0}
+    out = MetricsWorker._dvh_diff_metrics(test_metrics, gt_dvh, keys)
+    assert out["dmean_gy_diff"] == 2.0
+    assert out["dmax_gy_diff"] == 1.0
+    assert round(out["d2cc_gy_diff"], 6) == 1.5
+    # v20gy_cc absent from the test row → no diff emitted (not zero).
+    assert "v20gy_cc_diff" not in out
+
+
 def test_sens_spec_vs_reference_perfect_and_partial():
     """sensitivity_specificity_vs_reference: identity → (1, 1); a test missing
     half the reference → sensitivity 0.5; specificity stays high."""

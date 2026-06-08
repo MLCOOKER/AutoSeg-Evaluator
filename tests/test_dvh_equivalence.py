@@ -112,11 +112,19 @@ def _square_xy(cx: float, cy: float, half_w: float) -> list[float]:
     return out
 
 
-def _write_rtstruct(folder: Path, *, study_uid: str, for_uid: str, ct_sop_uids: list[str]) -> Path:
-    """One solid ROI (square at (30,30), half-width 16 mm) over slices 4..10."""
+def _write_rtstruct(
+    folder: Path,
+    *,
+    study_uid: str,
+    for_uid: str,
+    ct_sop_uids: list[str],
+    planes: tuple[int, ...] = (4, 5, 6, 7, 8, 9, 10),
+    fname: str = "rtss.dcm",
+) -> Path:
+    """One solid ROI (square at (30,30), half-width 16 mm) over ``planes``."""
     sop_uid = generate_uid()
     meta = _new_meta(RTStructureSetStorage, sop_uid)
-    ds = FileDataset(str(folder / "rtss.dcm"), {}, file_meta=meta, preamble=b"\0" * 128)
+    ds = FileDataset(str(folder / fname), {}, file_meta=meta, preamble=b"\0" * 128)
     ds.PatientID = "TEST"
     ds.StudyInstanceUID = study_uid
     ds.SOPInstanceUID = sop_uid
@@ -140,7 +148,7 @@ def _write_rtstruct(folder: Path, *, study_uid: str, for_uid: str, ct_sop_uids: 
     rc.ReferencedROINumber = 1
     rc.ROIDisplayColor = [255, 0, 0]
     rc.ContourSequence = []
-    for z in (4, 5, 6, 7, 8, 9, 10):
+    for z in planes:
         item = Dataset()
         item.ContourGeometricType = "CLOSED_PLANAR"
         item.NumberOfContourPoints = 4
@@ -165,7 +173,7 @@ def _write_rtstruct(folder: Path, *, study_uid: str, for_uid: str, ct_sop_uids: 
 
     ds.is_little_endian = True
     ds.is_implicit_VR = False
-    path = folder / "rtss.dcm"
+    path = folder / fname
     pydicom.dcmwrite(str(path), ds, write_like_original=False)
     return path
 
@@ -283,3 +291,43 @@ def test_dvh_metrics_match_dicompyler(dvh_fixture):
         if math.isnan(a) and math.isnan(b):
             continue
         assert a == b, f"{key} differs: AutoSeg={a} dicompyler={b}"
+
+
+@pytest.fixture(scope="module")
+def single_slice_fixture(tmp_path_factory):
+    """A ROI contoured on exactly one slice — dicompyler's blind spot."""
+    folder = tmp_path_factory.mktemp("dvh_single")
+    study_uid = generate_uid()
+    for_uid = generate_uid()
+    series_uid = generate_uid()
+    ct_sop_uids = _write_ct_series(
+        folder, study_uid=study_uid, for_uid=for_uid, series_uid=series_uid
+    )
+    rtss_path = _write_rtstruct(
+        folder, study_uid=study_uid, for_uid=for_uid, ct_sop_uids=ct_sop_uids, planes=(6,)
+    )
+    dose_path = _write_rtdose(folder, study_uid=study_uid, for_uid=for_uid)
+    rtss_ds = pydicom.dcmread(str(rtss_path))
+    dose_ds = pydicom.dcmread(str(dose_path))
+    dose_ds.filename = str(dose_path)
+    return rtss_ds, dose_ds
+
+
+def test_plain_dicompyler_drops_single_slice_roi(single_slice_fixture):
+    """Confirms the underlying limitation: without an explicit thickness,
+    dicompyler gives a single-slice structure zero volume (no DVH)."""
+    from dicompylercore import dvhcalc
+
+    rtss_ds, dose_ds = single_slice_fixture
+    dvh = dvhcalc.get_dvh(rtss_ds, dose_ds, 1, calculate_full_volume=True)
+    assert dvh is None or getattr(dvh, "volume", 0) == 0
+
+
+def test_autoseg_computes_single_slice_dvh(single_slice_fixture):
+    """AutoSeg's thickness fallback recovers a DVH for the single-slice ROI."""
+    rtss_ds, dose_ds = single_slice_fixture
+    out = compute_dvh_metrics(rtss_ds, dose_ds, 1, CONFIG)
+    assert out, "single-slice ROI should now yield DVH metrics"
+    assert out["dmax_gy"] >= out["dmean_gy"] >= out["dmin_gy"] > 0.0
+    # Volume-based stats are populated too (not blank/NaN).
+    assert not math.isnan(out["d2cc_gy"])

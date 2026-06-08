@@ -112,16 +112,21 @@ class MetricsWorker(QObject):
             self.finished.emit(0)
             return
 
-        # Estimate total emitted rows so the progress bar makes sense.
-        total = sum(self._estimate_group_rows(g) for g in groups)
+        # Progress is measured in (drawer × patient) work units, weighted by
+        # the number of test raters in each group (the dominant per-group
+        # cost). This total is known exactly up front, so the bar stays honest
+        # regardless of how many result rows a group ends up emitting (GT,
+        # gt-dose, STAPLE-detail, per-rater, …) — a row-count estimate could
+        # never track those reliably and used to leave the bar stuck or short.
+        total = sum(self._group_weight(g) for g in groups)
         if total == 0:
             self.finished.emit(0)
             return
 
         errors = 0
-        idx = 0
-        drawers_done: set[str] = set()
-        total_drawers = len({g["organ_name"] for g in groups})
+        units_done = 0  # weighted work units completed → drives the bar
+        completed = 0  # whole (drawer × patient) groups finished → the counter
+        total_drawers = len(groups)  # every drawer×patient evaluation, not unique organs
         current_patient: str | None = None
 
         # Identify the final group index for each patient. After mask creation
@@ -151,22 +156,22 @@ class MetricsWorker(QObject):
                 "gt": group["gt_filename"],
                 "test": "loading…",
                 "metric": "loading…",
-                "drawers_done": len(drawers_done),
+                "drawers_done": completed,
                 "drawers_total": total_drawers,
                 "errors": errors,
             }
-            self.progress.emit(idx, total, state)
+            self.progress.emit(units_done, total, state)
 
             is_last_for_patient = i == last_group_idx_for_patient[group["patient_id"]]
             for row in self._compute_group(
-                group, state, idx, total, drop_ct_after_masks=is_last_for_patient
+                group, state, units_done, total, drop_ct_after_masks=is_last_for_patient
             ):
                 if row.get("error"):
                     errors += 1
                 self.result.emit(row)
-                idx += 1
 
-            drawers_done.add(group["organ_name"])
+            units_done += self._group_weight(group)
+            completed += 1
 
         # Evict the final patient's caches before we exit.
         if current_patient is not None:
@@ -174,10 +179,10 @@ class MetricsWorker(QObject):
 
         # Final progress tick + finished signal
         self.progress.emit(
-            total,
+            units_done,
             total,
             {
-                "drawers_done": len(drawers_done),
+                "drawers_done": completed,
                 "drawers_total": total_drawers,
                 "errors": errors,
             },
@@ -234,16 +239,15 @@ class MetricsWorker(QObject):
         groups.sort(key=lambda g: (g["patient_id"], g["organ_name"]))
         return groups
 
-    def _estimate_group_rows(self, group: dict[str, Any]) -> int:
-        """How many result rows this group will emit (pre-error)."""
-        n = 0
-        n_tests = len(group["tests"])
-        if group["gt_comparison"]:
-            n += n_tests
-        if group["staple_consensus"]:
-            # 1 row per rater (GT + N tests) + 1 summary row
-            n += (n_tests + 1) + 1
-        return n
+    def _group_weight(self, group: dict[str, Any]) -> int:
+        """Relative cost of a group for the progress bar.
+
+        Weighted by the number of test raters — the dominant per-group cost
+        (mask rasterisation + metric/DVH computation scale with it) — so a
+        5-vendor drawer advances the bar five times as far as a 1-vendor one.
+        Floored at 1 so every group makes the bar move.
+        """
+        return max(1, len(group["tests"]))
 
     # ---- Per-group computation -------------------------------------------
 
@@ -356,6 +360,7 @@ class MetricsWorker(QObject):
 
         rows: list[dict[str, Any]] = list(load_errors)
 
+        gt_dvh: dict[str, float] = {}
         if group["gt_comparison"]:
             # If DVH is requested, emit a GT-vs-dose row first so the user
             # can read the dose received by the manual contour alongside
@@ -367,13 +372,22 @@ class MetricsWorker(QObject):
                 gt_dvh_row = self._compute_gt_dvh_row(group, gt_rtss)
                 if gt_dvh_row is not None:
                     rows.append(gt_dvh_row)
-            for r_idx, rec in enumerate(test_records):
+                    # Reuse the GT's own dose statistics so each test row can
+                    # report its Δ-vs-GT for every DVH metric.
+                    dvh_keys = set(self._dvh_config.output_keys())
+                    gt_dvh = {
+                        k: v for k, v in (gt_dvh_row.get("metrics") or {}).items() if k in dvh_keys
+                    }
+            for rec in test_records:
                 if self._cancelled:
                     return rows
                 state["test"] = f"{rec['meta']['source_label']} ({rec['meta']['organ_name']})"
                 state["metric"] = "vs GT"
-                self.progress.emit(idx + r_idx, total, state)
-                rows.append(self._compute_gt_row(group, rec, gt_mask))
+                # Hold the bar at this group's base unit and let the status text
+                # show per-rater activity; the bar advances by the group's
+                # weight once the whole group finishes (keeps it monotonic).
+                self.progress.emit(idx, total, state)
+                rows.append(self._compute_gt_row(group, rec, gt_mask, gt_dvh))
 
         # When the GT is a multi-observer synthetic consensus (Tab 2), emit a
         # "STAPLE Details" row describing the consensus that backs this GT.
@@ -387,7 +401,7 @@ class MetricsWorker(QObject):
             if self._cancelled:
                 return rows
             state["metric"] = "STAPLE"
-            self.progress.emit(idx + len(rows), total, state)
+            self.progress.emit(idx, total, state)
             rows.extend(
                 self._compute_staple_rows(group, gt_rtss, gt_mask, test_records, state, idx, total)
             )
@@ -401,8 +415,15 @@ class MetricsWorker(QObject):
         group: dict[str, Any],
         record: dict[str, Any],
         gt_mask,
+        gt_dvh: dict[str, float] | None = None,
     ) -> dict[str, Any]:
-        """One row: a single test vs the designated GT."""
+        """One row: a single test vs the designated GT.
+
+        ``gt_dvh`` carries the GT contour's own dose statistics (computed once
+        per group); when present, each DVH metric also gets a ``{key}_diff``
+        column holding test − GT (e.g. ``d2cc_gy_diff``) so the user sees both
+        the absolute value and the deviation from the reference.
+        """
         test = record["meta"]
         # Against a multi-observer synthetic consensus GT, label the mode
         # "Multi-observer STAPLE" to distinguish it from an ordinary manual-GT
@@ -443,9 +464,32 @@ class MetricsWorker(QObject):
                         )
                     except DVHError as dvh_exc:
                         row["error"] = f"DVH: {dvh_exc}"
+            # Per-DVH-metric difference from the GT (test − GT), so the table
+            # carries both absolutes and the deviation from the reference.
+            if gt_dvh:
+                row["metrics"].update(
+                    self._dvh_diff_metrics(row["metrics"], gt_dvh, self._dvh_config.output_keys())
+                )
         except Exception as exc:  # noqa: BLE001
             row["error"] = f"{type(exc).__name__}: {exc}"
         return row
+
+    @staticmethod
+    def _dvh_diff_metrics(
+        test_metrics: dict[str, Any], gt_dvh: dict[str, float], keys: list[str]
+    ) -> dict[str, float]:
+        """``{key}_diff`` = test − GT for every DVH ``key`` present in both."""
+        out: dict[str, float] = {}
+        for key in keys:
+            tv = test_metrics.get(key)
+            gv = gt_dvh.get(key)
+            if tv is None or gv is None:
+                continue
+            try:
+                out[f"{key}_diff"] = float(tv) - float(gv)
+            except (TypeError, ValueError):
+                continue
+        return out
 
     def _compute_gt_dvh_row(
         self,

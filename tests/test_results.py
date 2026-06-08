@@ -91,6 +91,42 @@ def test_metric_display_label_dvh_variants():
     assert metric_display_label("v20gy_cc") == "V20Gy (cc)"
 
 
+def test_dvh_diff_column_labels():
+    """``{base}_diff`` reuses the base label + ``Δ vs GT`` suffix."""
+    assert metric_display_label("d2cc_gy_diff") == "D2cc (Gy) Δ vs GT"
+    assert metric_display_label("dmean_gy_diff") == "Dmean (Gy) Δ vs GT"
+    assert metric_display_label("v20gy_cc_diff") == "V20Gy (cc) Δ vs GT"
+
+
+def test_dvh_diff_columns_sort_after_absolutes():
+    """Every absolute DVH column comes first, then the Δ-vs-GT columns."""
+    rm = ResultsManager()
+    rm.add_row(
+        _row(
+            metrics={
+                "d95_gy": 55.0,
+                "d2cc_gy": 50.0,
+                "v20gy_cc": 25.0,
+                "d95_gy_diff": -1.0,
+                "d2cc_gy_diff": 0.5,
+                "v20gy_cc_diff": 2.0,
+                "dmean_gy_diff": 1.2,
+            }
+        )
+    )
+    dynamic = rm.metric_columns()[len(CANONICAL_METRIC_COLUMNS) :]
+    # Absolutes first (family order), then all diffs.
+    assert dynamic == [
+        "d95_gy",
+        "d2cc_gy",
+        "v20gy_cc",
+        "d95_gy_diff",
+        "d2cc_gy_diff",
+        "v20gy_cc_diff",
+        "dmean_gy_diff",
+    ]
+
+
 def test_dvh_dynamic_columns_sort_into_three_blocks():
     """D% (descending), D-cc (ascending), V-Gy (ascending) — distinct blocks."""
     rm = ResultsManager()
