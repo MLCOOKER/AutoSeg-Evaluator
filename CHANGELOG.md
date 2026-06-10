@@ -4,6 +4,23 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **DVH now respects cranio-caudal truncation.** When a drawer's *Truncate*
+  option is active, the test structure's geometric metrics were computed on
+  the z-truncated mask while its DVH was still computed from the full,
+  untruncated RTSS contours (dicompyler reads the original contour points) —
+  so dose and geometry described different volumes. `compute_dvh_metrics`
+  gained an optional `z_extent_mm` parameter that drops the ROI's contour
+  planes outside the GT's craniocaudal extent before computing, so the DVH
+  describes the same range as the geometric comparison. Applied to test rows
+  and per-rater STAPLE rows (never the GT, which defines the extent). The
+  default (untruncated) path is unchanged and remains bit-for-bit identical
+  to dicompyler-core — so the DVH validation report still holds. New helper
+  `core.masks.gt_z_extent_mm`; covered by `tests/test_dvh_equivalence.py`
+  and `tests/test_truncation.py`.
+
 ## [2.4.1] — 2026-06-08
 
 ### Added

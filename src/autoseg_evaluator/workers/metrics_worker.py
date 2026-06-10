@@ -24,6 +24,7 @@ from autoseg_evaluator.core.dvh import DVHConfig, DVHError, _fmt_num, compute_dv
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
     find_reference_image_folder,
+    gt_z_extent_mm,
     read_dicom_image,
     read_rtstruct,
     truncate_to_gt_z_extent,
@@ -378,6 +379,15 @@ class MetricsWorker(QObject):
                     gt_dvh = {
                         k: v for k, v in (gt_dvh_row.get("metrics") or {}).items() if k in dvh_keys
                     }
+            # When truncation is active, each test's DVH is computed over the
+            # GT's craniocaudal extent — the same range the geometric metrics
+            # used — by dropping the test's contour planes outside it. The GT
+            # itself is never truncated (it defines the extent).
+            dvh_z_extent = (
+                gt_z_extent_mm(gt_mask)
+                if group["truncate"] and self._dvh_config.any_enabled()
+                else None
+            )
             for rec in test_records:
                 if self._cancelled:
                     return rows
@@ -387,7 +397,7 @@ class MetricsWorker(QObject):
                 # show per-rater activity; the bar advances by the group's
                 # weight once the whole group finishes (keeps it monotonic).
                 self.progress.emit(idx, total, state)
-                rows.append(self._compute_gt_row(group, rec, gt_mask, gt_dvh))
+                rows.append(self._compute_gt_row(group, rec, gt_mask, gt_dvh, dvh_z_extent))
 
         # When the GT is a multi-observer synthetic consensus (Tab 2), emit a
         # "STAPLE Details" row describing the consensus that backs this GT.
@@ -416,6 +426,7 @@ class MetricsWorker(QObject):
         record: dict[str, Any],
         gt_mask,
         gt_dvh: dict[str, float] | None = None,
+        z_extent_mm: tuple[float, float] | None = None,
     ) -> dict[str, Any]:
         """One row: a single test vs the designated GT.
 
@@ -423,6 +434,10 @@ class MetricsWorker(QObject):
         per group); when present, each DVH metric also gets a ``{key}_diff``
         column holding test − GT (e.g. ``d2cc_gy_diff``) so the user sees both
         the absolute value and the deviation from the reference.
+
+        ``z_extent_mm`` truncates the test's contour planes to the GT's
+        craniocaudal range for DVH when the drawer's truncation is active, so
+        the dose statistics describe the same range as the geometric metrics.
         """
         test = record["meta"]
         # Against a multi-observer synthetic consensus GT, label the mode
@@ -459,7 +474,11 @@ class MetricsWorker(QObject):
                     try:
                         row["metrics"].update(
                             compute_dvh_metrics(
-                                record["rtss"], dose_ds, test["roi_number"], self._dvh_config
+                                record["rtss"],
+                                dose_ds,
+                                test["roi_number"],
+                                self._dvh_config,
+                                z_extent_mm=z_extent_mm,
                             )
                         )
                     except DVHError as dvh_exc:
@@ -624,6 +643,14 @@ class MetricsWorker(QObject):
         # Dose is computed per rater (each source label's own contour), so the
         # results carry dose for every rater — not just the consensus.
         dose_ds = self._load_dose(group["patient_id"]) if self._dvh_config.any_enabled() else None
+        # When truncation is active the test raters' masks were cropped to the
+        # GT extent, so truncate their DVH contour planes to match. The GT
+        # rater is never truncated.
+        dvh_z_extent = (
+            gt_z_extent_mm(gt_mask)
+            if group["truncate"] and self._dvh_config.any_enabled()
+            else None
+        )
         out: list[dict[str, Any]] = []
         for rater in raters:
             if self._cancelled:
@@ -658,12 +685,18 @@ class MetricsWorker(QObject):
                 # else: GT excluded from pool — sens/spec stay empty since the
                 # EM never saw this rater's mask. Geometric vs consensus still
                 # populated so the user can quantify GT-vs-AI-ensemble agreement.
-                # Per-rater dose (this source label's own contour).
+                # Per-rater dose (this source label's own contour), truncated to
+                # the GT extent for test raters (not the GT rater itself).
                 if dose_ds is not None and rater.get("rtss") is not None:
+                    rater_z_extent = None if rater["was_designated_gt"] else dvh_z_extent
                     try:
                         row["metrics"].update(
                             compute_dvh_metrics(
-                                rater["rtss"], dose_ds, rater["roi_number"], self._dvh_config
+                                rater["rtss"],
+                                dose_ds,
+                                rater["roi_number"],
+                                self._dvh_config,
+                                z_extent_mm=rater_z_extent,
                             )
                         )
                     except DVHError as dvh_exc:

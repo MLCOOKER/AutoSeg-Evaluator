@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 import SimpleITK as sitk
 
-from autoseg_evaluator.core.masks import truncate_to_gt_z_extent
+from autoseg_evaluator.core.masks import gt_z_extent_mm, truncate_to_gt_z_extent
 from autoseg_evaluator.core.metrics import compute_geometric_metrics
 
 
@@ -64,6 +64,22 @@ def test_truncate_preserves_spacing_and_geometry():
     # 5 × 2.5 mm spacing = 12.5 mm
     assert extent["slices_removed"] == 5
     assert extent["extent_removed_mm"] == 12.5
+
+
+def test_gt_z_extent_mm_matches_foreground_slices():
+    """The physical z-extent spans the GT's foreground slices ± half a voxel."""
+    gt_arr = np.zeros((20, 8, 8), dtype=np.uint8)
+    gt_arr[4:11, 2:6, 2:6] = 1  # slices 4..10
+    gt = _sitk_from_arr(gt_arr, spacing=(1.0, 1.0, 2.5))  # origin (0,0,0)
+    lo, hi = gt_z_extent_mm(gt)
+    # slice 4 -> z=10 mm, slice 10 -> z=25 mm; padded by half a 2.5 mm voxel.
+    assert abs(lo - (10.0 - 1.25)) < 1e-6
+    assert abs(hi - (25.0 + 1.25)) < 1e-6
+
+
+def test_gt_z_extent_mm_empty_returns_none():
+    gt = _sitk_from_arr(np.zeros((10, 8, 8), dtype=np.uint8))
+    assert gt_z_extent_mm(gt) is None
 
 
 def test_truncation_changes_geometric_metrics():

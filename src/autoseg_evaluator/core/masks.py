@@ -174,6 +174,31 @@ def truncate_to_gt_z_extent(
     }
 
 
+def gt_z_extent_mm(gt_mask: sitk.Image) -> tuple[float, float] | None:
+    """Physical craniocaudal (z) extent of the GT mask's foreground, in mm.
+
+    Returns ``(z_lo, z_hi)`` covering the slices that contain GT voxels, padded
+    by half a slice on each side so a contour plane sitting at a boundary
+    slice's centre is included. This is the contour-space equivalent of the
+    voxel-space crop :func:`truncate_to_gt_z_extent` performs, used to truncate
+    a test structure's RTSS contour planes for DVH so the dose statistics
+    describe the same craniocaudal range as the geometric comparison.
+
+    Returns ``None`` when the GT mask is empty.
+    """
+    arr = sitk.GetArrayViewFromImage(gt_mask)
+    z_with_gt = np.any(arr > 0, axis=(1, 2))
+    if not z_with_gt.any():
+        return None
+    z0 = int(np.argmax(z_with_gt))
+    z1 = int(len(z_with_gt) - 1 - np.argmax(z_with_gt[::-1]))
+    p0 = float(gt_mask.TransformIndexToPhysicalPoint((0, 0, z0))[2])
+    p1 = float(gt_mask.TransformIndexToPhysicalPoint((0, 0, z1))[2])
+    half = 0.5 * float(gt_mask.GetSpacing()[2])
+    lo, hi = (p0, p1) if p0 <= p1 else (p1, p0)
+    return lo - half, hi + half
+
+
 def find_reference_image_folder(library, patient_id: str, rtstruct_sop_uid: str) -> str | None:
     """Locate the folder containing the CT/MR/PT series referenced by an RTSTRUCT.
 
