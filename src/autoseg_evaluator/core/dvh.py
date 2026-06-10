@@ -74,6 +74,7 @@ def compute_dvh_metrics(
     rtdose_ds,
     roi_number: int,
     config: DVHConfig,
+    z_extent_mm: tuple[float, float] | None = None,
 ) -> dict[str, float]:
     """Return the DVH metrics for one structure against one dose grid.
 
@@ -87,6 +88,14 @@ def compute_dvh_metrics(
         ROINumber within the RTSTRUCT's StructureSetROISequence.
     config:
         Which metrics to extract.
+    z_extent_mm:
+        Optional ``(z_lo, z_hi)`` physical range (mm). When given, the ROI's
+        contour planes outside this craniocaudal range are dropped before the
+        DVH is computed — the contour-space equivalent of the test mask's
+        cranio-caudal truncation, so the DVH describes the same range as the
+        geometric comparison. The dataset is restored afterwards. ``None``
+        (the default) computes the DVH on the structure as drawn — the
+        behaviour validated bit-for-bit against dicompyler-core.
 
     Raises
     ------
@@ -101,47 +110,67 @@ def compute_dvh_metrics(
     except ImportError as exc:  # pragma: no cover — only triggered without dicompyler-core
         raise DVHError(f"dicompyler-core not installed: {exc}") from exc
 
-    # dicompyler derives slice thickness from the gap between adjacent contour
-    # planes, so a structure contoured on a *single* slice gets thickness 0 →
-    # volume 0 → no DVH (a known dicompyler-core limitation). For that case we
-    # pass an explicit thickness — the dose grid's z-spacing, the slab the DVH
-    # is sampled on — so single-slice OARs still yield dose statistics.
-    thickness = _single_plane_thickness(rtstruct_ds, rtdose_ds, roi_number)
+    # Optionally truncate the ROI's contour planes to ``z_extent_mm`` for the
+    # duration of this call (restored in ``finally``). The worker runs
+    # single-threaded, so temporarily filtering the cached dataset is safe and
+    # avoids deep-copying the whole RTSS per row.
+    roi_contour = _find_roi_contour(rtstruct_ds, roi_number) if z_extent_mm is not None else None
+    saved_sequence = None
+    if roi_contour is not None and hasattr(roi_contour, "ContourSequence"):
+        saved_sequence = roi_contour.ContourSequence
+        lo, hi = z_extent_mm
+        roi_contour.ContourSequence = [
+            c
+            for c in saved_sequence
+            if (_contour_plane_z(c) is not None and lo <= _contour_plane_z(c) <= hi)
+        ]
+
     try:
-        dvh = dvhcalc.get_dvh(
-            rtstruct_ds, rtdose_ds, roi_number, calculate_full_volume=True, thickness=thickness
-        )
-    except Exception as exc:  # noqa: BLE001 — surface anything as a clean DVHError
-        raise DVHError(f"dvhcalc.get_dvh failed: {exc}") from exc
-    if dvh is None or getattr(dvh, "volume", 0) == 0:
-        raise DVHError(f"No DVH curve for ROI #{roi_number} (empty or outside dose grid).")
+        # dicompyler derives slice thickness from the gap between adjacent
+        # contour planes, so a structure contoured on a *single* slice gets
+        # thickness 0 → volume 0 → no DVH (a known dicompyler-core limitation).
+        # For that case we pass an explicit thickness — the dose grid's
+        # z-spacing — so single-slice OARs (and structures truncated down to one
+        # plane) still yield dose statistics.
+        thickness = _single_plane_thickness(rtstruct_ds, rtdose_ds, roi_number)
+        try:
+            dvh = dvhcalc.get_dvh(
+                rtstruct_ds, rtdose_ds, roi_number, calculate_full_volume=True, thickness=thickness
+            )
+        except Exception as exc:  # noqa: BLE001 — surface anything as a clean DVHError
+            raise DVHError(f"dvhcalc.get_dvh failed: {exc}") from exc
+        if dvh is None or getattr(dvh, "volume", 0) == 0:
+            raise DVHError(f"No DVH curve for ROI #{roi_number} (empty or outside dose grid).")
 
-    out: dict[str, float] = {}
-    # dicompylercore stores doses in the dose grid's native units (typically Gy).
-    if config.include_dmin:
-        out["dmin_gy"] = _safe(dvh.min)
-    if config.include_dmean:
-        out["dmean_gy"] = _safe(dvh.mean)
-    if config.include_dmax:
-        out["dmax_gy"] = _safe(dvh.max)
+        out: dict[str, float] = {}
+        # dicompylercore stores doses in the dose grid's native units (typically Gy).
+        if config.include_dmin:
+            out["dmin_gy"] = _safe(dvh.min)
+        if config.include_dmean:
+            out["dmean_gy"] = _safe(dvh.mean)
+        if config.include_dmax:
+            out["dmax_gy"] = _safe(dvh.max)
 
-    # dicompyler-core 0.5.6's ``DVH.statistic`` rejects ``D{X}%`` syntax
-    # (``%`` isn't a valid attribute char and the method bails with
-    # AttributeError). The bare-number form ``D{X}`` is interpreted as
-    # percentage and returns the dose to the hottest X% — which is what
-    # we want. ``D{X}cc`` returns the dose to the hottest X cc (useful
-    # for small OARs where a fixed % is noisy). ``V{X}Gy`` still needs
-    # its unit suffix because ``V{X}cc`` / ``V{X}%`` mean different
-    # things.
-    for v_pct in config.d_at_volumes_pct:
-        key = f"d{_fmt_num(v_pct)}_gy"
-        out[key] = _statistic_value(dvh, f"D{_fmt_num(v_pct)}")
-    for v_cc in config.d_at_volumes_cc:
-        key = f"d{_fmt_num(v_cc)}cc_gy"
-        out[key] = _statistic_value(dvh, f"D{_fmt_num(v_cc)}cc")
-    for d_gy in config.v_at_doses_gy:
-        key = f"v{_fmt_num(d_gy)}gy_cc"
-        out[key] = _statistic_value(dvh, f"V{_fmt_num(d_gy)}Gy")
+        # dicompyler-core 0.5.6's ``DVH.statistic`` rejects ``D{X}%`` syntax
+        # (``%`` isn't a valid attribute char and the method bails with
+        # AttributeError). The bare-number form ``D{X}`` is interpreted as
+        # percentage and returns the dose to the hottest X% — which is what
+        # we want. ``D{X}cc`` returns the dose to the hottest X cc (useful
+        # for small OARs where a fixed % is noisy). ``V{X}Gy`` still needs
+        # its unit suffix because ``V{X}cc`` / ``V{X}%`` mean different
+        # things.
+        for v_pct in config.d_at_volumes_pct:
+            key = f"d{_fmt_num(v_pct)}_gy"
+            out[key] = _statistic_value(dvh, f"D{_fmt_num(v_pct)}")
+        for v_cc in config.d_at_volumes_cc:
+            key = f"d{_fmt_num(v_cc)}cc_gy"
+            out[key] = _statistic_value(dvh, f"D{_fmt_num(v_cc)}cc")
+        for d_gy in config.v_at_doses_gy:
+            key = f"v{_fmt_num(d_gy)}gy_cc"
+            out[key] = _statistic_value(dvh, f"V{_fmt_num(d_gy)}Gy")
+    finally:
+        if saved_sequence is not None:
+            roi_contour.ContourSequence = saved_sequence
     return out
 
 
@@ -182,6 +211,22 @@ def _single_plane_thickness(rtstruct_ds, rtdose_ds, roi_number: int) -> float | 
     if n_planes is None or n_planes >= 2:
         return None
     return _dose_z_spacing(rtdose_ds)
+
+
+def _find_roi_contour(rtstruct_ds, roi_number: int):
+    """Return the ROIContourSequence item for ``roi_number`` (or ``None``)."""
+    for rc in getattr(rtstruct_ds, "ROIContourSequence", []) or []:
+        if int(getattr(rc, "ReferencedROINumber", -1)) == int(roi_number):
+            return rc
+    return None
+
+
+def _contour_plane_z(contour_item) -> float | None:
+    """Z coordinate (mm) of a CLOSED_PLANAR contour item (all points share z)."""
+    data = getattr(contour_item, "ContourData", None)
+    if data and len(data) >= 3:
+        return float(data[2])
+    return None
 
 
 def _contour_plane_count(rtstruct_ds, roi_number: int) -> int | None:

@@ -28,7 +28,7 @@ from pydicom.uid import (
     generate_uid,
 )
 
-from autoseg_evaluator.core.dvh import DVHConfig, compute_dvh_metrics
+from autoseg_evaluator.core.dvh import DVHConfig, _find_roi_contour, compute_dvh_metrics
 
 pytest.importorskip("dicompylercore")
 
@@ -224,6 +224,24 @@ def _write_rtdose(folder: Path, *, study_uid: str, for_uid: str) -> Path:
     return path
 
 
+def _write_rtdose_zgrad(folder: Path, *, study_uid: str, for_uid: str) -> Path:
+    """Analytic dose increasing with z (frame index), 0 .. MAX_DOSE_GY.
+
+    Constant within each axial plane, so z-truncating a structure visibly
+    changes Dmax/Dmean (unlike the in-plane gradient used elsewhere).
+    """
+    path = _write_rtdose(folder, study_uid=study_uid, for_uid=for_uid)
+    ds = pydicom.dcmread(str(path))
+    z_gy = MAX_DOSE_GY * (np.arange(CT_SLICES, dtype=np.float64) / (CT_SLICES - 1))
+    grid_gy = np.repeat(z_gy[:, None, None], CT_ROWS, axis=1)
+    grid_gy = np.repeat(grid_gy, CT_COLS, axis=2)  # (frames, rows, cols)
+    ds.PixelData = np.round(grid_gy / DOSE_SCALING).astype("<u2").tobytes()
+    ds.is_little_endian = True
+    ds.is_implicit_VR = False
+    pydicom.dcmwrite(str(path), ds, write_like_original=False)
+    return path
+
+
 def _reference_dvh(rtss_ds, dose_ds, roi_number: int) -> dict[str, float]:
     """Query dicompyler-core's public API directly (the reference path)."""
     from dicompylercore import dvhcalc
@@ -331,3 +349,56 @@ def test_autoseg_computes_single_slice_dvh(single_slice_fixture):
     assert out["dmax_gy"] >= out["dmean_gy"] >= out["dmin_gy"] > 0.0
     # Volume-based stats are populated too (not blank/NaN).
     assert not math.isnan(out["d2cc_gy"])
+
+
+# --------------------- z-extent (truncation) DVH ---------------------------
+
+
+@pytest.fixture(scope="module")
+def zgrad_fixture(tmp_path_factory):
+    """CT + 7-slice ROI (planes 4..10) + a dose that increases with z."""
+    folder = tmp_path_factory.mktemp("dvh_zgrad")
+    study_uid = generate_uid()
+    for_uid = generate_uid()
+    series_uid = generate_uid()
+    ct_sop_uids = _write_ct_series(
+        folder, study_uid=study_uid, for_uid=for_uid, series_uid=series_uid
+    )
+    rtss_path = _write_rtstruct(
+        folder, study_uid=study_uid, for_uid=for_uid, ct_sop_uids=ct_sop_uids
+    )
+    dose_path = _write_rtdose_zgrad(folder, study_uid=study_uid, for_uid=for_uid)
+    rtss_ds = pydicom.dcmread(str(rtss_path))
+    dose_ds = pydicom.dcmread(str(dose_path))
+    dose_ds.filename = str(dose_path)
+    return rtss_ds, dose_ds
+
+
+def test_z_extent_none_is_identical_to_omitted(zgrad_fixture):
+    """Passing z_extent_mm=None must not change the result — preserves the
+    bit-for-bit dicompyler equivalence for the (default) untruncated path."""
+    rtss_ds, dose_ds = zgrad_fixture
+    omitted = compute_dvh_metrics(rtss_ds, dose_ds, 1, CONFIG)
+    explicit_none = compute_dvh_metrics(rtss_ds, dose_ds, 1, CONFIG, z_extent_mm=None)
+    assert omitted == explicit_none
+
+
+def test_z_extent_truncation_lowers_low_z_dose(zgrad_fixture):
+    """Restricting a z-increasing dose structure to its lower slices drops the
+    dose statistics — i.e. the DVH respects the contour-plane truncation."""
+    rtss_ds, dose_ds = zgrad_fixture
+    full = compute_dvh_metrics(rtss_ds, dose_ds, 1, CONFIG)
+    # ROI spans z = 8..20 mm (planes 4..10). Keep only the lower planes (4,5,6).
+    trunc = compute_dvh_metrics(rtss_ds, dose_ds, 1, CONFIG, z_extent_mm=(7.0, 13.0))
+    assert trunc["dmax_gy"] < full["dmax_gy"]
+    assert trunc["dmean_gy"] < full["dmean_gy"]
+    assert trunc["dmax_gy"] > 0.0
+
+
+def test_z_extent_truncation_restores_dataset(zgrad_fixture):
+    """The temporary contour-plane filtering is undone after the call."""
+    rtss_ds, dose_ds = zgrad_fixture
+    rc = _find_roi_contour(rtss_ds, 1)
+    n_before = len(rc.ContourSequence)
+    compute_dvh_metrics(rtss_ds, dose_ds, 1, CONFIG, z_extent_mm=(7.0, 13.0))
+    assert len(rc.ContourSequence) == n_before
