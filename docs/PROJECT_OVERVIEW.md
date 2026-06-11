@@ -158,7 +158,7 @@ autoseg-evaluator/
 │   └── utils/
 │       ├── paths.py
 │       └── settings.py              # settings.json round-trip
-├── tests/                           # 259-test pytest suite
+├── tests/                           # 336-test pytest suite
 ├── scripts/
 │   └── build_synonyms.py            # Regenerate synonyms.json from TG-263 CSV
 ├── docs/PROJECT_OVERVIEW.md         # (this file)
@@ -368,6 +368,15 @@ Dice, Surface Dice, HD100, HD95, MSD, Volume, COM offset. Default OFF: APL.
 ignored (`_NoScrollSpinBox` subclass) so scrolling the tab doesn't
 silently mutate parameter values.
 
+**Live progress panel** (`ui/widgets/progress_panel.py`): the metrics
+worker drives it with structured updates. Progress is measured in
+(drawer × patient) work units weighted by rater count — known exactly up
+front, so the bar is honest and monotonic regardless of how many result
+rows a group emits (v2.4.1; the previous row-count estimate left the bar
+stuck/short). "Drawers complete" counts every drawer × patient
+evaluation, not deduped unique organs; the panel also shows the current
+patient / drawer / test / metric, elapsed, ETA, and error count.
+
 ### Tab 5 — Results
 
 **File:** [`src/autoseg_evaluator/ui/tabs/results.py`](../src/autoseg_evaluator/ui/tabs/results.py)
@@ -387,6 +396,11 @@ surface distance (orange), APL (yellow), volume + COM (green), STAPLE
 **Tolerance values in headers:** Surface Dice / APL columns read e.g.
 `Surface Dice @ 3.00 mm`, `Mean APL @ 3.00 mm`, `Total APL @ 3.00 mm`
 so CSVs computed at different tolerances can't silently merge.
+
+**DVH Δ-vs-GT columns (v2.4.1):** when DVH is enabled, each test row's
+DVH metric also gets a `… Δ vs GT` column (test − GT) — e.g. `D2cc (Gy)
+Δ vs GT` — clustered after the absolute DVH columns, in both the table
+and CSV.
 
 **Excel-friendly copy:** `Ctrl+A` then `Ctrl+C` copies all rows + headers
 as TSV. **Export CSV…** writes to disk.
@@ -520,7 +534,10 @@ that fall outside the GT's craniocaudal extent. Returns the truncated
 mask plus `{slices_removed, extent_removed_mm}` for results-table
 reporting (per-row `Truncated slices` / `Truncated extent (mm)` columns).
 Useful for cord, rectum, oesophagus where the AI may legitimately
-extend beyond the manual GT.
+extend beyond the manual GT. The companion `gt_z_extent_mm` returns the
+same extent in physical mm so the DVH can apply the equivalent
+contour-plane truncation (see [DVH](#dose-volume-histogram-dvh)) — keeping
+dose and geometry on the same craniocaudal range.
 
 **Reference-image lookup** (`find_reference_image_folder`): walks the
 `MetadataLibrary` by `FrameOfReferenceUID` to locate the CT folder that
@@ -624,16 +641,43 @@ Thin wrapper around `dicompylercore.dvhcalc.get_dvh`. The wrapper:
 - `"V{X}Gy"` still requires the unit suffix; the alternatives
   `V{X}cc` / `V{X}%` mean different things in dicompyler-core.
 
+**Single-slice OARs (v2.4.1):** dicompyler-core derives slice thickness
+from the gap between adjacent contour planes, so a structure contoured
+on a *single* slice gets thickness 0 → volume 0 → no DVH. For that case
+the wrapper passes an explicit `thickness` (the dose grid's z-spacing,
+via `_single_plane_thickness`) so single-slice OARs still yield dose
+statistics.
+
+**Cranio-caudal truncation (v2.4.2):** `compute_dvh_metrics` takes an
+optional `z_extent_mm = (z_lo, z_hi)`. When the drawer's *Truncate*
+option is active, the worker computes the GT's physical z-extent
+(`core.masks.gt_z_extent_mm`, ±½ voxel) and passes it so the test ROI's
+contour planes outside that range are dropped (temporarily, restored in
+a `finally`) before dicompyler integrates — the contour-space twin of
+the test mask's voxel-space truncation, so the DVH describes the **same
+craniocaudal range as the geometric metrics**. Applied to test rows and
+per-rater STAPLE rows; **never the GT**, which defines the extent. The
+default (`z_extent_mm = None`) path is byte-identical to before, so the
+bit-for-bit dicompyler equivalence still holds.
+
 **GT-vs-dose row:** when DVH is enabled in Tab 4, the worker emits one
 extra row per (patient × organ) with the GT contour's own dose
 statistics, `comparison_mode = "gt_dose"`, geometric columns empty,
 DVH columns populated. Lets the user compare manual-GT dose against
 each AI vendor's dose side-by-side.
 
+**Δ-vs-GT columns (v2.4.1):** each test row also carries a `{metric}_diff`
+(test − GT) for every DVH metric — e.g. `d2cc_gy_diff` — so the table
+reports both the absolute value and the deviation from the reference.
+The Δ columns cluster after the absolute DVH columns.
+
 **Synthetic-GT DVH:** when GT is a synthetic STAPLE consensus, the
 worker falls back to mask-based voxelwise dose statistics
 (`_dvh_for_consensus_mask`) because there's no RTSS dataset to feed
-dicompyler-core.
+dicompyler-core. (Switching all DVH to this mask method was prototyped
+and rejected: it diverged from dicompyler-core by up to ~50 % on V{X}Gy
+for small/low-dose structures, so contour-based DVH via dicompyler
+remains the engine for real RTSS structures.)
 
 ---
 
@@ -909,7 +953,7 @@ on the next `setValue` tick.
 
 ## Validation & test suite
 
-**Test runner:** pytest, 322 tests, ~8 s wall clock.
+**Test runner:** pytest, 336 tests, ~9 s wall clock.
 
 **Coverage highlights:**
 
@@ -924,14 +968,16 @@ on the next `setValue` tick.
 | `test_session.py` | ~10 | Round-trip preserving drawers + rules + template + (v3) denylist + (v2) consensus_groups |
 | `test_results.py` | ~10 | ResultsManager column ordering, display labels with τ decoration, CSV export shape |
 | `test_metadata.py` | ~15 | MetadataLibrary scan, source-label cascade, FoR-UID merging, anonymisation aliases |
-| `test_truncation.py` | ~5 | truncate_to_gt_z_extent slice/mm reporting |
+| `test_truncation.py` | ~7 | truncate_to_gt_z_extent slice/mm reporting; gt_z_extent_mm physical extent |
+| `test_metrics_worker.py` | ~6 | STAPLE-summary extraction, mode labels, progress weighting, sens/spec helper, DVH Δ-vs-GT |
 | `test_widgets.py` | ~10 | OrganDrawer mutations, drag-drop payload format |
 | `test_compute_tab.py` | ~10 | Compute config emission, settings round-trip |
 | `test_match_logic.py` / `test_source_labels.py` | ~10 | Smaller utility tests |
 | `test_platipy_equivalence.py` | 4 | PlatiPy mask-rasteriser equivalence on a synthetic CT + RTSTRUCT (square, donut with XOR hole, multi-slice) |
 | `test_metrics_equivalence.py` | 8 | Bit-for-bit equivalence of Dice / HD100 / HD95 / Surface Dice @ 3 mm / mean surface distance against ``google-deepmind/surface-distance`` and APL total / mean against PlatiPy 0.7.2 |
 | `test_staple_equivalence.py` | 3 | Bit-for-bit equivalence of AutoSeg's STAPLE wrapper (per-rater sensitivity/specificity + binary consensus) against a direct ``SimpleITK.STAPLEImageFilter`` invocation, on a synthetic 3-rater fixture |
-| `test_dvh_equivalence.py` | 2 | Bit-for-bit equivalence of AutoSeg's DVH statistics (Dmin/Dmean/Dmax, D% , Dcc, VGy) against ``dicompyler-core`` on a synthetic CT + RTSS + analytic gradient RTDOSE |
+| `test_dvh_equivalence.py` | ~7 | Bit-for-bit equivalence of AutoSeg's DVH statistics (Dmin/Dmean/Dmax, D% , Dcc, VGy) against ``dicompyler-core``; single-slice OAR recovery (explicit thickness); z-extent truncation drops/restores contour planes |
+| `test_version.py` | 3 | `__version__` resolution + portable-bundle `_version.py` fallback |
 
 **Empirical clinical validation:** every numerical engine was cross-checked
 against its upstream reference on the SAMPLE DATA HN1 cohort, each producing
@@ -1074,6 +1120,14 @@ bumping `pyproject.toml` updates the window title bar and every other
 - DVH for the STAPLE consensus uses the thresholded binary mask, not
   the probabilistic mask (which would require a different DVH
   formulation entirely).
+- DVH for a **single-slice** OAR assumes a slab thickness equal to the
+  dose grid's z-spacing (dicompyler can't infer it from one plane). Dose
+  points (Dmax/Dmean/D{X}) are well-defined regardless; volume-based
+  points (D{X}cc) carry that assumption.
+- A **truncated** test's DVH describes the dose over the GT's
+  craniocaudal range, not the structure's full delivered dose — the
+  consistent choice for a like-for-like comparison, but worth noting it
+  is not the whole-structure DVH.
 
 ### Shipped since v2.1
 - **v2.1.0** — Portable Windows bundle + GitHub Actions CI / release
@@ -1101,6 +1155,22 @@ bumping `pyproject.toml` updates the window title bar and every other
   for synthetic-mask DVHs. Fixed a `GetArrayViewFromImage`
   use-after-free in the sens/spec helper that produced garbage on
   Linux; STAPLE constituents are freed + `gc.collect()`-ed to cap RAM.
+- **v2.4.1** — Empirical **STAPLE** validation (vs
+  `SimpleITK.STAPLEImageFilter`, 55/55 bit-exact) and **DVH** validation
+  (vs `dicompyler-core`, 2970/2970 bit-exact) with PHI-safe reports +
+  reproducer scripts + CI-locked equivalence tests. **DVH Δ-vs-GT**
+  columns (test − GT per metric). **Single-slice OAR DVH** via an explicit
+  thickness (works around a dicompyler plane-thickness limitation). Fixed
+  the portable bundle reporting `0.0.0+unknown` (stamps `_version.py`).
+  Tab 4 progress bar reworked to weighted (drawer × patient) work units —
+  exact and monotonic; "Drawers complete" now counts every evaluation,
+  not deduped unique organs.
+- **v2.4.2** — **Truncation-aware DVH**: when *Truncate* is active the
+  test DVH is computed over the GT's craniocaudal extent (contour planes
+  outside it are dropped before dicompyler), matching the geometric
+  comparison. A whole-mask DVH engine was prototyped for this and rejected
+  (~50 % V{X}Gy divergence vs dicompyler); the untruncated path stays
+  bit-for-bit identical to dicompyler-core.
 
 ### Pending features
 - **Docs**: full user guide, hospital deployment doc, metrics reference,
@@ -1161,8 +1231,10 @@ bumping `pyproject.toml` updates the window title bar and every other
 
 ---
 
-*Document version 3 — updated 2026-06-01 against commit `1e18d44` (v2.4.0).
+*Document version 4 — updated 2026-06-11 against commit `474f874` (v2.4.2).
 Tracks: portable bundle + CI/release pipeline (v2.1), `D at volume (cc)`
 DVH input + window-title fix (v2.2), template source-label match +
-expanded Manage Source Labels columns (v2.3), and the Tab 2 multi-observer
-consensus redesign + STAPLE result-row parity (v2.4).*
+expanded Manage Source Labels columns (v2.3), the Tab 2 multi-observer
+consensus redesign + STAPLE result-row parity (v2.4.0), STAPLE/DVH
+empirical validation + DVH Δ-vs-GT + single-slice DVH + bundle/progress
+fixes (v2.4.1), and truncation-aware DVH (v2.4.2).*
