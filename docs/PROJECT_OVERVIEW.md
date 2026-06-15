@@ -158,7 +158,7 @@ autoseg-evaluator/
 │   └── utils/
 │       ├── paths.py
 │       └── settings.py              # settings.json round-trip
-├── tests/                           # 336-test pytest suite
+├── tests/                           # 341-test pytest suite
 ├── scripts/
 │   └── build_synonyms.py            # Regenerate synonyms.json from TG-263 CSV
 ├── docs/PROJECT_OVERVIEW.md         # (this file)
@@ -648,7 +648,7 @@ the wrapper passes an explicit `thickness` (the dose grid's z-spacing,
 via `_single_plane_thickness`) so single-slice OARs still yield dose
 statistics.
 
-**Sub-dose-grid OARs (v2.5.x):** dicompyler rasterises a structure by a
+**Sub-dose-grid OARs (v2.5.1):** dicompyler rasterises a structure by a
 point-in-polygon test at each *dose-grid* voxel centre, so a structure
 smaller than the dose grid spacing (~1–2 voxels) can fall between the
 sample points, rasterise to zero volume, and get no DVH. When a structure
@@ -962,7 +962,7 @@ on the next `setValue` tick.
 
 ## Validation & test suite
 
-**Test runner:** pytest, 336 tests, ~9 s wall clock.
+**Test runner:** pytest, 341 tests, ~9 s wall clock.
 
 **Coverage highlights:**
 
