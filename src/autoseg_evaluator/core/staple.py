@@ -45,15 +45,16 @@ class StapleConfig:
       (Bakas 2018; Asman & Landman 2011); SimpleITK's default of 5 is too
       few to converge for clinical OARs.
     * ``confidence_weight=1.0`` — "leave it alone" per the ITK docstring.
-    * ``target_fg_ratio_min=0.10`` / ``target_fg_ratio_max=0.50`` define
-      an adaptive bounding-box sizing band. The padder grows the union
-      bbox by one voxel-ring at a time until the foreground/total ratio
-      falls inside this range, then stops. This is the band cited in
-      Iglesias & Sabuncu 2015 and Asman & Landman 2011 — it keeps both
-      sensitivity AND specificity informative across organ sizes,
-      whereas a fixed voxel padding underestimates specificity for small
-      structures (lens, cochlea) and over-tightens it for large ones
-      (lung).
+    * ``target_fg_ratio_max=0.50`` is the upper target for the adaptive
+      bounding box. The padder grows the union bbox one voxel-ring at a
+      time until the foreground/total ratio falls to or below this value
+      (or the padding cap is reached), then stops — keeping enough
+      background that STAPLE's specificity estimate stays informative
+      rather than trivially ~1.0. Only the upper bound is enforced:
+      growing the box can only *lower* the ratio, and the box is never
+      cropped inside the union, so a sparse structure simply keeps its
+      natural (low) ratio. Rationale: Iglesias & Sabuncu 2015; Asman &
+      Landman 2011.
     * ``bbox_padding_min_voxels=2`` — always include this much boundary
       headroom regardless of ratio, so STAPLE has room to estimate the
       probabilistic edge.
@@ -63,7 +64,6 @@ class StapleConfig:
 
     max_iterations: int = 100
     confidence_weight: float = 1.0
-    target_fg_ratio_min: float = 0.10
     target_fg_ratio_max: float = 0.50
     bbox_padding_min_voxels: int = 2
     bbox_padding_max_voxels: int = 25
@@ -74,7 +74,6 @@ class StapleConfig:
         return cls(
             max_iterations=int(d.get("max_iterations", 100)),
             confidence_weight=float(d.get("confidence_weight", 1.0)),
-            target_fg_ratio_min=float(d.get("target_fg_ratio_min", 0.10)),
             target_fg_ratio_max=float(d.get("target_fg_ratio_max", 0.50)),
             bbox_padding_min_voxels=int(d.get("bbox_padding_min_voxels", 2)),
             bbox_padding_max_voxels=int(d.get("bbox_padding_max_voxels", 25)),
@@ -150,7 +149,6 @@ def compute_staple(
     chosen_padding, fg_ratio_after = _choose_adaptive_padding(
         union_mask,
         image_shape_zyx=image_size_xyz[::-1],
-        min_ratio=cfg.target_fg_ratio_min,
         max_ratio=cfg.target_fg_ratio_max,
         p_min=cfg.bbox_padding_min_voxels,
         p_max=cfg.bbox_padding_max_voxels,
@@ -232,7 +230,6 @@ def sensitivity_specificity_vs_reference(
     chosen_padding, _ = _choose_adaptive_padding(
         union_mask,
         image_shape_zyx=image_size_xyz[::-1],
-        min_ratio=cfg.target_fg_ratio_min,
         max_ratio=cfg.target_fg_ratio_max,
         p_min=cfg.bbox_padding_min_voxels,
         p_max=cfg.bbox_padding_max_voxels,
@@ -281,12 +278,11 @@ def _choose_adaptive_padding(
     union_mask: np.ndarray,
     image_shape_zyx: tuple[int, int, int],
     *,
-    min_ratio: float,
     max_ratio: float,
     p_min: int,
     p_max: int,
 ) -> tuple[int, float]:
-    """Grow the bbox padding until foreground/bbox ratio enters ``[min_ratio, max_ratio]``.
+    """Grow the bbox padding until the foreground/bbox ratio is ``<= max_ratio``.
 
     The natural (tight) bbox typically has ratio in the 30–95% range
     depending on organ shape. Padding monotonically *decreases* the
@@ -294,6 +290,11 @@ def _choose_adaptive_padding(
     one voxel at a time starting from ``p_min`` and stop as soon as the
     ratio is at or below ``max_ratio`` — that's "just enough" padding to
     keep specificity informative without over-cropping.
+
+    Only the upper bound is enforced. Because padding only grows the box,
+    it can only *lower* the ratio — it can never raise a sparse structure's
+    ratio without cropping inside the union (which would clip the structure),
+    so there is no lower-bound knob.
 
     Returns ``(chosen_padding, ratio_after_padding)``.
 

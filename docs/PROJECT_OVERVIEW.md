@@ -348,8 +348,10 @@ Dice, Surface Dice, HD100, HD95, MSD, Volume, COM offset. Default OFF: APL.
 **STAPLE consensus parameters** (collapsible group):
 - `max_iterations` default 100 (BraTS / Asman & Landman convention).
 - `confidence_weight` default 1.0 (ITK docstring recommendation).
-- `target_fg_ratio_min` / `target_fg_ratio_max` default 0.10 / 0.50
-  (Iglesias & Sabuncu 2015; Asman & Landman 2011 band).
+- `target_fg_ratio_max` default 0.50 — the adaptive bbox's upper
+  foreground-ratio target (Iglesias & Sabuncu 2015; Asman & Landman 2011).
+  Only an upper target is exposed: padding can only *lower* the ratio, so a
+  lower bound is not enforceable.
 - `bbox_padding_min_voxels` / `bbox_padding_max_voxels` default 2 / 25.
 - **Reset to defaults** button restores all of the above.
 
@@ -699,12 +701,13 @@ IEEE TMI 2004). For each call:
 
 1. Build the union of all rater foregrounds.
 2. **Adaptive bounding-box sizing**: grow the union bbox padding one
-   voxel-ring at a time until the foreground/total ratio falls inside
-   `[target_fg_ratio_min, target_fg_ratio_max]` (defaults 0.10 / 0.50,
-   per Iglesias & Sabuncu 2015 and Asman & Landman 2011). Cap at
-   `bbox_padding_max_voxels = 25`. Keeps per-rater specificity
-   informative even for small structures (without this, a 5×5×5 lens in
-   a 15×15×15 padded bbox has 3.7 % foreground → specificity always ~1.0
+   voxel-ring at a time until the foreground/total ratio falls to or below
+   `target_fg_ratio_max` (default 0.50, per Iglesias & Sabuncu 2015 and
+   Asman & Landman 2011). Only this upper target is enforced — padding can
+   only *lower* the ratio, so a sparse structure simply keeps its natural
+   (low) ratio. Cap at `bbox_padding_max_voxels = 25`. Keeps per-rater
+   specificity informative even for small structures (without this, a 5×5×5
+   lens in a 15×15×15 padded bbox has 3.7 % foreground → specificity ~1.0
    → no diagnostic information).
 3. Run STAPLE on the cropped stack with `max_iterations=100`,
    `confidence_weight=1.0`.

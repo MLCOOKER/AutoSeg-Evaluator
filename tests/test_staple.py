@@ -29,13 +29,14 @@ def _cube(shape_xyz, lo_xyz, hi_xyz, spacing=(1.0, 1.0, 1.0)) -> sitk.Image:
 def test_staple_config_defaults():
     cfg = StapleConfig()
     # MICCAI consensus pipeline defaults: 100 iterations, adaptive bbox
-    # targeting [0.10, 0.50] foreground-to-bbox ratio.
+    # targeting a <= 0.50 foreground-to-bbox ratio (upper target only).
     assert cfg.max_iterations == 100
     assert cfg.confidence_weight == 1.0
-    assert cfg.target_fg_ratio_min == 0.10
     assert cfg.target_fg_ratio_max == 0.50
     assert cfg.bbox_padding_min_voxels == 2
     assert cfg.bbox_padding_max_voxels == 25
+    # The unused lower-ratio knob was removed (padding can only lower the ratio).
+    assert not hasattr(cfg, "target_fg_ratio_min")
 
 
 def test_staple_config_from_dict_round_trip():
@@ -43,7 +44,6 @@ def test_staple_config_from_dict_round_trip():
         {
             "max_iterations": 50,
             "confidence_weight": 0.8,
-            "target_fg_ratio_min": 0.15,
             "target_fg_ratio_max": 0.45,
             "bbox_padding_min_voxels": 3,
             "bbox_padding_max_voxels": 20,
@@ -51,17 +51,17 @@ def test_staple_config_from_dict_round_trip():
     )
     assert cfg.max_iterations == 50
     assert cfg.confidence_weight == 0.8
-    assert cfg.target_fg_ratio_min == 0.15
     assert cfg.target_fg_ratio_max == 0.45
     assert cfg.bbox_padding_min_voxels == 3
     assert cfg.bbox_padding_max_voxels == 20
 
 
-def test_staple_config_from_dict_handles_partial_input():
-    cfg = StapleConfig.from_dict({"max_iterations": 200})
+def test_staple_config_from_dict_ignores_legacy_min_ratio_key():
+    # Older settings.json may still carry target_fg_ratio_min — it must be
+    # silently ignored, not raise.
+    cfg = StapleConfig.from_dict({"max_iterations": 200, "target_fg_ratio_min": 0.2})
     assert cfg.max_iterations == 200
     assert cfg.confidence_weight == 1.0
-    assert cfg.target_fg_ratio_min == 0.10
     assert cfg.target_fg_ratio_max == 0.50
 
 
