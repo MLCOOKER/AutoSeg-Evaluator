@@ -1,5 +1,9 @@
 # AutoSeg Evaluator
 
+<p align="center">
+  <img src="src/autoseg_evaluator/assets/splash.png" alt="AutoSeg Evaluator — An Efficient GUI Tool for Segmentation Quality Assessment" width="820">
+</p>
+
 > A GUI tool for segmentation quality assessment in radiotherapy.
 
 [![CI](https://github.com/MLCOOKER/AutoSeg-Evaluator/actions/workflows/ci.yml/badge.svg)](https://github.com/MLCOOKER/AutoSeg-Evaluator/actions/workflows/ci.yml)
