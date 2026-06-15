@@ -4,6 +4,23 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Application icon + splash screen.** The app now has a window / taskbar /
+  dock icon and a startup splash. On Windows the taskbar shows the app's own
+  icon — via an explicit `AppUserModelID` (so it no longer inherits the
+  python interpreter's icon) and a multi-resolution `.ico`; macOS and Linux
+  use the PNG through Qt (`setWindowIcon` + `setDesktopFileName`). The splash
+  is shown before the heavy imports load, so the window appears responsive on
+  startup. Assets live in `autoseg_evaluator/assets/` (packaged via
+  `package-data`).
+- **Icon'd desktop launchers.** The portable Windows bundle now launches via
+  `pythonw.exe` (no flashing console window) and ships a
+  `Create Desktop Shortcut.vbs` that creates an icon'd `.lnk` on the Desktop.
+  `scripts/install-linux-desktop.sh` registers a freedesktop `.desktop` entry
+  (with the app icon) for Linux source installs.
+
 ## [2.4.2] — 2026-06-10
 
 ### Fixed

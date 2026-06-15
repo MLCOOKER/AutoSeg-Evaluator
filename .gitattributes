@@ -1,0 +1,12 @@
+# Shell scripts must stay LF or they won't run on Linux/macOS.
+*.sh text eol=lf
+
+# Windows batch / VBScript stay CRLF.
+*.bat text eol=crlf
+*.vbs text eol=crlf
+
+# Binary assets — never normalise line endings.
+*.png binary
+*.ico binary
+*.icns binary
+*.zip binary
