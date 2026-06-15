@@ -70,7 +70,7 @@ Citation = "https://zenodo.org/records/17383138"
 where = ["src"]
 
 [tool.setuptools.package-data]
-autoseg_evaluator = ["resources/**/*"]
+autoseg_evaluator = ["resources/**/*", "assets/**/*"]
 
 [tool.ruff]
 line-length = 100

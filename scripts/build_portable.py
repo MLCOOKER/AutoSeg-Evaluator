@@ -104,12 +104,41 @@ def _write_launcher(bundle: Path) -> None:
     # CRLF line endings so Windows handles it natively even when extracted
     # from a zip on a Linux host. ``%~dp0`` is the directory of the .bat
     # itself, so the launcher works regardless of where the bundle is
-    # extracted to.
+    # extracted to. ``pythonw.exe`` (the windowless interpreter) launches the
+    # GUI without a flashing console window; ``start`` detaches it so the
+    # transient command window closes immediately.
     launcher.write_bytes(
         b"@echo off\r\n"
         b"rem AutoSeg Evaluator portable launcher\r\n"
         b"rem Runs entirely from this folder. No Python install required.\r\n"
-        b'start "AutoSeg Evaluator" "%~dp0python\\python.exe" -m autoseg_evaluator\r\n'
+        b'start "AutoSeg Evaluator" "%~dp0python\\pythonw.exe" -m autoseg_evaluator\r\n'
+    )
+
+
+def _write_shortcut_vbs(bundle: Path) -> None:
+    """Write a VBScript that creates a Desktop shortcut with the app icon.
+
+    A ``.bat`` can't carry an icon, so this optional helper builds a proper
+    ``.lnk`` (which can). It resolves the bundle from its own location, so it
+    works wherever the bundle was extracted. Windows-only; macOS / Linux users
+    run from source and use ``scripts/install-linux-desktop.sh`` (Linux) or the
+    Qt-driven dock icon (macOS).
+    """
+    vbs = bundle / "Create Desktop Shortcut.vbs"
+    vbs.write_bytes(
+        b"' Creates a Desktop shortcut to AutoSeg Evaluator (with the app icon).\r\n"
+        b'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
+        b'Set shell = CreateObject("WScript.Shell")\r\n'
+        b"bundle = fso.GetParentFolderName(WScript.ScriptFullName)\r\n"
+        b'desktop = shell.SpecialFolders("Desktop")\r\n'
+        b'Set lnk = shell.CreateShortcut(desktop & "\\AutoSeg Evaluator.lnk")\r\n'
+        b'lnk.TargetPath = bundle & "\\python\\pythonw.exe"\r\n'
+        b'lnk.Arguments = "-m autoseg_evaluator"\r\n'
+        b"lnk.WorkingDirectory = bundle\r\n"
+        b'lnk.IconLocation = bundle & "\\app\\autoseg_evaluator\\assets\\icon.ico"\r\n'
+        b'lnk.Description = "AutoSeg Evaluator"\r\n'
+        b"lnk.Save\r\n"
+        b'MsgBox "Shortcut created on your Desktop.", 64, "AutoSeg Evaluator"\r\n'
     )
 
 
@@ -121,6 +150,11 @@ def _write_readme(bundle: Path, version: str) -> None:
         "\r\n"
         "To launch the application:\r\n"
         '  Double-click "Run AutoSeg Evaluator.bat".\r\n'
+        "\r\n"
+        "Optional - put an icon on your Desktop:\r\n"
+        '  Double-click "Create Desktop Shortcut.vbs". It adds an\r\n'
+        '  "AutoSeg Evaluator" shortcut (with the app icon) to your\r\n'
+        "  Desktop that you can also pin to the taskbar/Start menu.\r\n"
         "\r\n"
         "Requirements:\r\n"
         "  - Windows 10 or 11 (64-bit).\r\n"
@@ -136,6 +170,7 @@ def _write_readme(bundle: Path, version: str) -> None:
         "                    IT teams can virus-scan and inspect them.\r\n"
         "  app\\              The application source code.\r\n"
         "  *.bat             Launcher (invokes the bundled Python).\r\n"
+        "  *.vbs             Optional 'create Desktop shortcut' helper.\r\n"
         "  LICENSE           Apache 2.0 license.\r\n"
         "\r\n"
         "Settings:\r\n"
@@ -236,8 +271,9 @@ def build(out_dir: Path, *, make_zip: bool, keep_cache: bool) -> Path:
     _write_version_file(dst_app, version)
 
     # ---- 6. Launcher + docs -------------------------------------------
-    print("[6/6] launcher + README + LICENSE")
+    print("[6/6] launcher + shortcut helper + README + LICENSE")
     _write_launcher(bundle)
+    _write_shortcut_vbs(bundle)
     _write_readme(bundle, version)
     shutil.copy2(REPO_ROOT / "LICENSE", bundle / "LICENSE")
 
