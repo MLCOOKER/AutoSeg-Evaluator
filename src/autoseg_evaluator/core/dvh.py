@@ -12,6 +12,7 @@ the batch.
 
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -139,6 +140,31 @@ def compute_dvh_metrics(
             )
         except Exception as exc:  # noqa: BLE001 — surface anything as a clean DVHError
             raise DVHError(f"dvhcalc.get_dvh failed: {exc}") from exc
+
+        # dicompyler rasterises a structure by a point-in-polygon test at each
+        # dose-grid voxel centre, so a structure smaller than the dose grid
+        # spacing can fall *between* the sample points and rasterise to nothing
+        # → volume 0 → no DVH. When a structure that actually has contours
+        # yields zero volume, retry once on a supersampled grid so it still gets
+        # a DVH. Only ever triggers for small structures (so it's cheap), and
+        # never changes a structure that already computed.
+        if (dvh is None or getattr(dvh, "volume", 0) == 0) and _contour_plane_count(
+            rtstruct_ds, roi_number
+        ):
+            resolution = _supersample_resolution(rtdose_ds)
+            if resolution is not None:
+                # If the retry fails, keep the zero-volume result and fall
+                # through to the DVHError below.
+                with contextlib.suppress(Exception):
+                    dvh = dvhcalc.get_dvh(
+                        rtstruct_ds,
+                        rtdose_ds,
+                        roi_number,
+                        calculate_full_volume=True,
+                        thickness=thickness,
+                        interpolation_resolution=resolution,
+                    )
+
         if dvh is None or getattr(dvh, "volume", 0) == 0:
             raise DVHError(f"No DVH curve for ROI #{roi_number} (empty or outside dose grid).")
 
@@ -256,3 +282,20 @@ def _dose_z_spacing(rtdose_ds) -> float | None:
         return None
     spacing = abs(float(offsets[1]) - float(offsets[0]))
     return spacing if spacing > 0 else None
+
+
+def _supersample_resolution(rtdose_ds, factor: int = 4) -> tuple[float, float] | None:
+    """In-plane ``(row, col)`` resolution (mm) for supersampling, or ``None``.
+
+    A fraction (``1/factor``) of the dose grid's in-plane spacing — fine enough
+    to place sample points inside a structure that is smaller than a dose voxel.
+    Returned as a tuple so dicompyler accepts non-square dose grids too.
+    """
+    ps = getattr(rtdose_ds, "PixelSpacing", None)
+    if not ps or len(ps) < 2:
+        return None
+    row = float(ps[0]) / factor
+    col = float(ps[1]) / factor
+    if row <= 0 or col <= 0:
+        return None
+    return row, col

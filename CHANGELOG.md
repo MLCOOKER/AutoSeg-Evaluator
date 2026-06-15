@@ -4,6 +4,19 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Very small OARs are no longer silently dropped from the DVH.** dicompyler
+  rasterises a structure by a point-in-polygon test at each dose-grid voxel
+  centre, so a structure smaller than the dose grid spacing (~1–2 voxels) can
+  fall *between* the sample points, rasterise to zero volume, and get no DVH.
+  `compute_dvh_metrics` now retries once on a supersampled grid (¼ of the dose
+  spacing) when a structure that has contours yields zero volume, recovering
+  its dose statistics. It only triggers for sub-grid structures (so it's cheap
+  — a few ms) and never changes a structure that already computed, so the
+  bit-for-bit dicompyler DVH validation still holds.
+
 ## [2.5.0] — 2026-06-15
 
 ### Added
