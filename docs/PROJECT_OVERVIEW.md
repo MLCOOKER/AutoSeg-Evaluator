@@ -648,6 +648,15 @@ the wrapper passes an explicit `thickness` (the dose grid's z-spacing,
 via `_single_plane_thickness`) so single-slice OARs still yield dose
 statistics.
 
+**Sub-dose-grid OARs (v2.5.x):** dicompyler rasterises a structure by a
+point-in-polygon test at each *dose-grid* voxel centre, so a structure
+smaller than the dose grid spacing (~1–2 voxels) can fall between the
+sample points, rasterise to zero volume, and get no DVH. When a structure
+that *has* contours yields zero volume, the wrapper retries once with
+`interpolation_resolution` = ¼ of the dose spacing (`_supersample_resolution`)
+so the tiny OAR is recovered. Only triggers for sub-grid structures (cheap),
+and never changes a structure that already computed.
+
 **Cranio-caudal truncation (v2.4.2):** `compute_dvh_metrics` takes an
 optional `z_extent_mm = (z_lo, z_hi)`. When the drawer's *Truncate*
 option is active, the worker computes the GT's physical z-extent

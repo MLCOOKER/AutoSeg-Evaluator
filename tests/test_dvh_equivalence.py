@@ -120,8 +120,10 @@ def _write_rtstruct(
     ct_sop_uids: list[str],
     planes: tuple[int, ...] = (4, 5, 6, 7, 8, 9, 10),
     fname: str = "rtss.dcm",
+    center: tuple[float, float] = (30.0, 30.0),
+    half_w: float = 16.0,
 ) -> Path:
-    """One solid ROI (square at (30,30), half-width 16 mm) over ``planes``."""
+    """One solid square ROI of half-width ``half_w`` mm at ``center`` over ``planes``."""
     sop_uid = generate_uid()
     meta = _new_meta(RTStructureSetStorage, sop_uid)
     ds = FileDataset(str(folder / fname), {}, file_meta=meta, preamble=b"\0" * 128)
@@ -152,7 +154,7 @@ def _write_rtstruct(
         item = Dataset()
         item.ContourGeometricType = "CLOSED_PLANAR"
         item.NumberOfContourPoints = 4
-        coords2d = _square_xy(30.0, 30.0, 16.0)
+        coords2d = _square_xy(center[0], center[1], half_w)
         data: list[float] = []
         for i in range(0, len(coords2d), 2):
             data.extend([coords2d[i], coords2d[i + 1], float(z) * SLICE_THICK])
@@ -402,3 +404,56 @@ def test_z_extent_truncation_restores_dataset(zgrad_fixture):
     n_before = len(rc.ContourSequence)
     compute_dvh_metrics(rtss_ds, dose_ds, 1, CONFIG, z_extent_mm=(7.0, 13.0))
     assert len(rc.ContourSequence) == n_before
+
+
+# ---------- sub-dose-grid (tiny) structure recovery via supersampling ----------
+
+
+@pytest.fixture(scope="module")
+def tiny_structure_fixture(tmp_path_factory):
+    """A 0.8 mm structure centred between the 2 mm dose-grid sample points — it
+    contains no dose voxel centre, so plain dicompyler rasterises it to nothing."""
+    folder = tmp_path_factory.mktemp("dvh_tiny")
+    study_uid = generate_uid()
+    for_uid = generate_uid()
+    series_uid = generate_uid()
+    ct_sop_uids = _write_ct_series(
+        folder, study_uid=study_uid, for_uid=for_uid, series_uid=series_uid
+    )
+    rtss_path = _write_rtstruct(
+        folder,
+        study_uid=study_uid,
+        for_uid=for_uid,
+        ct_sop_uids=ct_sop_uids,
+        planes=(5, 6, 7),
+        center=(3.0, 3.0),
+        half_w=0.4,
+    )
+    dose_path = _write_rtdose(folder, study_uid=study_uid, for_uid=for_uid)
+    rtss_ds = pydicom.dcmread(str(rtss_path))
+    dose_ds = pydicom.dcmread(str(dose_path))
+    dose_ds.filename = str(dose_path)
+    return rtss_ds, dose_ds
+
+
+def test_plain_dicompyler_drops_subgrid_structure(tiny_structure_fixture):
+    """Confirms the cause: a structure smaller than the dose grid spacing
+    rasterises to zero volume on the native grid (no DVH)."""
+    from dicompylercore import dvhcalc
+
+    rtss_ds, dose_ds = tiny_structure_fixture
+    dvh = dvhcalc.get_dvh(rtss_ds, dose_ds, 1, calculate_full_volume=True)
+    assert getattr(dvh, "volume", 0) == 0
+
+
+def test_supersampling_recovers_subgrid_structure(tiny_structure_fixture):
+    """compute_dvh_metrics retries on a supersampled grid so the tiny structure
+    still yields dose statistics instead of being silently dropped."""
+    rtss_ds, dose_ds = tiny_structure_fixture
+    out = compute_dvh_metrics(rtss_ds, dose_ds, 1, CONFIG)
+    assert out, "sub-grid structure should be recovered, not dropped"
+    # Recovered with positive, finite dose (all ~equal for this sub-voxel block).
+    # (Don't assert mean >= min: dicompyler's cumulative-integral mean can dip a
+    # hair below the histogram min for a degenerate sub-voxel structure.)
+    assert out["dmax_gy"] >= out["dmin_gy"] > 0.0
+    assert out["dmean_gy"] > 0.0
