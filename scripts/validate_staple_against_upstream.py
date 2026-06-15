@@ -273,8 +273,8 @@ def write_report(
     )
     lines.append(
         f"- **STAPLE parameters:** max_iterations = {CONFIG.max_iterations}, "
-        f"confidence_weight = {CONFIG.confidence_weight}, adaptive bbox band "
-        f"[{CONFIG.target_fg_ratio_min}, {CONFIG.target_fg_ratio_max}]"
+        f"confidence_weight = {CONFIG.confidence_weight}, adaptive bbox upper "
+        f"foreground-ratio target = {CONFIG.target_fg_ratio_max}"
     )
     lines.append("")
     lines.append(

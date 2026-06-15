@@ -4,6 +4,19 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Removed the inert STAPLE `target_fg_ratio_min` parameter** (and its
+  Compute-tab spinbox). The adaptive bounding box only ever *grows* the box,
+  which can only *lower* the foreground/bbox ratio — so a lower-ratio target
+  was never enforceable and the knob had no effect on results. Only the upper
+  target (`target_fg_ratio_max`) is kept, and the docs/manuscript wording is
+  corrected from "within a range" to "until the ratio falls to or below the
+  upper target". STAPLE output is unchanged (still 55/55 bit-exact vs
+  `SimpleITK.STAPLEImageFilter` on the HN1 cohort). Older `settings.json`
+  files carrying `target_fg_ratio_min` still load — the key is ignored.
+
 ## [2.5.1] — 2026-06-16
 
 ### Fixed
