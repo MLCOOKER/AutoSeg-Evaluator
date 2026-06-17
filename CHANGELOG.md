@@ -4,6 +4,24 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.3] — 2026-06-17
+
+### Changed
+- **Refreshed the application icon** with a transparent background (previously
+  an opaque rounded square). Regenerated `icon.png` (512×512) and the
+  multi-resolution `icon.ico` (16–256 px) from the new source so the
+  taskbar / dock / title-bar icon now has clean transparent corners.
+- **Added a GUI screenshot to the README** (the Match Contours workflow with
+  the organ-template dialog) and extended the `docs/PROJECT_OVERVIEW.md`
+  change history and footer through v2.5.2.
+
+### Fixed
+- **Corrected a stale STAPLE "Reset to defaults" tooltip** that still cited
+  removed/renamed parameters (`max_iterations=30`, `bbox_padding_voxels=5`).
+  It now reflects the actual defaults (max iterations 100, confidence weight
+  1.0, adaptive bbox FG ratio max 0.50) and is generated from `_STAPLE_DEFAULTS`
+  so it cannot drift from the real values again.
+
 ## [2.5.2] — 2026-06-16
 
 ### Changed

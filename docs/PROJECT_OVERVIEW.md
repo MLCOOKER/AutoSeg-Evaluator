@@ -1183,6 +1183,28 @@ bumping `pyproject.toml` updates the window title bar and every other
   comparison. A whole-mask DVH engine was prototyped for this and rejected
   (~50 % V{X}Gy divergence vs dicompyler); the untruncated path stays
   bit-for-bit identical to dicompyler-core.
+- **v2.5.0** — **Application icon + splash screen**. Window / taskbar / dock
+  icon (multi-resolution `.ico` on Windows via an explicit `AppUserModelID`
+  so it no longer inherits the interpreter icon; PNG via Qt on macOS / Linux)
+  and a startup splash shown before the heavy imports load. Assets live in
+  `autoseg_evaluator/assets/` (packaged via `package-data`). **Icon'd
+  launchers**: the portable bundle launches via `pythonw.exe` (no console
+  flash) and ships a `Create Desktop Shortcut.vbs`; `scripts/install-linux-
+  desktop.sh` registers a freedesktop `.desktop` entry. Splash added as the
+  README hero banner.
+- **v2.5.1** — **Sub-dose-grid OARs no longer dropped from the DVH**. A
+  structure smaller than the dose-grid spacing (~1–2 voxels) could fall
+  between dicompyler's point-in-polygon sample points, rasterise to zero
+  volume, and get no DVH. `compute_dvh_metrics` now retries once on a
+  supersampled grid (¼ of the dose spacing) when a contoured structure
+  yields zero volume — cheap, sub-grid-only, and never alters a structure
+  that already computed, so the bit-for-bit dicompyler validation still holds.
+- **v2.5.2** — **Removed the inert STAPLE `target_fg_ratio_min` parameter**
+  (and its Compute-tab spinbox). The adaptive bbox only ever *grows*, which
+  can only *lower* the foreground/bbox ratio, so a lower-ratio target was
+  never enforceable; only the upper target (`target_fg_ratio_max`) is kept.
+  STAPLE output is unchanged (still 55/55 bit-exact). Older `settings.json`
+  files carrying the key still load — it is ignored.
 
 ### Pending features
 - **Docs**: full user guide, hospital deployment doc, metrics reference,
@@ -1243,10 +1265,12 @@ bumping `pyproject.toml` updates the window title bar and every other
 
 ---
 
-*Document version 4 — updated 2026-06-11 against commit `474f874` (v2.4.2).
+*Document version 5 — updated 2026-06-17 against v2.5.2.
 Tracks: portable bundle + CI/release pipeline (v2.1), `D at volume (cc)`
 DVH input + window-title fix (v2.2), template source-label match +
 expanded Manage Source Labels columns (v2.3), the Tab 2 multi-observer
 consensus redesign + STAPLE result-row parity (v2.4.0), STAPLE/DVH
 empirical validation + DVH Δ-vs-GT + single-slice DVH + bundle/progress
-fixes (v2.4.1), and truncation-aware DVH (v2.4.2).*
+fixes (v2.4.1), truncation-aware DVH (v2.4.2), application icon + splash +
+icon'd launchers (v2.5.0), sub-dose-grid DVH recovery (v2.5.1), and removal
+of the inert STAPLE `target_fg_ratio_min` parameter (v2.5.2).*

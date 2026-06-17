@@ -66,6 +66,12 @@ command-line or coding expertise.
 - **Portable**: ships as a hospital-IT-friendly Python bundle (see below) —
   every dependency is a normal `.py` / `.pyd` file, no PyInstaller blob.
 
+<p align="center">
+  <img src="docs/images/screenshot.png" alt="AutoSeg Evaluator — Match Contours tab with the organ-template dialog and auto-matched accordion drawers" width="900">
+  <br>
+  <em>Match Contours: define an organ template and replacement rules, then auto-match contours into per-organ drawers.</em>
+</p>
+
 ## Quick start
 
 ### For end users — portable bundle (recommended)

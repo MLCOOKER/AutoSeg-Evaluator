@@ -415,9 +415,10 @@ class ComputeTab(QWidget):
 
         reset_btn = QPushButton("Reset to defaults", box)
         reset_btn.setToolTip(
-            "Restore STAPLE parameters to the values most consensus-contour "
-            "studies cite (max_iterations=30, confidence_weight=1.0, "
-            "bbox_padding_voxels=5)."
+            "Restore STAPLE parameters to their defaults "
+            f"(max iterations = {_STAPLE_DEFAULTS['max_iterations']}, "
+            f"confidence weight = {_STAPLE_DEFAULTS['confidence_weight']:.1f}, "
+            f"adaptive bbox FG ratio max = {_STAPLE_DEFAULTS['target_fg_ratio_max']:.2f})."
         )
         reset_btn.clicked.connect(self._reset_staple_defaults)
         layout.addRow("", reset_btn)
