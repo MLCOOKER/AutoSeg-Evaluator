@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from autoseg_evaluator.core.dose import dose_array_on_reference
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
     find_reference_image_folder,
@@ -1081,7 +1082,7 @@ class MatchContoursTab(QWidget):
         # CT + mask loading happens synchronously — show a status while it works
         self._show_status(f"Loading visualization for {patient_id} / {organ_name}…")
         try:
-            ct, gt_mask, test_pairs = self._load_visualization_data(
+            ct, gt_mask, test_pairs, dose_arr = self._load_visualization_data(
                 patient_id, sub, drawer.truncate_enabled()
             )
         except Exception as exc:  # noqa: BLE001
@@ -1094,7 +1095,9 @@ class MatchContoursTab(QWidget):
             return
         gt_label = f"{sub.gt_source_label} — {sub.gt_roi_name}"
         title = f"Visualize  ·  {patient_id}  ·  {organ_name}"
-        dialog = VisualizationWindow(ct, gt_mask, gt_label, test_pairs, title=title, parent=self)
+        dialog = VisualizationWindow(
+            ct, gt_mask, gt_label, test_pairs, title=title, parent=self, dose_arr=dose_arr
+        )
         # Clear status now that the dialog is up
         self._show_status("")
         dialog.exec()
@@ -1102,7 +1105,14 @@ class MatchContoursTab(QWidget):
     def _load_visualization_data(
         self, patient_id: str, sub: PatientSubsection, truncate: bool
     ) -> tuple:
-        """Load the CT + GT + every available test mask for one patient subsection."""
+        """Load the CT + GT + every available test mask for one patient subsection.
+
+        Also resamples the patient's RT Dose (if any) onto the CT grid so the
+        viewer can overlay it. Returns ``(ct, gt_mask, test_pairs, dose_arr)``
+        where ``dose_arr`` is a ``(z, y, x)`` Gy array aligned to the CT, or
+        ``None`` when no dose is available / it fails to load (the overlay is
+        optional and never blocks the viewer).
+        """
         folder = find_reference_image_folder(self._library, patient_id, sub.gt_rtstruct_sop_uid)
         if folder is None:
             raise RuntimeError(f"No reference image folder found for patient {patient_id}.")
@@ -1128,7 +1138,51 @@ class MatchContoursTab(QWidget):
                 mask, _ = truncate_to_gt_z_extent(mask, gt_mask)
             label = f"{t.source_label} — {t.organ_name}"
             test_pairs.append((label, mask))
-        return ct, gt_mask, test_pairs
+
+        dose_arr = None
+        dose_path = self._find_dose_path_for_viz(patient_id, sub.gt_rtstruct_sop_uid)
+        if dose_path:
+            try:
+                dose_arr = dose_array_on_reference(dose_path, ct)
+            except Exception:  # noqa: BLE001 — dose overlay is optional; never block the viewer
+                dose_arr = None
+        return ct, gt_mask, test_pairs, dose_arr
+
+    def _find_dose_path_for_viz(self, patient_id: str, gt_sop_uid: str) -> str | None:
+        """Locate an RT Dose file for the overlay.
+
+        Prefers a dose sharing the GT's frame of reference (so it resamples
+        onto the CT cleanly) and a ``PLAN`` summation type; falls back to any
+        dose the patient has. Returns ``None`` when the patient has no dose.
+        """
+        patient = self._library.patients.get(patient_id) if self._library else None
+        if patient is None:
+            return None
+        gt_for: str | None = None
+        for ctx in patient.contexts:
+            for rtss in ctx.rtstructs:
+                if rtss.sop_instance_uid == gt_sop_uid:
+                    gt_for = rtss.frame_of_reference_uid
+                    break
+            if gt_for is not None:
+                break
+        # (same-FoR, is-PLAN, path) — sort so the most preferred candidate wins.
+        candidates: list[tuple[bool, bool, str]] = []
+        for ctx in patient.contexts:
+            for dose in ctx.rtdoses:
+                if not dose.file_path:
+                    continue
+                candidates.append(
+                    (
+                        dose.frame_of_reference_uid == gt_for,
+                        dose.dose_summation_type == "PLAN",
+                        dose.file_path,
+                    )
+                )
+        if not candidates:
+            return None
+        candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+        return candidates[0][2]
 
     def _rtstruct_path(self, patient_id: str, sop_uid: str) -> str | None:
         patient = self._library.patients.get(patient_id) if self._library else None
