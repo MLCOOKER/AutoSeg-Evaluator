@@ -47,6 +47,15 @@ command-line or coding expertise.
 - **Inter-observer variability**: pairwise Dice / surface-distance / APL
   matrices over the selected observers with configurable metric selection +
   tolerance overrides.
+- **Qualitative (Likert) assessment**: score each contour on the 5-point
+  MD Anderson scale through a fast review UI — a multiplanar viewer (axial /
+  coronal / sagittal, zoom, window/level, contour opacity + thickness),
+  tinder-style swipe, per-grader configuration (blinded vs transparent,
+  include-GT, randomize), multiple graders, and session resume. Scores land in
+  per-grader `Likert` columns in the Results table.
+- **Dose overlay**: when an RT Dose is loaded, the contour visualiser can
+  overlay the planned dose as a colour wash (jet, Gy) with an opacity control
+  and colorbar.
 - **Smart auto-matching**: hybrid Levenshtein + cosine matcher backed by a
   TG-263 synonym dictionary (~17 000 variants from the official worksheet),
   user-defined replacement rules, and template-driven batch selection.
@@ -58,7 +67,7 @@ command-line or coding expertise.
   `settings.json`. Six raw DICOM identification columns plus assisted
   propagation let you disambiguate two RTSSes from the same vendor — e.g.
   giving each manual observer a distinct label for consensus building.
-- **Modern UI**: 5-tab workflow with accordion organ drawers, colourblind-safe
+- **Modern UI**: 6-tab workflow with accordion organ drawers, colourblind-safe
   similarity indicators, banded results table, dark / light themes, full undo
   stack on Match Contours.
 - **Save / load sessions**: resume curated multi-patient evaluations across
@@ -149,7 +158,7 @@ For Arch:
 sudo pacman -S python git qt6-base libxkbcommon-x11
 ```
 
-The full 341-test suite is exercised on `windows-latest` and
+The full 383-test suite is exercised on `windows-latest` and
 `ubuntu-latest` in CI on every push — macOS is not in CI, but the same
 PySide6 / SimpleITK / pydicom stack ships official wheels for macOS so
 the app is expected to run identically there.
@@ -166,7 +175,7 @@ is pushed (see [`.github/workflows/release.yml`](.github/workflows/release.yml))
 
 ## Workflow overview
 
-The application is organised into five sequential tabs:
+The application is organised into six sequential tabs:
 
 1. **Load Data** — point at a folder of DICOM data; the app recursively scans
    and groups by patient, study, and frame-of-reference. Source labels can be
@@ -180,9 +189,13 @@ The application is organised into five sequential tabs:
    run auto-match to populate accordion drawers grouped by organ. Per-drawer
    toggles control truncation, vs-GT vs vs-STAPLE mode, and whether the
    designated GT is fed into the STAPLE expectation-maximisation step.
-4. **Compute** — select geometric and dosimetric metrics with tolerance
+4. **Qualitative Assessment** *(optional)* — score each contour on the 5-point
+   MD Anderson Likert scale in a fast review UI (multiplanar viewer, swipe,
+   per-grader blinded/transparent + include-GT + randomize configuration,
+   multiple graders). Scores flow into the Results table.
+5. **Compute** — select geometric and dosimetric metrics with tolerance
    controls, then run computation with detailed live progress and cancel.
-5. **Results** — review the banded metrics table (tolerance values baked into
+6. **Results** — review the banded metrics table (tolerance values baked into
    the headers) and export to CSV.
 
 See [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md) for the full

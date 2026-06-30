@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_SUFFIX = ".session.json"
 
 
@@ -31,6 +31,7 @@ def build_session_dict(
     replacement_rules: list[dict[str, str]],
     template: dict[str, Any],
     consensus_groups: list[dict[str, Any]] | None = None,
+    qualitative: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the on-disk JSON dictionary.
 
@@ -42,6 +43,12 @@ def build_session_dict(
     Sessions saved against schema v1 simply omit this key and load
     cleanly — the consensus tab will just be empty until the user
     re-generates.
+
+    ``qualitative`` (added in schema v4) is an opaque snapshot of the
+    Qualitative Assessment tab — the mode, rater list, include-GT /
+    randomize toggles + seed, and each rater's order and scores so an
+    in-progress rating run can be resumed. Older sessions omit the key and
+    load cleanly (the qualitative tab simply starts empty).
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -51,6 +58,7 @@ def build_session_dict(
         "last_template": dict(template or {}),
         "drawers": list(drawers_state or []),
         "consensus_groups": list(consensus_groups or []),
+        "qualitative": dict(qualitative or {}),
     }
 
 

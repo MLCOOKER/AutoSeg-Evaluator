@@ -1,4 +1,4 @@
-"""Main application window — the 4-tab workflow shell."""
+"""Main application window — the 6-tab workflow shell."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from autoseg_evaluator.ui.tabs.build_consensus import BuildConsensusTab
 from autoseg_evaluator.ui.tabs.compute import ComputeTab
 from autoseg_evaluator.ui.tabs.load_data import LoadDataTab
 from autoseg_evaluator.ui.tabs.match_contours import MatchContoursTab
+from autoseg_evaluator.ui.tabs.qualitative import QualitativeTab
 from autoseg_evaluator.ui.tabs.results import ResultsTab
 from autoseg_evaluator.ui.theme import apply_theme
 from autoseg_evaluator.utils.settings import save_settings
@@ -61,6 +62,8 @@ class MainWindow(QMainWindow):
         self._load_tab = LoadDataTab(settings=self._settings, parent=self)
         self._consensus_tab = BuildConsensusTab(settings=self._settings, parent=self)
         self._match_tab = MatchContoursTab(settings=self._settings, parent=self)
+        self._qualitative_tab = QualitativeTab(parent=self)
+        self._qualitative_tab.set_drawers_provider(self._match_tab.session_state)
         self._compute_tab = ComputeTab(settings=self._settings, parent=self)
         self._results_tab = ResultsTab()
 
@@ -72,9 +75,13 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(_wrap_scroll(self._load_tab), "1. Load Data")
         self._tabs.addTab(_wrap_scroll(self._consensus_tab), "2. Build Consensus GT (Optional)")
         self._tabs.addTab(_wrap_scroll(self._match_tab), "3. Match Contours")
-        self._tabs.addTab(_wrap_scroll(self._compute_tab), "4. Compute")
-        self._tabs.addTab(_wrap_scroll(self._results_tab), "5. Results")
-        self._tabs.setCurrentIndex(int(self._settings.get("active_tab", 0)))
+        # Not scroll-wrapped: the multiplanar viewer should fill the tab area.
+        self._qual_page = self._qualitative_tab
+        self._tabs.addTab(self._qual_page, "4. Qualitative Assessment")
+        self._tabs.addTab(_wrap_scroll(self._compute_tab), "5. Compute")
+        self._tabs.addTab(_wrap_scroll(self._results_tab), "6. Results")
+        active = min(int(self._settings.get("active_tab", 0)), self._tabs.count() - 1)
+        self._tabs.setCurrentIndex(max(0, active))
         self._results_tab.set_results_manager(self._results)
 
         # Wire cross-tab signals
@@ -87,6 +94,8 @@ class MainWindow(QMainWindow):
         self._compute_tab.metricConfigChanged.connect(self._on_metric_config_changed)
         self._compute_tab.computeRequested.connect(self._on_compute_requested)
         self._compute_tab.cancelRequested.connect(self._on_compute_cancel_requested)
+        self._qualitative_tab.qualitativeScored.connect(self._on_qualitative_scored)
+        self._qualitative_tab.assessmentLockChanged.connect(self._on_assessment_lock_changed)
 
         self.setCentralWidget(self._tabs)
 
@@ -95,6 +104,7 @@ class MainWindow(QMainWindow):
         self._library = library
         self._consensus_tab.set_library(library)
         self._match_tab.set_library(library)
+        self._qualitative_tab.set_library(library)
         self._compute_tab.set_library(library)
         # Persist updated last_folder right away — survives crashes mid-session
         save_settings(self._settings)
@@ -135,6 +145,37 @@ class MainWindow(QMainWindow):
         self._settings["tolerances"] = existing_tol
         self._settings["dvh"] = dict(config.get("dvh", {}))
         save_settings(self._settings)
+
+    # ---- Qualitative assessment ------------------------------------------
+
+    def _on_qualitative_scored(self, payload: dict) -> None:
+        """Record one Likert score into the results store and refresh Tab 6."""
+        self._results.upsert_qualitative_score(
+            patient_id=payload["patient_id"],
+            drawer=payload["drawer"],
+            source_label=payload["source_label"],
+            roi_name=payload["roi_name"],
+            roi_number=payload["roi_number"],
+            is_gt=payload["is_gt"],
+            rater=payload["rater"],
+            score=payload["score"],
+            blinded=payload["blinded"],
+        )
+        self._results_tab.refresh()
+
+    def _on_assessment_lock_changed(self, locked: bool) -> None:
+        """Lock the other tabs during a (blinded) assessment to prevent leakage.
+
+        The qualitative tab itself stays enabled; its own Unlock button is the
+        only way out. Session save/load stay available via the File menu so a
+        rater can checkpoint mid-stack.
+        """
+        q_index = self._tabs.indexOf(self._qual_page)
+        for i in range(self._tabs.count()):
+            if i != q_index:
+                self._tabs.setTabEnabled(i, not locked)
+        if locked:
+            self._tabs.setCurrentIndex(q_index)
 
     # ---- Compute lifecycle -----------------------------------------------
 
@@ -335,6 +376,7 @@ class MainWindow(QMainWindow):
             replacement_rules=list(self._settings.get("replacement_rules", []) or []),
             template=dict(self._settings.get("last_template", {}) or {}),
             consensus_groups=self._consensus_tab.session_state(),
+            qualitative=self._qualitative_tab.session_state(),
         )
         try:
             save_session(path, data)
@@ -412,8 +454,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg_lines[0], 8000)
         if warnings:
             QMessageBox.information(self, "Load Session", "\n".join(msg_lines))
-        # Jump to Tab 2 so the user sees the restored work
-        self._tabs.setCurrentWidget(self._match_tab)
+        # Restore the qualitative run (rater list, options, and every rater's
+        # scores / position), rebuilding its stack from the drawers just
+        # applied. It lands on the Tab 4 setup panel (unlocked) so the user can
+        # resume any rater. If it was mid-assessment, surface Tab 4 so they see
+        # it; otherwise show the restored matches.
+        qualitative = data.get("qualitative", {}) or {}
+        self._qualitative_tab.apply_session_state(qualitative)
+        if qualitative.get("started"):
+            self._tabs.setCurrentWidget(self._qual_page)
+        else:
+            self._tabs.setCurrentWidget(self._match_tab)
 
     def _session_start_dir(self) -> Path:
         if self._current_session_path is not None:

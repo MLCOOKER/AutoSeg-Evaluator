@@ -1,4 +1,4 @@
-"""Tab 4 — Results.
+"""Tab 6 — Results.
 
 Displays the rows accumulated by :class:`ResultsManager` in a sortable
 table whose columns are: fixed metadata (drawer, patient, GT/test source
@@ -54,6 +54,7 @@ _GROUP_BANDS: dict[str, tuple[str, QColor]] = {
     "volume": ("Volume + COM", QColor("#43A047")),  # green
     "staple": ("STAPLE consensus", QColor("#EC407A")),  # pink
     "dvh": ("Dose-volume histogram", QColor("#8E24AA")),  # purple
+    "qualitative": ("Qualitative (Likert)", QColor("#795548")),  # brown
 }
 
 
@@ -119,6 +120,9 @@ def _band_for_metric_key(key: str) -> str:
         "n_raters",
     ):
         return "staple"
+    # Qualitative Likert score + assessed / blinded flag columns share a band.
+    if key.startswith("likert_") or key in ("qualitative_assessed", "qualitative_blinded"):
+        return "qualitative"
     # DVH built-ins or dynamic ``d{X}_gy`` / ``v{X}gy_cc``
     if key in ("dmin_gy", "dmean_gy", "dmax_gy"):
         return "dvh"

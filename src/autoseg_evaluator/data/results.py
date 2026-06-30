@@ -156,6 +156,13 @@ def metric_display_label(
         return f"Total APL @ {apl_tau_mm:.2f} mm"
     if key in _METRIC_LABELS:
         return _METRIC_LABELS[key]
+    # Qualitative (Likert) columns: a score per rater + assessed / blinded flags.
+    if key.startswith("likert_"):
+        return f"Likert — {key[len('likert_') :]}"
+    if key == "qualitative_assessed":
+        return "Qualitative"
+    if key == "qualitative_blinded":
+        return "Blinded"
     # ``d{X}cc_gy`` must be tested before the bare ``d{X}_gy`` form since
     # both end with ``_gy``; the cc variant carries an explicit unit
     # suffix between the number and ``_gy``.
@@ -220,11 +227,28 @@ def _dynamic_metric_sort_key(name: str) -> tuple:
     return (3 + diff_offset, 0, name)
 
 
+def _safe_rater(rater: str) -> str:
+    """Sanitise a rater name for use as a metric-column key suffix."""
+    return (str(rater).strip() or "Rater").replace("|", "/")
+
+
+def _first_dvh_index(columns: list[str]) -> int:
+    """Index of the first dose (DVH) column in ``columns`` (``len`` if none)."""
+    for i, c in enumerate(columns):
+        if c in ("dmin_gy", "dmean_gy", "dmax_gy"):
+            return i
+    return len(columns)
+
+
 class ResultsManager:
     """Accumulating store of per-row metric results."""
 
     def __init__(self) -> None:
         self._rows: list[dict[str, Any]] = []
+        # Qualitative (Likert) scores, stored against the contour and overlaid
+        # onto its metric row at read time so each contour stays a single row.
+        # Keyed by (patient_id, drawer, source_label, roi_number).
+        self._qualitative: dict[tuple[str, str, str, int], dict[str, Any]] = {}
         # Tolerance values that produced this batch of results — surfaced
         # in the Surface Dice / APL column headers so two CSVs computed
         # at different tolerances can't be silently merged in Excel.
@@ -252,44 +276,187 @@ class ResultsManager:
         for r in rows:
             self.add_row(r)
 
+    # ---- Qualitative (Likert) scores -------------------------------------
+
+    def upsert_qualitative_score(
+        self,
+        *,
+        patient_id: str,
+        drawer: str,
+        source_label: str,
+        roi_name: str,
+        roi_number: int,
+        is_gt: bool,
+        rater: str,
+        score: int,
+        blinded: bool,
+    ) -> None:
+        """Record one rater's Likert score for one contour.
+
+        The score is stored against the contour (patient, drawer, source, roi)
+        and overlaid onto that contour's metric row at read time, so the Likert
+        score sits on the **same row** as the geometric / dose metrics. A
+        synthetic row is emitted only when no metric row exists for the contour
+        (e.g. the qualitative pass ran before Compute). A single
+        ``qualitative_blinded`` flag records whether the run was blinded (True)
+        or transparent (False); re-rating overwrites in place.
+        """
+        key = (str(patient_id), str(drawer), str(source_label), int(roi_number))
+        entry = self._qualitative.get(key)
+        if entry is None:
+            entry = {
+                "patient_id": patient_id,
+                "drawer": drawer,
+                "source_label": source_label,
+                "roi_name": roi_name,
+                "roi_number": int(roi_number),
+                "is_gt": bool(is_gt),
+                "scores": {},
+                "blinded": None,
+            }
+            self._qualitative[key] = entry
+        entry["scores"][_safe_rater(rater)] = int(score)
+        entry["blinded"] = bool(blinded)
+
+    def _qualitative_metric_keys(self) -> set[str]:
+        if not self._qualitative:
+            return set()
+        keys: set[str] = {"qualitative_assessed"}
+        for entry in self._qualitative.values():
+            for rater in entry["scores"]:
+                keys.add(f"likert_{rater}")
+            if entry.get("blinded") is not None:
+                keys.add("qualitative_blinded")
+        return keys
+
+    @staticmethod
+    def _row_contour_key(row: dict[str, Any]) -> tuple[str, str, str, int] | None:
+        """Contour identity for a *primary* test-comparison row, else None.
+
+        Excludes GT-only rows (gt_dose, the designated-GT STAPLE rater, STAPLE
+        Details) so a Likert score overlays onto the test-vs-reference row.
+        """
+        mode = str(row.get("comparison_mode", ""))
+        if mode in ("gt_dose", "STAPLE Details") or row.get("was_designated_gt"):
+            return None
+        try:
+            roi = int(row.get("test_roi_number", -1))
+        except (TypeError, ValueError):
+            return None
+        return (
+            str(row.get("patient_id", "")),
+            str(row.get("drawer", "")),
+            str(row.get("test_source_label", "")),
+            roi,
+        )
+
+    @staticmethod
+    def _overlay_qualitative(row: dict[str, Any], entry: dict[str, Any]) -> None:
+        for rater, score in entry["scores"].items():
+            row["metrics"][f"likert_{rater}"] = int(score)
+        if entry.get("blinded") is not None:
+            row["metrics"]["qualitative_blinded"] = bool(entry["blinded"])
+
+    def _synthetic_qualitative_row(self, entry: dict[str, Any]) -> dict[str, Any]:
+        metrics: dict[str, Any] = {f"likert_{r}": int(s) for r, s in entry["scores"].items()}
+        metrics["qualitative_assessed"] = True
+        if entry.get("blinded") is not None:
+            metrics["qualitative_blinded"] = bool(entry["blinded"])
+        return {
+            "drawer": entry["drawer"],
+            "patient_id": entry["patient_id"],
+            "comparison_mode": "Qualitative",
+            "was_designated_gt": bool(entry.get("is_gt")),
+            "gt_source_label": "",
+            "gt_rtstruct_filename": "",
+            "gt_roi_name": "",
+            "test_source_label": entry["source_label"],
+            "test_rtstruct_filename": "",
+            "test_organ": entry["roi_name"],
+            "test_roi_number": int(entry["roi_number"]),
+            "truncated": False,
+            "similarity": "",
+            "error": "",
+            "metrics": metrics,
+        }
+
     def clear(self) -> None:
         self._rows.clear()
+        self._qualitative.clear()
         # Tolerances are batch-scoped — drop them when the batch is cleared.
         self._sd_tau_mm = None
         self._apl_tau_mm = None
 
     def rows(self) -> list[dict[str, Any]]:
-        """Snapshot of all rows in insertion order (callers receive a copy)."""
-        return [dict(r) for r in self._rows]
+        """Snapshot of all rows, with qualitative scores overlaid.
+
+        Each metric row gets the Likert score(s) for its contour merged into
+        its ``metrics`` (first matching row per contour wins, so a score is not
+        repeated across e.g. a GT and a STAPLE comparison of the same contour).
+        Qualitative entries with no matching metric row are emitted as their own
+        ``Qualitative`` rows so nothing is lost.
+        """
+        has_qual = bool(self._qualitative)
+        consumed: set[tuple[str, str, str, int]] = set()
+        out: list[dict[str, Any]] = []
+        for row in self._rows:
+            r = dict(row)
+            r["metrics"] = dict(row.get("metrics") or {})
+            key = self._row_contour_key(row)
+            if key is not None and has_qual:
+                assessed = key in self._qualitative
+                # ``Qualitative`` flag on every ratable contour row; the score +
+                # ``Blinded`` flag overlay only the first matching row.
+                r["metrics"]["qualitative_assessed"] = assessed
+                if assessed and key not in consumed:
+                    self._overlay_qualitative(r, self._qualitative[key])
+                    consumed.add(key)
+            out.append(r)
+        for key, entry in self._qualitative.items():
+            if key not in consumed:
+                out.append(self._synthetic_qualitative_row(entry))
+        return out
 
     def __len__(self) -> int:
-        return len(self._rows)
+        # Count the rows the user actually sees (metric rows + any
+        # qualitative-only rows) so the "N rows" / export / clear states stay
+        # correct even when only qualitative scores exist.
+        return len(self.rows())
 
     def metric_columns(self) -> list[str]:
         """Return the metric column headers in a stable canonical order.
 
         Every column in :data:`CANONICAL_METRIC_COLUMNS` is always included
         (even when no row populated it) so the table layout is identical
-        across runs and Excel paste stays aligned. Metrics that aren't in
-        the canonical list — typically user-defined DVH points like
-        ``d95_gy`` or ``v20gy_cc`` — are appended after the canonical
-        block, sorted by their numeric suffix.
+        across runs and Excel paste stays aligned. Dynamic DVH points
+        (``d95_gy`` / ``v20gy_cc``) are appended after the canonical block.
+        The qualitative columns (``likert_<rater>`` then ``qualitative_blinded``)
+        are inserted immediately before the first dose (DVH) column.
         """
-        seen_in_data: set[str] = set()
+        seen: set[str] = set()
         for row in self._rows:
-            seen_in_data.update((row.get("metrics") or {}).keys())
-        canonical_set = set(CANONICAL_METRIC_COLUMNS)
-        dynamic = sorted(seen_in_data - canonical_set, key=_dynamic_metric_sort_key)
-        return list(CANONICAL_METRIC_COLUMNS) + dynamic
+            seen.update((row.get("metrics") or {}).keys())
+        seen.update(self._qualitative_metric_keys())
+
+        canonical = list(CANONICAL_METRIC_COLUMNS)
+        dynamic = seen - set(canonical)
+        qual_dynamic = sorted(
+            k
+            for k in dynamic
+            if k.startswith("likert_") or k in ("qualitative_assessed", "qualitative_blinded")
+        )
+        other_dynamic = sorted(dynamic - set(qual_dynamic), key=_dynamic_metric_sort_key)
+        dvh_at = _first_dvh_index(canonical)
+        return canonical[:dvh_at] + qual_dynamic + canonical[dvh_at:] + other_dynamic
 
     def export_csv(self, path: Path | str) -> int:
         """Write every stored row to a CSV at ``path``. Returns the row count.
 
         Columns: all metadata columns from :data:`META_COLUMNS`, followed by
-        every metric key that appears in any row (in first-seen order).
+        every metric key that appears in any row (qualitative scores overlaid).
         Missing metrics for a particular row are written as empty cells.
         """
-        rows = self._rows
+        rows = self.rows()
         metrics = self.metric_columns()
         meta_keys = [k for k, _label in META_COLUMNS]
         meta_labels = [label for _k, label in META_COLUMNS]

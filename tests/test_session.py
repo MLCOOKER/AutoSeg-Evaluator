@@ -132,6 +132,48 @@ def test_load_session_rejects_future_schema(tmp_path):
         load_session_file(path)
 
 
+def test_session_dict_round_trips_qualitative_block(tmp_path):
+    qualitative = {
+        "mode": "blinded",
+        "raters": ["Alice", "Bob"],
+        "include_gt": True,
+        "randomize": True,
+        "seed": 1234,
+        "active_rater": "Alice",
+        "per_rater": {
+            "Alice": {"order": ["P1|Organ|sop|5"], "scores": {"P1|Organ|sop|5": 4}, "index": 1},
+            "Bob": {"order": ["P1|Organ|sop|5"], "scores": {}, "index": 0},
+        },
+    }
+    payload = build_session_dict(
+        folder="/x", drawers_state=[], replacement_rules=[], template={}, qualitative=qualitative
+    )
+    assert payload["schema_version"] == 4
+    path = tmp_path / "q.session.json"
+    save_session(path, payload)
+    assert load_session_file(path)["qualitative"] == qualitative
+
+
+def test_pre_v4_session_without_qualitative_loads(tmp_path):
+    """A v3 session (no qualitative key) loads cleanly — the tab just starts empty."""
+    path = tmp_path / "v3.session.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "folder": "/x",
+                "drawers": [],
+                "replacement_rules": [],
+                "last_template": {},
+                "consensus_groups": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = load_session_file(path)
+    assert data.get("qualitative", {}) == {}
+
+
 # ---- session_state snapshot + apply_session_state -----------------------
 
 

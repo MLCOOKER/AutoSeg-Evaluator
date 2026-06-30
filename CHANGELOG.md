@@ -4,6 +4,36 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-06-18
+
+### Added
+- **Qualitative (Likert) assessment — new Tab 4.** A grader scores each matched
+  contour on the 5-point MD Anderson Likert scale (Baroudi et al., *Cancers*
+  2023), shown as a reference table in the tab. Tabs are renumbered: Compute → 5,
+  Results → 6.
+  - **Per-grader configuration**, chosen when the grader is added and fixed
+    thereafter: **blinded** (one contour at a time, source hidden) vs
+    **transparent** (every source for the organ shown with labels + per-source
+    visibility toggles); **include GT**; and **randomize** (group-aware — all
+    sources of an organ stay consecutive).
+  - **Multiplanar viewer** (`QGraphicsView`): axial / coronal / sagittal planes
+    (coronal & sagittal oriented superior-up), ctrl+scroll zoom, Level/Window
+    sliders, contour opacity + thickness, active-contour highlight.
+  - Tinder-style swipe between contours, a progress bar, **Back** (revisit,
+    scores kept), and a **tab lock** during grading with an explicit
+    **Unlock** (no blinded-data leakage).
+  - **Multiple graders** scored in turn; each grader's scores land in their own
+    `Likert — <grader>` column in Results, with `Qualitative` (assessed yes/no)
+    and `Blinded` flags, overlaid onto the contour's existing metric row and
+    placed immediately before the dose columns (own colour band).
+  - **Session save / resume** (schema v3 → **v4**): graders, their fixed
+    configs, and every score are restored, and prior grades are re-populated
+    into the Results tab.
+- **Dose overlay in the slice viewer.** When an RT Dose is loaded, the Tab-3
+  contour visualiser can overlay the planned dose as a colour wash (jet, Gy)
+  toggled on/off, with an opacity control and a Gy colorbar. A new
+  `core/dose.py` reads the RTDOSE in Gy and resamples it onto the CT grid.
+
 ## [2.5.3] — 2026-06-17
 
 ### Changed

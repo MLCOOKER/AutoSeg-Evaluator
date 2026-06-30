@@ -57,6 +57,111 @@ def _row(
     }
 
 
+# ---- Qualitative (Likert) rows -------------------------------------------
+
+
+def _score(mgr, *, rater, score, blinded, source="Limbus", roi_number=2, drawer="Prostate"):
+    mgr.upsert_qualitative_score(
+        patient_id="HN1",
+        drawer=drawer,
+        source_label=source,
+        roi_name="Prostate",
+        roi_number=roi_number,
+        is_gt=False,
+        rater=rater,
+        score=score,
+        blinded=blinded,
+    )
+
+
+def test_qualitative_overlays_onto_existing_metric_row():
+    mgr = ResultsManager()
+    mgr.add_row(_row(test_source="Limbus", test_organ="Prostate", metrics={"dice": 0.9}))
+    _score(mgr, rater="Alice", score=4, blinded=True)
+    _score(mgr, rater="Bob", score=3, blinded=True)
+    rows = mgr.rows()
+    assert len(rows) == 1  # merged onto the one metric row, not a separate row
+    m = rows[0]["metrics"]
+    assert m["dice"] == 0.9  # original metric preserved
+    assert m["likert_Alice"] == 4
+    assert m["likert_Bob"] == 3
+    assert m["qualitative_assessed"] is True
+    assert m["qualitative_blinded"] is True  # single blinded flag, not per-rater
+    assert rows[0].get("comparison_mode", "") != "Qualitative"
+
+
+def test_unassessed_metric_row_is_marked_qualitative_false():
+    mgr = ResultsManager()
+    mgr.add_row(_row(test_source="Limbus", test_organ="Prostate", metrics={"dice": 0.9}))
+    mgr.add_row(_row(test_source="Radformation", test_organ="Prostate", metrics={"dice": 0.8}))
+    _score(mgr, rater="Alice", score=4, blinded=True, source="Limbus", roi_number=2)
+    rows = mgr.rows()
+    by_src = {r["test_source_label"]: r["metrics"] for r in rows}
+    assert by_src["Limbus"]["qualitative_assessed"] is True
+    assert by_src["Radformation"]["qualitative_assessed"] is False  # not rated
+
+
+def test_qualitative_synthetic_row_when_no_metric_row():
+    mgr = ResultsManager()
+    _score(mgr, rater="Alice", score=4, blinded=False)
+    rows = mgr.rows()
+    assert len(rows) == 1
+    assert rows[0]["comparison_mode"] == "Qualitative"
+    assert rows[0]["metrics"]["likert_Alice"] == 4
+    assert rows[0]["metrics"]["qualitative_assessed"] is True
+    assert rows[0]["metrics"]["qualitative_blinded"] is False
+
+
+def test_qualitative_rerating_overwrites_in_place():
+    mgr = ResultsManager()
+    _score(mgr, rater="Alice", score=4, blinded=True)
+    _score(mgr, rater="Alice", score=2, blinded=False)  # Alice re-rates same contour
+    rows = mgr.rows()
+    assert len(rows) == 1
+    assert rows[0]["metrics"]["likert_Alice"] == 2
+    assert rows[0]["metrics"]["qualitative_blinded"] is False
+
+
+def test_qualitative_blinded_is_a_single_column():
+    mgr = ResultsManager()
+    _score(mgr, rater="Alice", score=4, blinded=True)
+    _score(mgr, rater="Bob", score=5, blinded=True)
+    cols = mgr.metric_columns()
+    assert cols.count("qualitative_blinded") == 1
+    assert "likert_Alice" in cols and "likert_Bob" in cols
+
+
+def test_qualitative_columns_sit_immediately_before_first_dose_column():
+    mgr = ResultsManager()
+    mgr.add_row(_row(metrics={"dice": 0.9, "dmin_gy": 10.0, "dmean_gy": 20.0}))
+    _score(mgr, rater="Alice", score=4, blinded=True)
+    cols = mgr.metric_columns()
+    dose_at = cols.index("dmin_gy")
+    assert cols.index("likert_Alice") < dose_at
+    assert cols.index("qualitative_assessed") < dose_at
+    assert cols.index("qualitative_blinded") < dose_at
+    # qualitative columns are the last thing before the dose block
+    assert cols[dose_at - 1] == "qualitative_blinded"
+
+
+def test_qualitative_column_labels():
+    assert metric_display_label("likert_Alice") == "Likert — Alice"
+    assert metric_display_label("qualitative_assessed") == "Qualitative"
+    assert metric_display_label("qualitative_blinded") == "Blinded"
+
+
+def test_qualitative_columns_appear_in_csv(tmp_path):
+    mgr = ResultsManager()
+    _score(mgr, rater="Alice", score=4, blinded=True)
+    out = tmp_path / "q.csv"
+    mgr.export_csv(out)
+    with out.open(encoding="utf-8") as f:
+        header = next(csv.reader(f))
+    assert "Likert — Alice" in header
+    assert "Qualitative" in header
+    assert "Blinded" in header
+
+
 # ---- ResultsManager ------------------------------------------------------
 
 

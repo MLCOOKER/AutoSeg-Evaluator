@@ -182,7 +182,7 @@ run in a QThread cleanly.
 
 ---
 
-## User-facing workflow (the five tabs)
+## User-facing workflow (the six tabs)
 
 ```
 1. Load Data           → 2. Build Consensus GT  → 3. Match Contours    → 4. Compute → 5. Results
@@ -335,7 +335,36 @@ to avoid stale ticks). Constituent RTSSes of a synthetic consensus get a
 "▸ in STAPLE consensus" suffix + explanatory tooltip; they remain
 selectable and draggable.
 
-### Tab 4 — Compute
+### Tab 4 — Qualitative Assessment (Optional)
+
+**File:** [`src/autoseg_evaluator/ui/tabs/qualitative.py`](../src/autoseg_evaluator/ui/tabs/qualitative.py)
+
+Qualitative (Likert) scoring of each matched contour on the 5-point MD Anderson
+scale (Baroudi et al., *Cancers* 2023), shown as a reference table in the tab.
+The rating **stack** is built from the Tab 3 drawer snapshot by
+`core/likert.build_rating_stack` — one item per contour.
+
+**Per-grader configuration** (chosen in a dialog when the grader is added, then
+fixed): *blinded* (one contour at a time, source hidden) vs *transparent* (every
+source for the organ shown with labels + per-source visibility toggles);
+*include GT*; and *randomize* (group-aware — all sources of an organ stay
+consecutive). Each grader gets their own order, scores and cursor.
+
+**Multiplanar viewer** (`ui/widgets/multiplanar_viewer.py`, `QGraphicsView`):
+axial / coronal / sagittal planes resliced from the CT (coronal & sagittal
+flipped superior-up), ctrl+scroll zoom, Level/Window sliders, contour outlines
+(`skimage.measure.find_contours`, cosmetic pens) with opacity + thickness, and
+an active-contour highlight. CT/mask loading reuses `core/masks` with a small
+per-patient cache; the card swipes (`QPropertyAnimation`) on each rating.
+
+While grading, **the other tabs are locked** (`assessmentLockChanged` →
+`QTabWidget.setTabEnabled(False)`) to prevent blinded-data leakage; an **Unlock**
+button leaves and keeps progress. Scores are emitted via `qualitativeScored` and
+stored in the Results tab as `likert_<grader>` + `qualitative_assessed` /
+`qualitative_blinded` columns. Graders, their fixed configs and all scores are
+saved in the session (schema v4) and re-emitted into Results on load.
+
+### Tab 5 — Compute
 
 **File:** [`src/autoseg_evaluator/ui/tabs/compute.py`](../src/autoseg_evaluator/ui/tabs/compute.py)
 
@@ -379,7 +408,7 @@ stuck/short). "Drawers complete" counts every drawer × patient
 evaluation, not deduped unique organs; the panel also shows the current
 patient / drawer / test / metric, elapsed, ETA, and error count.
 
-### Tab 5 — Results
+### Tab 6 — Results
 
 **File:** [`src/autoseg_evaluator/ui/tabs/results.py`](../src/autoseg_evaluator/ui/tabs/results.py)
 
@@ -393,7 +422,14 @@ end of the canonical block.
 coloured stripe along the bottom of each header section, keyed to the
 column's family — identifier (indigo), volumetric overlap (cyan),
 surface distance (orange), APL (yellow), volume + COM (green), STAPLE
-(pink), DVH (purple). Tooltip names the band on hover.
+(pink), qualitative/Likert (brown), DVH (purple). Tooltip names the band
+on hover.
+
+**Qualitative (Likert) columns (v2.6.0):** `likert_<grader>` scores plus
+`Qualitative` (assessed yes/no) and `Blinded` flags. They are stored
+against the contour and **overlaid onto its existing metric row** at read
+time (so each contour stays one row), positioned immediately before the
+first dose column.
 
 **Tolerance values in headers:** Surface Dice / APL columns read e.g.
 `Surface Dice @ 3.00 mm`, `Mean APL @ 3.00 mm`, `Total APL @ 3.00 mm`
@@ -863,14 +899,17 @@ loop AND the per-rater-pair inner loop). Results table:
 
 **File:** [`src/autoseg_evaluator/data/session.py`](../src/autoseg_evaluator/data/session.py)
 
-**Schema version: 3.** Past versions still load (missing fields default
-to empty); future versions are refused with a clear error.
+**Schema version: 4.** Past versions still load (missing fields default
+to empty); future versions are refused with a clear error. **v4** adds the
+`qualitative` block (graders, their fixed per-grader configs, and each
+grader's order / scores / cursor) so an in-progress qualitative run resumes
+and its scores re-populate the Results tab.
 
 **Top-level JSON shape:**
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "saved_at": "2026-05-25T14:30:00+00:00",
   "folder": "C:/path/to/cohort",
   "replacement_rules": [{"find": "...", "replace": "..."}],
@@ -904,7 +943,16 @@ to empty); future versions are refused with a clear error.
      "organs": [{"roi_number": 1, "roi_name": "Parotid_L",
                  "constituents": [{"sop_uid": "...", "roi_number": 5},
                                   {"sop_uid": "...", "roi_number": 8}]}]}
-  ]
+  ],
+  "qualitative": {
+    "started": true, "active_rater": "Alice",
+    "raters": ["Alice", "Bob"],
+    "rater_config": {"Alice": {"mode": "blinded", "include_gt": false,
+                               "randomize": true, "seed": 12345}},
+    "per_rater": {"Alice": {"order": ["HN1|Parotid_L|<sop>|12"],
+                            "scores": {"HN1|Parotid_L|<sop>|12": 4},
+                            "index": 1}}
+  }
 }
 ```
 
@@ -1205,6 +1253,15 @@ bumping `pyproject.toml` updates the window title bar and every other
   never enforceable; only the upper target (`target_fg_ratio_max`) is kept.
   STAPLE output is unchanged (still 55/55 bit-exact). Older `settings.json`
   files carrying the key still load — it is ignored.
+- **v2.5.3** — Transparent-background **application icon** refresh + a GUI
+  **screenshot** in the README.
+- **v2.6.0** — **Qualitative (Likert) assessment — new Tab 4** (Compute → 5,
+  Results → 6). Per-grader config (blinded/transparent, include-GT, randomize),
+  a `QGraphicsView` multiplanar viewer (axial/coronal/sagittal, zoom, W/L,
+  opacity, thickness), swipe navigation, tab-lock, multiple graders, and
+  session save/resume (**schema v4**). Scores overlay onto the contour's
+  Results row as `likert_<grader>` + `Qualitative` / `Blinded` columns. Also a
+  **dose-overlay colour wash** in the Tab-3 slice viewer (`core/dose.py`).
 
 ### Pending features
 - **Docs**: full user guide, hospital deployment doc, metrics reference,
@@ -1265,12 +1322,14 @@ bumping `pyproject.toml` updates the window title bar and every other
 
 ---
 
-*Document version 5 — updated 2026-06-17 against v2.5.2.
+*Document version 6 — updated 2026-06-18 against v2.6.0.
 Tracks: portable bundle + CI/release pipeline (v2.1), `D at volume (cc)`
 DVH input + window-title fix (v2.2), template source-label match +
 expanded Manage Source Labels columns (v2.3), the Tab 2 multi-observer
 consensus redesign + STAPLE result-row parity (v2.4.0), STAPLE/DVH
 empirical validation + DVH Δ-vs-GT + single-slice DVH + bundle/progress
 fixes (v2.4.1), truncation-aware DVH (v2.4.2), application icon + splash +
-icon'd launchers (v2.5.0), sub-dose-grid DVH recovery (v2.5.1), and removal
-of the inert STAPLE `target_fg_ratio_min` parameter (v2.5.2).*
+icon'd launchers (v2.5.0), sub-dose-grid DVH recovery (v2.5.1), removal
+of the inert STAPLE `target_fg_ratio_min` parameter (v2.5.2), icon refresh
++ README screenshot (v2.5.3), and the qualitative (Likert) assessment tab +
+dose overlay (v2.6.0).*
