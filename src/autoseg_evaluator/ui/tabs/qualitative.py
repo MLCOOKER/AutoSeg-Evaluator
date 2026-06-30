@@ -572,7 +572,9 @@ class QualitativeTab(QWidget):
         idx = raters.index(rater) if rater in raters else -1
         if 0 <= idx < len(raters) - 1:
             nxt = raters[idx + 1]
-            QMessageBox.information(self, "Grader complete", f"{rater} has finished. Starting {nxt}.")
+            QMessageBox.information(
+                self, "Grader complete", f"{rater} has finished. Starting {nxt}."
+            )
             self._ensure_rater_built(nxt)
             self._active_rater = nxt
             self._enter_assessment()
@@ -635,7 +637,9 @@ class QualitativeTab(QWidget):
             if mask is None:
                 continue
             color = (
-                GT_COLOR if it.is_gt else color_for_index(self._source_color.get(it.source_label, 0))
+                GT_COLOR
+                if it.is_gt
+                else color_for_index(self._source_color.get(it.source_label, 0))
             )
             label = "ground truth" if it.is_gt else it.source_label
             overlays.append(

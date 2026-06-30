@@ -37,13 +37,25 @@ def _drawers():
             "patients": [
                 {
                     "patient_id": "P1",
-                    "gt": {"rtstruct_sop_uid": "gt1", "source_label": "Manual",
-                           "roi_number": 1, "roi_name": "Brainstem"},
+                    "gt": {
+                        "rtstruct_sop_uid": "gt1",
+                        "source_label": "Manual",
+                        "roi_number": 1,
+                        "roi_name": "Brainstem",
+                    },
                     "tests": [
-                        {"rtstruct_sop_uid": "a1", "source_label": "VendorA",
-                         "organ_name": "Brainstem", "roi_number": 5},
-                        {"rtstruct_sop_uid": "b1", "source_label": "VendorB",
-                         "organ_name": "Brainstem", "roi_number": 9},
+                        {
+                            "rtstruct_sop_uid": "a1",
+                            "source_label": "VendorA",
+                            "organ_name": "Brainstem",
+                            "roi_number": 5,
+                        },
+                        {
+                            "rtstruct_sop_uid": "b1",
+                            "source_label": "VendorB",
+                            "organ_name": "Brainstem",
+                            "roi_number": 9,
+                        },
                     ],
                 }
             ],

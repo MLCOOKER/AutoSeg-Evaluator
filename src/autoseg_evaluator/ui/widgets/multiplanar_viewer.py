@@ -320,9 +320,7 @@ class MultiPlanarViewer(QWidget):
         self._render()
 
     def _on_slice_step(self, delta: int) -> None:
-        self._slice_slider.setValue(
-            max(0, min(self._slice_slider.maximum(), self._slice + delta))
-        )
+        self._slice_slider.setValue(max(0, min(self._slice_slider.maximum(), self._slice + delta)))
 
     def _configure_wl_sliders(self) -> None:
         """Set the level/window slider ranges from the current volume."""
@@ -413,8 +411,11 @@ class MultiPlanarViewer(QWidget):
             pen = QPen(QColor(ov.color), width)
             pen.setCosmetic(True)  # constant device-pixel width regardless of zoom
             item.setPen(pen)
-            item.setOpacity(self._opacity if ov.active or not _any_active(self._overlays) else
-                            self._opacity * 0.55)
+            item.setOpacity(
+                self._opacity
+                if ov.active or not _any_active(self._overlays)
+                else self._opacity * 0.55
+            )
 
 
 def _any_active(overlays: list[Overlay]) -> bool:
