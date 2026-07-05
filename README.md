@@ -50,7 +50,7 @@ command-line or coding expertise.
 - **Qualitative (Likert) assessment**: score each contour on the 5-point
   MD Anderson scale through a fast review UI — a multiplanar viewer (axial /
   coronal / sagittal, zoom, window/level, contour opacity + thickness),
-  tinder-style swipe, per-grader configuration (blinded vs transparent,
+  per-grader configuration (blinded vs transparent,
   include-GT, randomize), multiple graders, and session resume. Scores land in
   per-grader `Likert` columns in the Results table.
 - **Dose overlay**: when an RT Dose is loaded, the contour visualiser can
