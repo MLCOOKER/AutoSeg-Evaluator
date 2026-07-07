@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, QThread
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -75,8 +75,11 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(_wrap_scroll(self._load_tab), "1. Load Data")
         self._tabs.addTab(_wrap_scroll(self._consensus_tab), "2. Build Consensus GT (Optional)")
         self._tabs.addTab(_wrap_scroll(self._match_tab), "3. Match Contours")
-        # Not scroll-wrapped: the multiplanar viewer should fill the tab area.
-        self._qual_page = self._qualitative_tab
+        # Scroll-wrapped like the other tabs so the window can always shrink to
+        # fit a small screen (the viewer still fills the viewport via
+        # setWidgetResizable; scrollbars appear only when the window is smaller
+        # than the tab's minimum content size).
+        self._qual_page = _wrap_scroll(self._qualitative_tab)
         self._tabs.addTab(self._qual_page, "4. Qualitative Assessment")
         self._tabs.addTab(_wrap_scroll(self._compute_tab), "5. Compute")
         self._tabs.addTab(_wrap_scroll(self._results_tab), "6. Results")
@@ -479,8 +482,26 @@ class MainWindow(QMainWindow):
 
     def _restore_geometry(self) -> None:
         win = self._settings.get("window", {})
-        self.resize(int(win.get("width", 1400)), int(win.get("height", 900)))
-        self.move(int(win.get("x", 100)), int(win.get("y", 100)))
+        width = int(win.get("width", 1400))
+        height = int(win.get("height", 900))
+        x = int(win.get("x", 100))
+        y = int(win.get("y", 100))
+
+        # Clamp to the screen's available work area (excludes the macOS menu
+        # bar / Dock and the Windows taskbar) so the window never opens larger
+        # than the display or off-screen. A saved size/position from a bigger
+        # monitor — or the 1400×900 default on a small laptop — would otherwise
+        # run past the edge; on macOS you then can't drag the title bar out from
+        # under the menu bar to recover it.
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            width, height, x, y = _clamp_to_available(
+                width, height, x, y, (geo.x(), geo.y(), geo.width(), geo.height())
+            )
+
+        self.resize(width, height)
+        self.move(x, y)
         if win.get("maximized"):
             self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
 
@@ -495,6 +516,22 @@ class MainWindow(QMainWindow):
         self._settings["active_tab"] = self._tabs.currentIndex()
         save_settings(self._settings)
         super().closeEvent(event)
+
+
+def _clamp_to_available(
+    width: int, height: int, x: int, y: int, avail: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    """Clamp a window rect to a screen's available ``(x, y, w, h)`` work area.
+
+    Caps the size to the work area and shifts the position so the whole window
+    stays on-screen. Pure (no Qt) so it can be unit-tested.
+    """
+    ax, ay, aw, ah = avail
+    width = min(width, aw)
+    height = min(height, ah)
+    x = min(max(x, ax), ax + aw - width)
+    y = min(max(y, ay), ay + ah - height)
+    return width, height, x, y
 
 
 def _wrap_scroll(widget: QWidget) -> QScrollArea:

@@ -4,6 +4,17 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] — 2026-06-30
+
+### Fixed
+- **Window fits any screen on macOS / Linux.** The main window is now clamped
+  to the display's available work area on startup — its size is capped to the
+  screen and its position pulled fully on-screen — so it no longer opens larger
+  than a laptop display or off-screen where the title bar sits under the macOS
+  menu bar (and couldn't be dragged back). The **Qualitative Assessment** tab is
+  also scroll-wrapped like every other tab, so the window can always be resized
+  smaller to fit. Behaviour now matches Windows.
+
 ## [2.6.0] — 2026-06-18
 
 ### Added
