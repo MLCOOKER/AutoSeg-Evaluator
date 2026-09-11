@@ -1,0 +1,56 @@
+AutoSeg Evaluator
+Copyright 2025-2026 Branimir Rusanov
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software derived from third-party open-source projects.
+
+================================================================================
+dcmrtstruct2nii
+================================================================================
+`autoseg_evaluator.core.masks._rasterise_roi_continuous` is ADAPTED FROM
+`DcmPatientCoords2Mask.convert` in dcmrtstruct2nii v5
+(https://github.com/Sikerdebaard/dcmrtstruct2nii, Zenodo DOI
+10.5281/zenodo.4037864). It is not the upstream converter and does not run the
+upstream package.
+
+Idea taken from upstream: transform contour vertices to CONTINUOUS (sub-voxel)
+image-index coordinates before polygon filling, rather than snapping them to
+integer voxel indices first.
+
+Modifications made in this project:
+  * Out-of-range slice indices are skipped. Upstream indexes the array with a
+    rounded z, so a negative z silently writes into the LAST slice.
+  * Contour planarity is checked in continuous index space against a tolerance;
+    a non-planar contour aborts the ROI rather than being flattened onto the
+    first vertex's slice.
+  * An ROI containing any unsupported ContourGeometricType (e.g. the standard
+    CLOSEDPLANAR_XOR) returns None rather than an all-background mask, so it is
+    reported as a failed conversion instead of a zero-volume structure.
+  * The reference image's spacing/origin/direction are restored on the result
+    (upstream's engine drops them and repairs this in its facade).
+  * The per-vertex coordinate transform is vectorised with NumPy.
+
+Upstream licence, reproduced in full as required:
+
+MIT License
+
+Copyright (c) 2022 Thomas Phil
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

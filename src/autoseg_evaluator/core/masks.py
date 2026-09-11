@@ -1,12 +1,24 @@
 """DICOM I/O and RTSTRUCT → binary-mask conversion.
 
-This is a port of the PlatiPy-derived ``transform_point_set_from_dicom_struct``
-embedded in AutoSeg Evaluator v1, plus thin wrappers around SimpleITK and
-pydicom for loading CT/MR/PT image series and RTSTRUCT files.
+Two rasteriser backends are available, selectable per call, via
+:func:`set_default_rasteriser`, or via the ``AUTOSEG_RASTERISER`` env var:
 
-All functions return SimpleITK images that share spacing/origin/orientation
-with the reference image, so downstream surface-distance code can operate
-on them with the correct physical-units spacing.
+``legacy`` (default)
+    The PlatiPy-derived ``transform_point_set_from_dicom_struct`` port from
+    AutoSeg Evaluator v1. Transforms each contour vertex with
+    ``TransformPhysicalPointToIndex`` — i.e. every vertex is **snapped to the
+    voxel grid before rasterising**.
+
+``continuous``
+    Derived from dcmrtstruct2nii's ``DcmPatientCoords2Mask`` (MIT, see
+    ``_rasterise_roi_continuous``). Transforms vertices to **continuous**
+    (sub-voxel) index coordinates before filling, which avoids the
+    quantisation above. Adapted rather than copied — see that function's
+    docstring for the deliberate deviations from upstream.
+
+Both share the same public API and both return SimpleITK images that carry the
+reference image's spacing/origin/direction, so downstream surface-distance code
+operates in correct physical units.
 """
 
 from __future__ import annotations
@@ -18,6 +30,79 @@ import numpy as np
 import pydicom
 import SimpleITK as sitk
 from skimage.draw import polygon
+
+# ---- Rasteriser backend selection ----------------------------------------
+
+RASTERISER_LEGACY = "legacy"
+RASTERISER_CONTINUOUS = "continuous"
+RASTERISERS = (RASTERISER_LEGACY, RASTERISER_CONTINUOUS)
+
+# Contour geometric types the continuous backend will rasterise. Anything else
+# (notably the standard ``CLOSEDPLANAR_XOR``, and ``POINT`` / ``OPEN_*``)
+# yields ``None`` — never an empty mask, which downstream code would otherwise
+# treat as a real zero-volume structure instead of a failed conversion.
+SUPPORTED_GEOMETRY = frozenset({"CLOSED_PLANAR", "INTERPOLATED_PLANAR"})
+
+# A contour whose vertices span more than this many voxels in the through-plane
+# index direction is not planar in *image* space and is not reconstructable by
+# single-slice filling. Checked in continuous index space, so a contour on an
+# obliquely-oriented image (varying patient-space z, constant index z) passes.
+PLANARITY_TOLERANCE_VOXELS = 0.5
+
+
+def _rasteriser_from_env() -> str:
+    name = os.environ.get("AUTOSEG_RASTERISER", RASTERISER_LEGACY).strip().lower()
+    return name if name in RASTERISERS else RASTERISER_LEGACY
+
+
+_default_rasteriser = _rasteriser_from_env()
+
+
+def set_default_rasteriser(name: str) -> None:
+    """Select the backend used when a call doesn't pass ``backend=``."""
+    global _default_rasteriser
+    if name not in RASTERISERS:
+        raise ValueError(f"Unknown rasteriser {name!r}; expected one of {RASTERISERS}.")
+    _default_rasteriser = name
+
+
+def get_default_rasteriser() -> str:
+    return _default_rasteriser
+
+
+def physical_points_to_continuous_index(
+    dicom_image: sitk.Image, pts_physical: np.ndarray
+) -> np.ndarray:
+    """Vectorised ``TransformPhysicalPointToContinuousIndex`` for an ``(N, 3)`` array.
+
+    SimpleITK maps index → physical as ``p = origin + D · (index * spacing)``,
+    so the inverse is ``index = D⁻¹ · (p − origin) / spacing``. Doing that as a
+    single NumPy matmul replaces N per-vertex SimpleITK calls, which is the
+    dominant per-contour cost in both backends.
+
+    Returns continuous ``(x, y, z)`` index coordinates, matching SimpleITK's
+    index ordering (not NumPy's ``(z, y, x)``).
+    """
+    return _apply_index_transform(
+        np.asarray(pts_physical, dtype=np.float64), _index_transform(dicom_image)
+    )
+
+
+def _index_transform(dicom_image: sitk.Image):
+    """Precompute ``(origin, spacing, inverse-direction)`` for the mapping above.
+
+    Hoisted out of the per-contour loop so an ROI inverts its direction matrix
+    once rather than once per contour.
+    """
+    origin = np.asarray(dicom_image.GetOrigin(), dtype=np.float64)
+    spacing = np.asarray(dicom_image.GetSpacing(), dtype=np.float64)
+    direction = np.asarray(dicom_image.GetDirection(), dtype=np.float64).reshape(3, 3)
+    return origin, spacing, np.linalg.inv(direction)
+
+
+def _apply_index_transform(pts_physical: np.ndarray, transform) -> np.ndarray:
+    origin, spacing, inv_direction = transform
+    return ((pts_physical - origin) @ inv_direction.T) / spacing
 
 
 def read_dicom_image(folder: str) -> sitk.Image:
@@ -38,15 +123,24 @@ def extract_mask_for_roi(
     rtstruct_ds: pydicom.Dataset,
     roi_number: int,
     spacing_override: Iterable[float] | None = None,
+    *,
+    backend: str | None = None,
 ) -> sitk.Image | None:
     """Rasterise a specific ROI from an RTSTRUCT into a binary SimpleITK mask.
 
-    Returns ``None`` if the ROI is missing, has no contours, or only contains
-    non-CLOSED_PLANAR contour geometry. The returned image shares spacing /
-    origin / direction with ``dicom_image``.
+    Returns ``None`` if the ROI is missing, has no contours, carries an
+    unsupported contour geometric type, or is not planar in image space. The
+    returned image shares spacing / origin / direction with ``dicom_image``.
+
+    ``backend`` selects the rasteriser (see the module docstring); ``None``
+    uses :func:`get_default_rasteriser`.
     """
     masks, names_to_roi_number = _rtstruct_to_masks(
-        dicom_image, rtstruct_ds, spacing_override=spacing_override, only_roi_number=roi_number
+        dicom_image,
+        rtstruct_ds,
+        spacing_override=spacing_override,
+        only_roi_number=roi_number,
+        backend=backend,
     )
     if not masks:
         return None
@@ -58,9 +152,13 @@ def rtstruct_to_all_masks(
     dicom_image: sitk.Image,
     rtstruct_ds: pydicom.Dataset,
     spacing_override: Iterable[float] | None = None,
+    *,
+    backend: str | None = None,
 ) -> tuple[list[sitk.Image], list[str]]:
     """Rasterise every ROI in the RTSTRUCT to a list of binary masks + names."""
-    return _rtstruct_to_masks(dicom_image, rtstruct_ds, spacing_override=spacing_override)
+    return _rtstruct_to_masks(
+        dicom_image, rtstruct_ds, spacing_override=spacing_override, backend=backend
+    )
 
 
 def _rtstruct_to_masks(
@@ -69,8 +167,14 @@ def _rtstruct_to_masks(
     *,
     spacing_override: Iterable[float] | None = None,
     only_roi_number: int | None = None,
+    backend: str | None = None,
 ) -> tuple[list[sitk.Image], list[str]]:
-    """Internal mask rasteriser — the v1 port, with optional ROI-number filter."""
+    """Internal mask rasteriser — dispatches per ROI to the selected backend."""
+    rasterise = (
+        _rasterise_roi_continuous
+        if (backend or _default_rasteriser) == RASTERISER_CONTINUOUS
+        else _rasterise_roi_legacy
+    )
     if spacing_override:
         current = list(dicom_image.GetSpacing())
         new = tuple(
@@ -97,39 +201,109 @@ def _rtstruct_to_masks(
             continue
         if len(roi_contours.ContourSequence) == 0:
             continue
-        # Only CLOSED_PLANAR contour geometry is supported (matches v1 behaviour).
-        if roi_contours.ContourSequence[0].ContourGeometricType != "CLOSED_PLANAR":
+        volume = rasterise(dicom_image, roi_contours)
+        if volume is None:
             continue
 
-        image_blank = np.zeros(dicom_image.GetSize()[::-1], dtype=np.uint8)
         struct_name = "_".join(str(struct_ds.ROIName).split())
-        skip = False
-        for sl in range(len(roi_contours.ContourSequence)):
-            contour_data = np.array(roi_contours.ContourSequence[sl].ContourData, dtype=np.double)
-            pts_physical = contour_data.reshape(contour_data.shape[0] // 3, 3)
-            pts_index = np.array(
-                [dicom_image.TransformPhysicalPointToIndex(p) for p in pts_physical]
-            ).T
-            x_arr, y_arr = pts_index[[0, 1]]
-            z_index = pts_index[2][0]
-            if np.any(pts_index[2] != z_index):
-                # Out-of-plane contour — abort this ROI (matches v1)
-                skip = True
-                break
-            if z_index >= dicom_image.GetSize()[2] or z_index < 0:
-                continue
-            slice_arr = np.zeros(image_blank.shape[-2:], dtype=np.uint8)
-            rr, cc = polygon(x_arr, y_arr, shape=slice_arr.shape)
-            slice_arr[cc, rr] = 1
-            # XOR combines stacked polygons → produces holes for donut shapes (e.g. rectum)
-            image_blank[z_index] ^= slice_arr
-        if skip:
-            continue
-        si = sitk.GetImageFromArray((image_blank > 0).astype(np.uint8))
+        si = sitk.GetImageFromArray(volume.astype(np.uint8))
+        # Restore the reference geometry. Upstream's engine drops it at this
+        # point and repairs it in its facade, so lifting the engine alone would
+        # silently yield unit-spacing masks at origin 0.
         si.CopyInformation(dicom_image)
         out_masks.append(sitk.Cast(si, sitk.sitkUInt8))
         out_names.append(struct_name)
     return out_masks, out_names
+
+
+def _rasterise_roi_legacy(
+    dicom_image: sitk.Image, roi_contours: pydicom.Dataset
+) -> np.ndarray | None:
+    """v1 / PlatiPy-derived backend: vertices snapped to integer voxel indices.
+
+    Returns a ``(z, y, x)`` boolean volume, or ``None`` when the ROI should be
+    dropped (unsupported geometry, or a contour that isn't planar in image
+    space). Behaviour is byte-for-byte the historical one — it still backs
+    ``tests/test_platipy_equivalence.py``.
+    """
+    if str(getattr(roi_contours.ContourSequence[0], "ContourGeometricType", "")) != "CLOSED_PLANAR":
+        return None
+
+    size_z = dicom_image.GetSize()[2]
+    image_blank = np.zeros(dicom_image.GetSize()[::-1], dtype=np.uint8)
+    for sl in range(len(roi_contours.ContourSequence)):
+        contour_data = np.array(roi_contours.ContourSequence[sl].ContourData, dtype=np.double)
+        pts_physical = contour_data.reshape(contour_data.shape[0] // 3, 3)
+        pts_index = np.array([dicom_image.TransformPhysicalPointToIndex(p) for p in pts_physical]).T
+        x_arr, y_arr = pts_index[[0, 1]]
+        z_index = pts_index[2][0]
+        if np.any(pts_index[2] != z_index):
+            return None  # out-of-plane contour — abort this ROI (matches v1)
+        if z_index >= size_z or z_index < 0:
+            continue
+        slice_arr = np.zeros(image_blank.shape[-2:], dtype=np.uint8)
+        rr, cc = polygon(x_arr, y_arr, shape=slice_arr.shape)
+        slice_arr[cc, rr] = 1
+        # XOR combines stacked polygons → produces holes for donut shapes (e.g. rectum)
+        image_blank[z_index] ^= slice_arr
+    return image_blank > 0
+
+
+def _rasterise_roi_continuous(
+    dicom_image: sitk.Image, roi_contours: pydicom.Dataset
+) -> np.ndarray | None:
+    """Continuous-coordinate backend, adapted from dcmrtstruct2nii.
+
+    Derived from ``DcmPatientCoords2Mask.convert`` in dcmrtstruct2nii v5
+    (MIT, Copyright (c) 2022 Thomas Phil) — see ``NOTICE`` for the full
+    licence text. The substantive idea taken from upstream is transforming
+    vertices to **continuous** index coordinates before filling, instead of
+    snapping them to the voxel grid first.
+
+    Deliberate deviations from upstream, all of which make it stricter:
+
+    * **Bounds.** Upstream computes ``z = round(...)`` and indexes straight
+      into the array, so a contour just below the volume gives ``z = -1`` and
+      NumPy silently paints the **last** slice. Out-of-range slices are skipped
+      here instead.
+    * **Planarity.** Upstream takes the first vertex's slice and flattens the
+      contour onto it. A contour spanning more than
+      ``PLANARITY_TOLERANCE_VOXELS`` in index space aborts the ROI here, as in
+      the legacy backend.
+    * **Geometry types.** Upstream skips unsupported contours individually and
+      can therefore return an all-background mask, which downstream code would
+      read as a genuine zero-volume structure. Here an ROI containing any
+      unsupported type (e.g. the standard ``CLOSEDPLANAR_XOR``) returns
+      ``None`` so it surfaces as a failed conversion.
+    * **Geometry metadata** is restored by the caller (see above).
+    """
+    sequence = roi_contours.ContourSequence
+    types = {str(getattr(c, "ContourGeometricType", "")).upper() for c in sequence}
+    if not types or not types <= SUPPORTED_GEOMETRY:
+        return None
+
+    size_x, size_y, size_z = dicom_image.GetSize()
+    volume = np.zeros((size_z, size_y, size_x), dtype=bool)
+    transform = _index_transform(dicom_image)  # invert the direction matrix once
+    for contour in sequence:
+        data = np.asarray(getattr(contour, "ContourData", []), dtype=np.float64)
+        if data.size < 9:  # fewer than three vertices — nothing to fill
+            continue
+        idx = _apply_index_transform(data.reshape(-1, 3), transform)
+
+        z_continuous = idx[:, 2]
+        if float(z_continuous.max() - z_continuous.min()) > PLANARITY_TOLERANCE_VOXELS:
+            return None
+        z = int(round(float(z_continuous[0])))
+        if z < 0 or z >= size_z:
+            continue
+
+        # polygon() takes (row, col) == (y, x); clipping uses the real row/col
+        # extents. Filling at float precision is the whole point of this backend.
+        rr, cc = polygon(idx[:, 1], idx[:, 0], shape=(size_y, size_x))
+        if rr.size:
+            volume[z][rr, cc] ^= True
+    return volume
 
 
 def truncate_to_gt_z_extent(
