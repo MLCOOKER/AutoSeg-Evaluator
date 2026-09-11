@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pydicom
 import SimpleITK as sitk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -39,6 +40,24 @@ from autoseg_evaluator.core.masks import (  # noqa: E402
 )
 
 COMPARABLE = ("IDENTICAL", "DIFFERS")
+
+
+def find_rtstructs(folder: Path) -> list[Path]:
+    """Every RTSTRUCT in ``folder``, identified by DICOM Modality.
+
+    Filename globbing misses vendor exports that don't follow the ``RS*.dcm``
+    convention (``limbus_*.dcm``, ``MVision.dcm``, …), which is exactly the
+    multi-vendor case this comparison needs.
+    """
+    found: list[Path] = []
+    for path in sorted(folder.glob("*.dcm")):
+        try:
+            ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
+        except Exception:  # noqa: BLE001 — unreadable file is simply not an RTSS
+            continue
+        if str(getattr(ds, "Modality", "")).upper() == "RTSTRUCT":
+            found.append(path)
+    return found
 
 
 def _voxel_volume_cc(image: sitk.Image) -> float:
@@ -169,24 +188,29 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # A cp1252 Windows console must not be able to kill a finished run.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+
     folder: Path = args.data
     if not folder.is_dir():
         print(f"Data folder does not exist: {folder}", file=sys.stderr)
         return 2
 
-    print(f"Loading CT series from {folder} …")
+    print(f"Loading CT series from {folder} ...")
     image = read_dicom_image(str(folder))
     print(f"  CT: size {image.GetSize()}, spacing {tuple(round(s, 3) for s in image.GetSpacing())}")
 
-    rtss_paths = sorted(folder.glob("RS*.dcm")) + sorted(folder.glob("RTSTRUCT*.dcm"))
+    rtss_paths = find_rtstructs(folder)
     if not rtss_paths:
         print(f"No RTSTRUCT files found in {folder}", file=sys.stderr)
         return 2
+    print(f"  found {len(rtss_paths)} RTSTRUCT(s)")
 
     rows: list[dict[str, Any]] = []
     for idx, path in enumerate(rtss_paths):
         label = f"RTSS {chr(ord('A') + idx)}"
-        print(f"  comparing {label} …")
+        print(f"  comparing {label} ...")
         rows.extend(compare_rtss(label, read_rtstruct(str(path)), image, args.repeat))
 
     compared = [r for r in rows if r["status"] in COMPARABLE]
@@ -194,7 +218,7 @@ def main() -> int:
     print(f"\n{identical} / {len(compared)} ROI masks voxel-identical between backends.")
     if compared:
         print(f"mean Dice {statistics.fmean(r['dice'] for r in compared):.5f}")
-        print(f"max |Δ volume| {max(abs(r['delta_cc']) for r in compared):.4f} cc")
+        print(f"max |delta volume| {max(abs(r['delta_cc']) for r in compared):.4f} cc")
     t_legacy = sum(r["t_legacy_ms"] for r in rows)
     t_cont = sum(r["t_continuous_ms"] for r in rows)
     if t_cont > 0:
