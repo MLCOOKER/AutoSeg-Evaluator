@@ -210,8 +210,15 @@ metrics, STAPLE consensus, and DVH dose statistics — produces bit-for-bit
 identical output to its upstream reference implementation on a clinical
 head-and-neck sample dataset:
 
-- **Mask rasterisation** — 110 / 110 ROIs voxel-identical to PlatiPy
-  0.7.2's `transform_point_set_from_dicom_struct`.
+- **Mask rasterisation** — the default `continuous` backend is voxel-identical
+  to dcmrtstruct2nii v5's `DcmPatientCoords2Mask` engine on supported input,
+  and measures the area of analytic disc phantoms to within ~2 % for structures
+  ≥10 voxels in radius. The opt-in `legacy` backend remains 110 / 110 ROIs
+  voxel-identical to PlatiPy 0.7.2's `transform_point_set_from_dicom_struct`.
+  Note that `legacy` snaps contour vertices to the voxel grid before filling
+  and therefore over-estimates volume by roughly `1.5 / R` (R = structure
+  radius in voxels) — ~3 % for large organs, >50 % for structures one to two
+  voxels across; see [`docs/RASTERISER_COMPARISON.md`](docs/RASTERISER_COMPARISON.md).
 - **Geometric metrics** — 63 / 63 ROI–metric comparisons (Dice, HD100,
   HD95, Surface Dice @ 3 mm, mean surface distance, total APL, mean APL)
   produce zero absolute difference vs `google-deepmind/surface-distance`

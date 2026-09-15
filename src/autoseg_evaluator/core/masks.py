@@ -3,18 +3,21 @@
 Two rasteriser backends are available, selectable per call, via
 :func:`set_default_rasteriser`, or via the ``AUTOSEG_RASTERISER`` env var:
 
-``legacy`` (default)
+``continuous`` (default)
+    Derived from dcmrtstruct2nii's ``DcmPatientCoords2Mask`` (MIT, see
+    ``_rasterise_roi_continuous``). Transforms vertices to **continuous**
+    (sub-voxel) index coordinates before filling. Adapted rather than copied —
+    see that function's docstring for the deliberate deviations from upstream.
+
+``legacy``
     The PlatiPy-derived ``transform_point_set_from_dicom_struct`` port from
     AutoSeg Evaluator v1. Transforms each contour vertex with
     ``TransformPhysicalPointToIndex`` — i.e. every vertex is **snapped to the
-    voxel grid before rasterising**.
-
-``continuous``
-    Derived from dcmrtstruct2nii's ``DcmPatientCoords2Mask`` (MIT, see
-    ``_rasterise_roi_continuous``). Transforms vertices to **continuous**
-    (sub-voxel) index coordinates before filling, which avoids the
-    quantisation above. Adapted rather than copied — see that function's
-    docstring for the deliberate deviations from upstream.
+    voxel grid before rasterising**. Retained for backwards comparison; it
+    over-estimates structure volume by roughly ``1.5 / R`` (R = structure
+    radius in voxels), from ~3 % for large organs to >50 % for structures one
+    to two voxels across, because snapping places the contour boundary exactly
+    on the sampling lattice and ties resolve as "inside".
 
 Both share the same public API and both return SimpleITK images that carry the
 reference image's spacing/origin/direction, so downstream surface-distance code
@@ -51,8 +54,8 @@ PLANARITY_TOLERANCE_VOXELS = 0.5
 
 
 def _rasteriser_from_env() -> str:
-    name = os.environ.get("AUTOSEG_RASTERISER", RASTERISER_LEGACY).strip().lower()
-    return name if name in RASTERISERS else RASTERISER_LEGACY
+    name = os.environ.get("AUTOSEG_RASTERISER", RASTERISER_CONTINUOUS).strip().lower()
+    return name if name in RASTERISERS else RASTERISER_CONTINUOUS
 
 
 _default_rasteriser = _rasteriser_from_env()

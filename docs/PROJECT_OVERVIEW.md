@@ -550,22 +550,49 @@ TG-263 (blue) from fuzzy (amber) matches in the Tab 3 drawers.
 
 **File:** [`src/autoseg_evaluator/core/masks.py`](../src/autoseg_evaluator/core/masks.py)
 
-**Algorithm** (PlatiPy-derived; matches `rt-utils` and `dcmrtstruct2nii`):
+**Two selectable backends:** per call via `backend=`, process-wide via
+`set_default_rasteriser()`, or with the `AUTOSEG_RASTERISER` env var.
 
-1. For each slice's `ContourData`:
-   - Reshape physical points to `(N, 3)`.
-   - Use `dicom_image.TransformPhysicalPointToIndex` to map physical →
-     voxel coordinates.
-   - Verify all points share the same Z index (skip ROI otherwise).
-2. Rasterise the 2D polygon via `skimage.draw.polygon`.
-3. **XOR** the slice mask into the running 3D mask (handles donut shapes
+1. For each contour's `ContourData`, reshape physical points to `(N, 3)` and
+   map physical → voxel coordinates. **This step is the only difference
+   between the backends:**
+   - `continuous` (**default**) — `TransformPhysicalPointToContinuousIndex`,
+     preserving sub-voxel position. Derived from dcmrtstruct2nii v5's
+     `DcmPatientCoords2Mask` (MIT; see [`NOTICE`](../NOTICE) for the licence
+     and the list of local modifications). The transform is vectorised as a
+     single NumPy matmul (`physical_points_to_continuous_index`).
+   - `legacy` — `TransformPhysicalPointToIndex`, snapping every vertex to the
+     nearest voxel centre. The original PlatiPy-derived port.
+2. Verify the contour is planar in *image* space (continuous backend: within
+   `PLANARITY_TOLERANCE_VOXELS`; legacy: identical integer Z), else drop the ROI.
+3. Rasterise the 2D polygon via `skimage.draw.polygon` — **identical in both
+   backends** (`polygon2mask`, which dcmrtstruct2nii calls, is a thin wrapper
+   around it).
+4. **XOR** the slice mask into the running 3D mask (handles donut shapes
    like rectum lumen / spinal canal).
-4. Output a binary `sitk.Image` that shares spacing / origin / direction
+5. Output a binary `sitk.Image` that shares spacing / origin / direction
    with the reference image.
 
-**Limitation acknowledged in the implementation:** only `CLOSED_PLANAR`
-contour geometry is supported (matches v1, PlatiPy). `POINT` and
-`OPEN_PLANAR` ROIs are skipped.
+**Why the default changed.** The fill rule includes a voxel when its *centre*
+lies inside the polygon — equivalent to ">50 % of the voxel covered" for a
+locally straight boundary. Snapping vertices first places the contour boundary
+exactly on the sampling lattice, the degenerate case where that test is
+ambiguous; ties resolve as "inside", so every voxel the boundary touches is
+filled. The result is a systematic one-directional dilation of ~0.76 voxels
+around the perimeter, i.e. a relative volume over-estimate of ~`1.5 / R`
+(R = radius in voxels): ~3 % for large organs, >50 % for structures one to two
+voxels across. Measured against analytic disc phantoms the continuous backend
+is within ~2 % for R ≥ 10 while legacy is +13.6 %; across 357 HN1 ROIs legacy
+was larger in **every** case. See
+[`docs/RASTERISER_COMPARISON.md`](RASTERISER_COMPARISON.md) and
+`scripts/compare_rasterisers.py`.
+
+**Supported contour geometry:** `legacy` accepts only `CLOSED_PLANAR` (judged
+from the first contour in the ROI). `continuous` accepts `CLOSED_PLANAR` and
+`INTERPOLATED_PLANAR`, checked per contour, and returns `None` for any ROI
+containing an unsupported type (including the standard `CLOSEDPLANAR_XOR`) so
+it surfaces as a failed conversion rather than a zero-volume structure. On the
+HN1 multi-vendor set both backends converted exactly the same 357 of 389 ROIs.
 
 **Truncation** (`truncate_to_gt_z_extent`): zeroes out test-mask slices
 that fall outside the GT's craniocaudal extent. Returns the truncated

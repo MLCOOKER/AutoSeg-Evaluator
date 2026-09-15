@@ -181,9 +181,9 @@ def test_unknown_backend_rejected():
         m.set_default_rasteriser("nope")
 
 
-def test_default_backend_is_legacy():
-    """Legacy stays the default on this branch so existing validation holds."""
-    assert m.get_default_rasteriser() == m.RASTERISER_LEGACY
+def test_default_backend_is_continuous():
+    """The sub-voxel backend is the shipped default; legacy is opt-in."""
+    assert m.get_default_rasteriser() == m.RASTERISER_CONTINUOUS
 
 
 def test_backends_broadly_agree_on_an_axis_aligned_square():

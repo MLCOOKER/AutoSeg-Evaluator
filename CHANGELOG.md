@@ -4,6 +4,45 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **The sub-voxel (`continuous`) mask rasteriser is now the default.**
+  ⚠️ **This changes numerical output.** Every mask-derived metric moves —
+  volume, Dice, Hausdorff, MSD, Surface Dice, APL, centre-of-mass, STAPLE, and
+  truncated DVH (whose craniocaudal window is derived from the GT mask).
+  Results produced before and after this change are not directly comparable.
+
+  The previous behaviour transformed contour vertices with
+  `TransformPhysicalPointToIndex`, snapping each one to the nearest voxel
+  centre *before* filling. That places the contour boundary exactly on the
+  sampling lattice — the degenerate case for the point-in-polygon fill — and
+  ties resolve as "inside", so every voxel the boundary touches is filled. The
+  effect is a systematic, one-directional dilation of ~0.76 voxels around the
+  perimeter: a volume over-estimate of roughly `1.5 / R` (R = structure radius
+  in voxels), from ~3 % on large organs to >50 % on structures one to two
+  voxels across. Against analytic disc phantoms the old path measured +13.6 %
+  at R=10 and +55.6 % at R=1.5; the new path is within ~2 % for R ≥ 10.
+  Across 357 ROIs from 7 vendor RTSSes in the HN1 sample set, the old path
+  produced a larger volume in **every single case**.
+
+  The old behaviour is preserved as the opt-in `legacy` backend — selectable
+  per call (`backend=`), process-wide (`set_default_rasteriser()`), or via the
+  `AUTOSEG_RASTERISER` environment variable — and is still pinned as 110/110
+  voxel-identical to PlatiPy 0.7.2 by `tests/test_platipy_equivalence.py`.
+  Case coverage is unchanged: on the HN1 set both backends converted exactly
+  the same 357 of 389 ROIs.
+
+### Added
+- `scripts/compare_rasterisers.py` + `docs/RASTERISER_COMPARISON.md` —
+  quantifies per-ROI agreement and runtime between the two backends on a real
+  cohort (PHI-safe report). RTSTRUCTs are discovered by DICOM Modality rather
+  than filename, so vendor exports are no longer missed.
+- `NOTICE` — the continuous backend is adapted from dcmrtstruct2nii v5 (MIT);
+  full upstream licence plus an enumerated list of local modifications.
+- CI now installs `dcmrtstruct2nii` so the default backend's upstream
+  conformance test cannot silently skip.
+
 ## [2.6.1] — 2026-06-30
 
 ### Fixed

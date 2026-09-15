@@ -74,14 +74,17 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Install equivalence-test reference packages
-        # PlatiPy backs tests/test_platipy_equivalence.py (mask rasteriser)
-        # and the APL half of tests/test_metrics_equivalence.py.
+        # PlatiPy backs tests/test_platipy_equivalence.py (the legacy mask
+        # rasteriser) and the APL half of tests/test_metrics_equivalence.py.
         # google-deepmind/surface-distance backs the surface-distance half
         # of test_metrics_equivalence.py (Dice / HD / Surface Dice / MSD).
-        # Both are kept out of the main [dev] extras so contributors aren't
+        # dcmrtstruct2nii backs tests/test_rasteriser_backends.py, which pins
+        # the DEFAULT (continuous) rasteriser against its upstream engine —
+        # it must be installed here or that gate silently importorskips away.
+        # All are kept out of the main [dev] extras so contributors aren't
         # forced into vtk + pandas; the equivalence tests pytest.importorskip
         # themselves when these packages are absent.
-        run: python -m pip install "platipy>=0.7" surface-distance
+        run: python -m pip install "platipy>=0.7" surface-distance dcmrtstruct2nii
 
       - name: Run pytest
         run: python -m pytest -q
