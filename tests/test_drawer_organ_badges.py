@@ -160,3 +160,66 @@ def test_an_unknown_name_still_gets_a_badge(qapp, syn):
     drawer = _add_patient(tab, "Wibble_Xyz", "P1", "Wibble_Xyz")
     assert _badge(drawer)
     tab.deleteLater()
+
+
+def test_an_unrecognised_organ_is_marked_as_such(qapp, syn):
+    """A name the dictionary does not know must not look like one it does.
+
+    Reported from real use: a drawer whose ground truth was ``SubmanG_R`` — not
+    a name TG-263 carries — showed a confident ``Submang (R)``, which is simply
+    that name tidied up. It was reasonably read as successful identification,
+    and the consequence is not cosmetic: an unrecognised organ pools only with
+    drawers spelled the same way, and every match against it falls back to
+    string similarity.
+    """
+    lib = _FakeLibrary([("A", [("SubmanG_R", "ORGAN")])])
+    tab = MatchContoursTab()
+    tab.set_organ_index(build_organ_index(lib, synonyms_flat=syn))
+    drawer = _add_patient(tab, "SubmanG_R", "P1", "SubmanG_R")
+
+    assert _badge(drawer).startswith("?"), "an echoed name must be marked"
+    assert "not a name the TG-263 dictionary knows" in drawer._organ_badge.toolTip()
+    tab.deleteLater()
+
+
+def test_a_recognised_organ_is_not_marked(qapp, syn):
+    lib = _FakeLibrary([("A", [("Glnd_Submand_R", "ORGAN")])])
+    tab = MatchContoursTab()
+    tab.set_organ_index(build_organ_index(lib, synonyms_flat=syn))
+    drawer = _add_patient(tab, "Glnd_Submand_R", "P1", "Glnd_Submand_R")
+
+    assert not _badge(drawer).startswith("?")
+    assert "Submand" in _badge(drawer)
+    tab.deleteLater()
+
+
+def test_a_name_recognised_only_after_stripping_still_counts_as_recognised(qapp, syn):
+    lib = _FakeLibrary([("A", [("Parotid_L_Experimental", "ORGAN")])])
+    tab = MatchContoursTab()
+    tab.set_organ_index(build_organ_index(lib, synonyms_flat=syn))
+    drawer = _add_patient(tab, "Parotid_L_Experimental", "P1", "Parotid_L_Experimental")
+
+    assert not _badge(drawer).startswith("?")
+    tab.deleteLater()
+
+
+def test_a_mixed_drawer_still_reads_as_mixed_when_unrecognised(qapp, syn):
+    """The disagreement warning outranks the recognition marker."""
+    lib = _FakeLibrary([("A", [("SubmanG_L", "ORGAN"), ("SubmanG_R", "ORGAN")])])
+    tab = MatchContoursTab()
+    tab.set_organ_index(build_organ_index(lib, synonyms_flat=syn))
+    drawer = _add_patient(tab, "SubmanG_L", "P1", "SubmanG_L")
+    drawer.update_patient(
+        PatientSubsection(
+            patient_id="P2",
+            gt_rtstruct_sop_uid="1.2.3",
+            gt_rtstruct_filename="gt.dcm",
+            gt_source_label="manual",
+            gt_roi_number=2,
+            gt_roi_name="SubmanG_R",
+            tests=[],
+        )
+    )
+    tab._resync_tree_marks()
+    assert "mixed" in _badge(drawer)
+    tab.deleteLater()

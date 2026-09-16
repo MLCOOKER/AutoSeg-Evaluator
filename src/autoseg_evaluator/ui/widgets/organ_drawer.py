@@ -140,16 +140,40 @@ class OrganDrawer(CollapsibleBox):
     def organ_name(self) -> str:
         return self._organ_name
 
-    def set_canonical_organ(self, label: str, *, mixed: bool = False) -> None:
+    def set_canonical_organ(
+        self, label: str, *, mixed: bool = False, recognised: bool = True
+    ) -> None:
         """Show which organ this drawer represents, per the organ index.
 
         ``mixed`` marks a drawer whose patients do not agree — holding
         ``Parotid_L`` for one and ``Parotid_R`` for another, say. That is a
         matching error with no other way of being noticed, so it is shown in
         the header rather than left to be discovered in the results.
+
+        ``recognised`` says whether the organ was identified from the TG-263
+        dictionary or merely echoed back from the contour's own name. The two
+        look the same otherwise — ``SubmanG_R`` produces a confident-looking
+        ``Submang (R)`` that is nothing more than its own name tidied up — and
+        reading that as a successful identification is an easy and costly
+        mistake: an unrecognised organ pools with nothing, and every match
+        against it falls back to string similarity.
         """
         if not label:
             self._organ_badge.setVisible(False)
+            return
+        if not mixed and not recognised:
+            self._organ_badge.setText(f"? {label}")
+            self._organ_badge.setStyleSheet(
+                "background-color: #FFF8E1; color: #6D4C00; border-radius: 3px; "
+                "padding: 0 5px; font-size: 9pt; font-style: italic;"
+            )
+            self._organ_badge.setToolTip(
+                f"'{label}' is not a name the TG-263 dictionary knows — it is this "
+                f"contour's own name, tidied up. Results still work, but this organ "
+                f"pools only with drawers whose ground truth is spelled the same "
+                f"way, and matches against it rely on string similarity."
+            )
+            self._organ_badge.setVisible(True)
             return
         if mixed:
             self._organ_badge.setText(f"⚠ mixed: {label}")

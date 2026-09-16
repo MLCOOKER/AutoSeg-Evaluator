@@ -62,6 +62,7 @@ from autoseg_evaluator.core.matching import (
     is_mismatch,
     similarity,
 )
+from autoseg_evaluator.core.organ_groups import AUTOMATIC_TIERS
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
     OrganEntry,
@@ -165,7 +166,17 @@ class MatchContoursTab(QWidget):
                 continue
             gt_names = [sub.gt_roi_name for sub in drawer.all_subsections() if sub.gt_roi_name]
             key, mixed = drawer_consensus(index, gt_names)
-            drawer.set_canonical_organ(key.label() if key else "", mixed=mixed)
+            # Recognised only if the ground-truth name that produced this key
+            # came from the dictionary rather than standing alone.
+            recognised = any(
+                (assignment := index.get(name)) is not None
+                and assignment.key == key
+                and assignment.tier in AUTOMATIC_TIERS
+                for name in gt_names
+            )
+            drawer.set_canonical_organ(
+                key.label() if key else "", mixed=mixed, recognised=recognised
+            )
 
     def drawer_for_organ(self, organ_name: str) -> OrganDrawer | None:
         return self._drawers.get(organ_name)
