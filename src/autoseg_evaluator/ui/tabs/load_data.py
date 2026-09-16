@@ -28,7 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from autoseg_evaluator.data.metadata import MetadataLibrary, ScanIssue
+from autoseg_evaluator.data.linkage import collect_link_issues
+from autoseg_evaluator.data.metadata import MetadataLibrary
+from autoseg_evaluator.ui.dialogs.data_links import DataLinksDialog
 from autoseg_evaluator.ui.dialogs.source_labels import ManageSourceLabelsDialog
 from autoseg_evaluator.ui.widgets.dicom_tree import CohortTreeWidget
 from autoseg_evaluator.workers.scan_worker import ScanWorker
@@ -43,10 +45,14 @@ class LoadDataTab(QWidget):
         Emitted whenever a folder finishes loading successfully.
     overridesChanged(dict)
         Emitted when the user changes custom source labels via the dialog.
+    linkOverridesChanged(dict)
+        Emitted when the user settles a data link in the Review Data Links
+        dialog, so the choices can be persisted to the session.
     """
 
     libraryLoaded = Signal(object)
     overridesChanged = Signal(dict)
+    linkOverridesChanged = Signal(dict)
 
     def __init__(
         self,
@@ -109,6 +115,14 @@ class LoadDataTab(QWidget):
         tree_header = QHBoxLayout()
         tree_header.addWidget(QLabel("<b>Cohort</b>", cohort_pane))
         tree_header.addStretch(1)
+        self._links_btn = QPushButton("Review Data Links…", cohort_pane)
+        self._links_btn.setEnabled(False)
+        self._links_btn.setToolTip(
+            "Show which image series and dose each structure set is matched to, "
+            "and settle any that could not be decided automatically."
+        )
+        self._links_btn.clicked.connect(self._on_review_links_clicked)
+        tree_header.addWidget(self._links_btn)
         self._source_labels_btn = QPushButton("Manage Source Labels…", cohort_pane)
         self._source_labels_btn.setEnabled(False)
         self._source_labels_btn.clicked.connect(self._on_manage_sources_clicked)
@@ -186,6 +200,21 @@ class LoadDataTab(QWidget):
             if self._library.root_folder:
                 self._start_scan(self._library.root_folder)
 
+    def _on_review_links_clicked(self) -> None:
+        if self._library is None:
+            return
+        existing = dict(getattr(self._library, "link_overrides", {}) or {})
+        dialog = DataLinksDialog(self._library, existing, parent=self)
+        if dialog.exec() != DataLinksDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.overrides()
+        # Applied in place: resolution is lazy, so every tab consulting the
+        # library picks the new answers up without a rescan.
+        self._library.link_overrides = dict(chosen)
+        self._settings["link_overrides"] = dict(chosen)
+        self.linkOverridesChanged.emit(dict(chosen))
+        self._render_issues(self._library)
+
     # ---- Scan lifecycle ---------------------------------------------------
 
     def _start_scan(self, folder: str) -> None:
@@ -229,6 +258,10 @@ class LoadDataTab(QWidget):
 
     def _on_scan_finished(self, library: MetadataLibrary) -> None:
         self._library = library
+        # Re-apply the user's link answers across the rescan. Overrides naming
+        # data that is no longer present are ignored by the resolver rather
+        # than treated as errors, so a changed folder degrades gracefully.
+        library.link_overrides = dict(self._settings.get("link_overrides", {}) or {})
         self._settings["last_folder"] = library.root_folder
         self._populate_results(library)
         self._set_busy_ui(False)
@@ -246,9 +279,11 @@ class LoadDataTab(QWidget):
     def _populate_results(self, library: MetadataLibrary) -> None:
         self._tree.populate(library)
         self._render_summary(library)
-        self._render_issues(library.issues)
+        self._render_issues(library)
         self._reload_btn.setEnabled(True)
-        self._source_labels_btn.setEnabled(bool(library.all_rtstructs()))
+        has_rtss = bool(library.all_rtstructs())
+        self._source_labels_btn.setEnabled(has_rtss)
+        self._links_btn.setEnabled(has_rtss)
 
     def _render_summary(self, library: MetadataLibrary) -> None:
         s = library.summary()
@@ -269,25 +304,57 @@ class LoadDataTab(QWidget):
         self._summary_label.setText(text)
         self._summary_label.setTextFormat(Qt.TextFormat.RichText)
 
-    def _render_issues(self, issues: list[ScanIssue]) -> None:
+    def _render_issues(self, library: MetadataLibrary) -> None:
+        """Scan issues plus any unsettled data links.
+
+        Link problems are listed here as well as in the Review Data Links
+        dialog so an ambiguity is visible the moment a folder loads, rather
+        than only once someone thinks to go looking for it.
+        """
         self._issues_list.clear()
-        if not issues:
-            ok_item = QListWidgetItem("No issues detected. ✓")
-            self._issues_list.addItem(ok_item)
+        link_issues = collect_link_issues(library)
+        scan_issues = list(library.issues)
+
+        if not scan_issues and not link_issues:
+            self._issues_list.addItem(QListWidgetItem("No issues detected. ✓"))
+            self._refresh_link_button(0)
             return
-        for issue in issues:
+
+        if link_issues:
+            header = QListWidgetItem(
+                f"✗ {len(link_issues)} data link(s) need your attention — "
+                f"open Review Data Links… to settle them."
+            )
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            self._issues_list.addItem(header)
+            for issue in link_issues:
+                self._issues_list.addItem(QListWidgetItem(f"    • {issue.message}"))
+
+        for issue in scan_issues:
             prefix = "⚠ " if issue.severity == "warning" else "✗ "
-            item = QListWidgetItem(prefix + issue.message)
-            self._issues_list.addItem(item)
+            self._issues_list.addItem(QListWidgetItem(prefix + issue.message))
+
+        self._refresh_link_button(len(link_issues))
+
+    def _refresh_link_button(self, outstanding: int) -> None:
+        """Badge the Review Data Links button while anything is unsettled."""
+        if outstanding:
+            self._links_btn.setText(f"Review Data Links… ({outstanding})")
+            self._links_btn.setStyleSheet("QPushButton { color: #d96b00; font-weight: bold; }")
+        else:
+            self._links_btn.setText("Review Data Links…")
+            self._links_btn.setStyleSheet("")
 
     # ---- Misc -------------------------------------------------------------
 
     def _set_busy_ui(self, busy: bool) -> None:
         self._load_btn.setEnabled(not busy)
         self._reload_btn.setEnabled(not busy and self._library is not None)
-        self._source_labels_btn.setEnabled(
-            not busy and bool(self._library and self._library.all_rtstructs())
-        )
+        has_rtss = bool(self._library and self._library.all_rtstructs())
+        self._source_labels_btn.setEnabled(not busy and has_rtss)
+        self._links_btn.setEnabled(not busy and has_rtss)
         self._progress_bar.setVisible(busy)
         self._cancel_btn.setVisible(busy)
         self._cancel_btn.setEnabled(busy)

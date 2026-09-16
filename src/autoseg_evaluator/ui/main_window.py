@@ -90,6 +90,7 @@ class MainWindow(QMainWindow):
         # Wire cross-tab signals
         self._load_tab.libraryLoaded.connect(self._on_library_loaded)
         self._load_tab.overridesChanged.connect(self._on_overrides_changed)
+        self._load_tab.linkOverridesChanged.connect(self._on_link_overrides_changed)
         self._consensus_tab.consensusGenerated.connect(self._on_consensus_generated)
         self._consensus_tab.observerLabelsChanged.connect(self._on_observer_labels_changed)
         self._match_tab.replacementRulesChanged.connect(self._on_replacement_rules_changed)
@@ -124,6 +125,15 @@ class MainWindow(QMainWindow):
 
     def _on_overrides_changed(self, overrides: dict[str, str]) -> None:
         self._settings["custom_source_labels"] = dict(overrides)
+        save_settings(self._settings)
+
+    def _on_link_overrides_changed(self, overrides: dict[str, str]) -> None:
+        """User settled a data link in Tab 1 — keep it for the next launch.
+
+        Also written into the session on save, so the answers travel with the
+        cohort rather than only with this machine's settings.
+        """
+        self._settings["link_overrides"] = dict(overrides)
         save_settings(self._settings)
 
     def _on_observer_labels_changed(self, labels: list) -> None:
@@ -380,6 +390,7 @@ class MainWindow(QMainWindow):
             template=dict(self._settings.get("last_template", {}) or {}),
             consensus_groups=self._consensus_tab.session_state(),
             qualitative=self._qualitative_tab.session_state(),
+            link_overrides=dict(getattr(self._library, "link_overrides", {}) or {}),
         )
         try:
             save_session(path, data)
@@ -409,6 +420,10 @@ class MainWindow(QMainWindow):
         # so the auto-match pipeline uses the session's values.
         self._settings["replacement_rules"] = list(data.get("replacement_rules", []) or [])
         self._settings["last_template"] = dict(data.get("last_template", {}) or {})
+        # Set before the scan starts: Tab 1 applies these to the library the
+        # moment the scan finishes, so the restored answers are already in
+        # place by the time any tab resolves a link.
+        self._settings["link_overrides"] = dict(data.get("link_overrides", {}) or {})
         save_settings(self._settings)
         # Refresh the in-tab settings reference so dialogs pre-populate from disk.
         self._match_tab.set_settings(self._settings)

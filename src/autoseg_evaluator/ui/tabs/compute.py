@@ -27,12 +27,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from autoseg_evaluator.data.linkage import collect_link_issues
 from autoseg_evaluator.ui.widgets.progress_panel import ProgressPanel
 
 
@@ -523,6 +525,11 @@ class ComputeTab(QWidget):
         except ValueError as exc:
             self._validation_label.setText(str(exc))
             return
+        blocker = self._link_blocker(cfg)
+        if blocker:
+            self._validation_label.setText(blocker)
+            QMessageBox.warning(self, "Unresolved data links", blocker)
+            return
         self._validation_label.setText("")
         # The actual worker hookup arrives in step 8. For now, just emit the
         # config so external code (or tests) can observe.
@@ -530,6 +537,37 @@ class ComputeTab(QWidget):
         # Show the progress panel armed at "Idle" — step 8 will call begin()
         # against it with a real step count.
         self._progress.setVisible(True)
+
+    def _link_blocker(self, cfg: dict[str, Any]) -> str:
+        """Message describing why this run cannot start, or "" if it can.
+
+        A structure set whose image series or dose could not be decided would
+        otherwise be computed against whichever candidate happened to be found
+        first. Those choices belong to the user and are made in Tab 1, so the
+        run is refused until none are outstanding. Dose ambiguities only block
+        when a dose metric is actually switched on.
+        """
+        if self._library is None:
+            return ""
+        dvh = cfg.get("dvh") or {}
+        dose_wanted = bool(
+            dvh.get("include_dmean")
+            or dvh.get("include_dmax")
+            or dvh.get("include_dmin")
+            or dvh.get("d_at_volumes_pct")
+            or dvh.get("d_at_volumes_cc")
+            or dvh.get("v_at_doses_gy")
+        )
+        issues = collect_link_issues(self._library, include_dose=dose_wanted)
+        if not issues:
+            return ""
+        first = issues[0].message
+        more = f" (and {len(issues) - 1} more)" if len(issues) > 1 else ""
+        return (
+            f"{len(issues)} data link(s) are unresolved{more}. Open Tab 1 "
+            f"and use Review Data Links to settle them before computing. "
+            f"First: {first}"
+        )
 
     def _refresh_dose_summary(self) -> None:
         if self._library is None:

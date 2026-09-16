@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_SUFFIX = ".session.json"
 
 
@@ -32,6 +32,7 @@ def build_session_dict(
     template: dict[str, Any],
     consensus_groups: list[dict[str, Any]] | None = None,
     qualitative: dict[str, Any] | None = None,
+    link_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the on-disk JSON dictionary.
 
@@ -49,6 +50,13 @@ def build_session_dict(
     randomize toggles + seed, and each rater's order and scores so an
     in-progress rating run can be resumed. Older sessions omit the key and
     load cleanly (the qualitative tab simply starts empty).
+
+    ``link_overrides`` (added in schema v5) records the answers the user gave
+    in Review Data Links — which image series and which dose each structure
+    set should use where that could not be decided from the DICOM references
+    alone. Keys come from ``linkage.override_key()``. Sessions saved before v5
+    omit the key, which simply means every link is resolved automatically; an
+    override naming data no longer present is ignored rather than fatal.
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -59,6 +67,7 @@ def build_session_dict(
         "drawers": list(drawers_state or []),
         "consensus_groups": list(consensus_groups or []),
         "qualitative": dict(qualitative or {}),
+        "link_overrides": dict(link_overrides or {}),
     }
 
 

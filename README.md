@@ -59,8 +59,14 @@ command-line or coding expertise.
 - **Smart auto-matching**: hybrid Levenshtein + cosine matcher backed by a
   TG-263 synonym dictionary (~17 000 variants from the official worksheet),
   user-defined replacement rules, and template-driven batch selection.
-- **Robust DICOM linking**: groups CT, RTSTRUCT, and RT Dose by
-  `FrameOfReferenceUID` — handles AI vendors that change `StudyInstanceUID`.
+- **Robust DICOM linking**: resolves each structure set to the image series it
+  was contoured on and to its dose from the explicit UID references inside the
+  DICOM files (`ReferencedFrameOfReferenceSequence` → `RTReferencedSeriesSequence`,
+  and the dose's own `ReferencedStructureSetSequence`), falling back to
+  `FrameOfReferenceUID` only when those are absent. No RTPLAN required. Where
+  two candidates are equally good — a re-irradiation course, a replan, a
+  composite dose — the ambiguity is reported and settled by the user in Tab 1
+  rather than silently guessed.
 - **Source identification**: cascading fallback (Manufacturer →
   StructureSetLabel → SoftwareVersions → filename) handles in-house models
   that lack metadata, with a manual override dialog persisted in

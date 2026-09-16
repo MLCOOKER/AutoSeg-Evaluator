@@ -427,6 +427,29 @@ def _dose_label(dose) -> str:
     return f"{dose.filename} — {kind} summation"
 
 
+def link_candidates(library, patient_id: str, kind: str) -> list:
+    """Every entry the user could plausibly pick for a link of this kind.
+
+    Broader than :attr:`Resolution.candidates`, which lists only what tied at
+    the winning tier. The Load Data tab offers the full set so a user can
+    override a confident-but-wrong automatic answer, not just settle ties.
+    """
+    patient = library.patients.get(patient_id)
+    if patient is None:
+        return []
+    return _all_image_series(patient) if kind == KIND_SERIES else _all_doses(patient)
+
+
+def candidate_uid(entry, kind: str) -> str:
+    """The UID that identifies a candidate, per link kind."""
+    return entry.series_instance_uid if kind == KIND_SERIES else entry.sop_instance_uid
+
+
+def candidate_label(entry, kind: str) -> str:
+    """Human-readable, PHI-free description of a candidate."""
+    return _series_label(entry) if kind == KIND_SERIES else _dose_label(entry)
+
+
 def collect_link_issues(library, *, include_dose: bool = True) -> list[LinkIssue]:
     """Every unresolved or ambiguous link in the library, for the Tab 1 gate.
 
@@ -514,7 +537,10 @@ __all__ = [
     "TIER_SOP_OVERLAP",
     "WEAK_TIERS",
     "assign_linkage_ids",
+    "candidate_label",
+    "candidate_uid",
     "collect_link_issues",
+    "link_candidates",
     "override_key",
     "reference_image_folder",
     "resolve_dose",

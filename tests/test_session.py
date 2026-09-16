@@ -148,7 +148,7 @@ def test_session_dict_round_trips_qualitative_block(tmp_path):
     payload = build_session_dict(
         folder="/x", drawers_state=[], replacement_rules=[], template={}, qualitative=qualitative
     )
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     path = tmp_path / "q.session.json"
     save_session(path, payload)
     assert load_session_file(path)["qualitative"] == qualitative
@@ -280,3 +280,52 @@ def test_apply_session_resets_previous_drawers(qapp, populated_library):
     # Now apply an empty session — Bladder should disappear
     tab.apply_session_state([])
     assert tab._drawers == {}
+
+
+def test_session_dict_round_trips_link_overrides(tmp_path):
+    """Schema v5: the answers given in Review Data Links travel with the session."""
+    overrides = {
+        "P1|1.2.3.4|series": "1.2.3.9",
+        "P1|1.2.3.4|dose": "1.2.3.7",
+    }
+    payload = build_session_dict(
+        folder="/x",
+        drawers_state=[],
+        replacement_rules=[],
+        template={},
+        link_overrides=overrides,
+    )
+    assert payload["schema_version"] == 5
+    assert payload["link_overrides"] == overrides
+
+    path = tmp_path / "s.session.json"
+    save_session(path, payload)
+    assert load_session_file(path)["link_overrides"] == overrides
+
+
+def test_session_without_link_overrides_still_loads():
+    """A v4 session predates the key; absent simply means fully automatic."""
+    payload = build_session_dict(folder="/x", drawers_state=[], replacement_rules=[], template={})
+    assert payload["link_overrides"] == {}
+
+
+def test_v4_session_file_loads_under_v5(tmp_path):
+    """Older sessions on disk must keep loading after the schema bump."""
+    path = tmp_path / "old.session.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "folder": "/x",
+                "replacement_rules": [],
+                "last_template": {},
+                "drawers": [],
+                "consensus_groups": [],
+                "qualitative": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = load_session_file(path)
+    assert data["schema_version"] == 4
+    assert data.get("link_overrides", {}) == {}

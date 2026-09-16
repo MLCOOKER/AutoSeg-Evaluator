@@ -54,8 +54,21 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   first of several referenced series, where we report an ambiguity.
 - `tests/test_linkage.py` — 19 tests over synthetic DICOM, including a
   two-course re-irradiation fixture sharing one Frame of Reference.
+- **Review Data Links dialog (Tab 1).** Lists every structure set with the
+  image series and dose it resolved to and the rule that decided it, with a
+  dropdown to override any of them. Unsettled links are badged on the button,
+  listed in the Issues panel, and **block Tab 3 from starting a run** — the
+  choice belongs to the user and is made before computation, not guessed
+  during it or flagged afterwards on a results row. Dose ambiguities only
+  block when a dose metric is actually switched on.
+- `tests/test_data_links_ui.py` — 12 tests over the dialog and the compute
+  gate.
 
 ### Changed
+- **Session schema v4 → v5.** Adds `link_overrides`, recording the answers
+  given in Review Data Links so a cohort whose links needed settling by hand
+  does not need settling again on reload. v4 and earlier sessions load
+  unchanged.
 - **The sub-voxel (`continuous`) mask rasteriser is now the default.**
   ⚠️ **This changes numerical output.** Every mask-derived metric moves —
   volume, Dice, Hausdorff, MSD, Surface Dice, APL, centre-of-mass, STAPLE, and

@@ -20,23 +20,25 @@ the table of contents.
 1. [Motivation & scope](#motivation--scope)
 2. [Tech stack & licensing](#tech-stack--licensing)
 3. [Repository layout](#repository-layout)
-4. [User-facing workflow (the five tabs)](#user-facing-workflow-the-five-tabs)
+4. [User-facing workflow (the six tabs)](#user-facing-workflow-the-six-tabs)
 5. [Data model](#data-model)
 6. [Matching pipeline (organ-name canonicalisation)](#matching-pipeline-organ-name-canonicalisation)
 7. [Mask creation (RTSTRUCT → binary)](#mask-creation-rtstruct--binary)
-8. [Geometric metrics](#geometric-metrics)
-9. [Volume + centre-of-mass metrics](#volume--centre-of-mass-metrics)
-10. [Added Path Length (APL)](#added-path-length-apl)
-11. [Dose-volume histogram (DVH)](#dose-volume-histogram-dvh)
-12. [STAPLE consensus](#staple-consensus)
-13. [Build Consensus GT workflow](#build-consensus-gt-workflow)
-14. [Session save / load](#session-save--load)
-15. [Performance engineering](#performance-engineering)
-16. [Validation & test suite](#validation--test-suite)
-17. [Theming & accessibility](#theming--accessibility)
-18. [Distribution model](#distribution-model)
-19. [Known limitations / future work](#known-limitations--future-work)
-20. [Quick literature index](#quick-literature-index)
+8. [Data linking](#data-linking)
+9. [Geometric metrics](#geometric-metrics)
+10. [Volume + centre-of-mass metrics](#volume--centre-of-mass-metrics)
+11. [Added Path Length (APL)](#added-path-length-apl)
+12. [Dose-volume histogram (DVH)](#dose-volume-histogram-dvh)
+13. [STAPLE consensus](#staple-consensus)
+14. [Build Consensus GT workflow](#build-consensus-gt-workflow)
+15. [Session save / load](#session-save--load)
+16. [Performance engineering](#performance-engineering)
+17. [Validation & test suite](#validation--test-suite)
+18. [Theming & accessibility](#theming--accessibility)
+19. [Distribution model](#distribution-model)
+20. [Known limitations / future work](#known-limitations--future-work)
+21. [Quick literature index](#quick-literature-index)
+22. [Glossary of acronyms](#glossary-of-acronyms)
 
 ---
 
@@ -198,9 +200,22 @@ run in a QThread cleanly.
 **Responsibility:** Recursively scan a folder for DICOM files; build a
 `MetadataLibrary` keyed by `PatientID → ImagingContext (one per
 FrameOfReferenceUID) → [RTSTRUCT, RTDOSE, ImageSeries]`. The scan runs in
-a background `ScanWorker` thread so the UI stays responsive.
+a background `ScanWorker` thread so the UI stays responsive. Files sharing a
+`SOPInstanceUID` are ingested once — the same object exported to two paths
+(`X.dcm` and `X.0001.dcm`) is one object, not two.
+
+The Frame of Reference grouping above is a *container*, not the answer to
+"which CT was this drawn on" — one FoR can hold several studies, structure
+sets and doses. Those links are resolved separately by
+[`data/linkage.py`](../src/autoseg_evaluator/data/linkage.py); see
+[Data linking](#data-linking).
 
 **Key UI elements:**
+- **Review Data Links…** opens [`ui/dialogs/data_links.py`](../src/autoseg_evaluator/ui/dialogs/data_links.py)
+  — a table of every structure set with the image series and dose it resolved
+  to, the rule that decided it, and a dropdown to override. Links that could
+  not be decided automatically are badged on the button, listed in the Issues
+  panel, and block Tab 3 until settled.
 - **Manage Source Labels…** opens [`ui/dialogs/source_labels.py`](../src/autoseg_evaluator/ui/dialogs/source_labels.py)
   — sortable table with bulk-apply for overriding the auto-detected
   vendor label per RTSTRUCT. Six raw DICOM identification fields are
@@ -604,10 +619,63 @@ same extent in physical mm so the DVH can apply the equivalent
 contour-plane truncation (see [DVH](#dose-volume-histogram-dvh)) — keeping
 dose and geometry on the same craniocaudal range.
 
-**Reference-image lookup** (`find_reference_image_folder`): walks the
-`MetadataLibrary` by `FrameOfReferenceUID` to locate the CT folder that
-backs a given RTSS. Replaces v1's `StudyInstanceUID`-based logic, which
-broke when vendor RTSS exports changed the StudyUID.
+**Reference-image lookup** (`find_reference_image_folder`): delegates to
+[Data linking](#data-linking) to locate the CT folder backing a given RTSS.
+Returns `None` when the link is ambiguous rather than picking a candidate.
+
+---
+
+## Data linking
+
+**File:** [`src/autoseg_evaluator/data/linkage.py`](../src/autoseg_evaluator/data/linkage.py)
+
+Decides which image series each RTSTRUCT was contoured on, and which RTDOSE
+belongs with it. A `FrameOfReferenceUID` on its own cannot answer either
+question: one Frame of Reference can legitimately contain several imaging
+studies, structure sets and dose distributions, which is routine in
+re-irradiation, replans and composite plans.
+
+Resolution runs through an ordered cascade, strongest first:
+
+| Tier | Rule |
+| --- | --- |
+| `override` | The user chose it in Review Data Links |
+| `explicit` | A referenced UID names the target outright |
+| `sop-overlap` | The structure set's per-slice `ContourImageSequence` UIDs are in the series |
+| `for+study` | Same Frame of Reference *and* same study |
+| `for` | Same Frame of Reference (v2's behaviour, unaided) |
+| `singleton` | Exactly one candidate exists for the patient |
+| `none` | Nothing matched |
+
+When two or more distinct candidates survive at the winning tier the result is
+**ambiguous**: no target is returned and every candidate is reported, so the
+Load Data tab can ask. `DoseSummationType == "PLAN"` breaks a tie within a
+tier only when exactly one candidate is a PLAN dose — two PLAN doses stay
+ambiguous, which is the re-irradiation case v2 resolved silently to whichever
+file it walked first.
+
+**RTPLAN is never required nor traversed.** The dose → structure set edge is
+read from the dose object's own `ReferencedStructureSetSequence`, including
+the copy some writers nest inside `ReferencedRTPlanSequence`, so the chain
+dose → structure set → series closes with no plan file present.
+
+`assign_linkage_ids()` stamps a `linkage_id` on every series, structure set
+and dose — the connected component of the explicit reference graph, i.e. one
+coherent treatment context. Frame of Reference is never used to *merge*
+components; doing so would recreate the collision this module prevents.
+
+**Relationship to 3D Slicer.** The RTSTRUCT → series traversal is tag for tag
+what SlicerRT does in
+`vtkSlicerDicomRtReader::GetReferencedSeriesInstanceUID()`, and
+[`tests/test_slicer_linkage_equivalence.py`](../tests/test_slicer_linkage_equivalence.py)
+pins it against a port of that function. One deliberate difference: SlicerRT
+calls `gotoFirstItem()` at each sequence level, so a structure set referencing
+two series resolves silently to the first; here that is an ambiguity. For
+dose, SlicerRT goes via `ReferencedRTPlanSequence`, and its DVH module does no
+automatic dose↔structure pairing at all — `ComputeDvh` requires the user to
+select both. So there is no external oracle for dose linking, and the
+user-settles-it design matches Slicer's own answer, just moved earlier and
+persisted.
 
 ---
 
@@ -926,11 +994,16 @@ loop AND the per-rater-pair inner loop). Results table:
 
 **File:** [`src/autoseg_evaluator/data/session.py`](../src/autoseg_evaluator/data/session.py)
 
-**Schema version: 4.** Past versions still load (missing fields default
+**Schema version: 5.** Past versions still load (missing fields default
 to empty); future versions are refused with a clear error. **v4** adds the
 `qualitative` block (graders, their fixed per-grader configs, and each
 grader's order / scores / cursor) so an in-progress qualitative run resumes
-and its scores re-populate the Results tab.
+and its scores re-populate the Results tab. **v5** adds `link_overrides` —
+the answers given in Review Data Links, keyed by
+`linkage.override_key(patient_id, rtstruct_sop_uid, kind)` — so a cohort whose
+links had to be settled by hand does not have to be settled again on reload.
+They are applied by Tab 1 as soon as the rescan completes, and an override
+naming data that is no longer present is ignored rather than fatal.
 
 **Top-level JSON shape:**
 
@@ -971,6 +1044,10 @@ and its scores re-populate the Results tab.
                  "constituents": [{"sop_uid": "...", "roi_number": 5},
                                   {"sop_uid": "...", "roi_number": 8}]}]}
   ],
+  "link_overrides": {
+    "PATIENT_ID|<rtstruct SOP UID>|series": "<chosen SeriesInstanceUID>",
+    "PATIENT_ID|<rtstruct SOP UID>|dose": "<chosen dose SOPInstanceUID>"
+  },
   "qualitative": {
     "started": true, "active_rater": "Alice",
     "raters": ["Alice", "Bob"],
