@@ -34,6 +34,7 @@ from autoseg_evaluator.core.organ_groups import (
     OrganRules,
     assign,
     classify_qualifier,
+    differs_by_a_short_code,
     dominant_type,
     extract_laterality,
     group_by_key,
@@ -520,3 +521,65 @@ def test_parenthetical_naming_a_target_is_not_stripped(syn):
 
 def test_plain_annotation_parenthetical_is_still_stripped(syn):
     assert _assign("Brain(DRtoReview)", syn=syn).key == _assign("Brain", syn=syn).key
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("UJ_Front_L", "LJ_Front_L"),
+        ("UJ_Molar_R", "LJ_Molar_R"),
+        ("A_Aorta", "V_Aorta"),
+        ("LN_Ax_L1", "LN_Ax_L2"),
+    ],
+)
+def test_short_codes_never_fuzzy_merge(a, b, syn):
+    """Upper vs lower jaw, artery vs vein: one character, different structures.
+
+    Caught by running the review dialog over a real head-and-neck cohort,
+    where UJ_Front_L was being proposed as a merge with LJ_Front_L.
+    """
+    assert differs_by_a_short_code(a, b)
+    reckless = OrganRules(fuzzy_threshold=0.0)
+    items = [_assign(a, syn=syn), _assign(b, syn=syn)]
+    for proposal in propose_fuzzy_groups(items, synonyms_flat=syn, rules=reckless):
+        assert not (a in proposal.members and b in proposal.members)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("Artefact", "Artifact"),
+        ("Humeral_Head_L", "Humerus_Head_L"),
+        ("Artefact_Adipose", "Aretfact_Adipose"),
+    ],
+)
+def test_long_word_typos_still_merge(a, b, syn):
+    """The same single-character difference in a real word is a spelling variant."""
+    assert not differs_by_a_short_code(a, b)
+    assert propose_fuzzy_groups([_assign(a, syn=syn), _assign(b, syn=syn)], synonyms_flat=syn)
+
+
+def test_short_code_guard_ignores_differently_shaped_names():
+    """Only an exactly-one-token difference is a code swap."""
+    assert not differs_by_a_short_code("Bowel_Bag", "Bowel Bag")
+    assert not differs_by_a_short_code("Great Vessels", "GreatVessels")
+    assert not differs_by_a_short_code("UJ_Front_L", "LJ_Molar_R")
+
+
+def test_a_spelling_the_dictionary_knows_is_not_left_to_the_fuzzy_tier(syn):
+    """British spellings outside TG-263 fall to manual assignment, not to fuzzy.
+
+    ``Esophagus`` resolves through the dictionary, so it never enters the pool
+    the fuzzy tier works over, and ``Oesophagus`` — which the dictionary does
+    not carry — stands alone until someone says otherwise. Letting similarity
+    reach across into dictionary-resolved names would mean a guess overriding a
+    known answer, which is the wrong trade.
+    """
+    known = _assign("Esophagus", syn=syn)
+    unknown = _assign("Oesophagus", syn=syn)
+    assert known.tier == TIER_DICTIONARY
+    assert unknown.tier == TIER_UNASSIGNED
+    assert propose_fuzzy_groups([known, unknown], synonyms_flat=syn) == []
+    # Saying so by hand resolves it.
+    fixed = _assign("Oesophagus", syn=syn, manual={"Oesophagus": known.key.base})
+    assert fixed.key == known.key

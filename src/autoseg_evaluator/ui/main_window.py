@@ -28,6 +28,7 @@ from autoseg_evaluator.data.session import (
     save_session,
 )
 from autoseg_evaluator.data.synonyms import flatten_synonyms, load_synonyms
+from autoseg_evaluator.ui.dialogs.organ_groups import OrganGroupsDialog
 from autoseg_evaluator.ui.tabs.build_consensus import BuildConsensusTab
 from autoseg_evaluator.ui.tabs.compute import ComputeTab
 from autoseg_evaluator.ui.tabs.load_data import LoadDataTab
@@ -105,6 +106,7 @@ class MainWindow(QMainWindow):
         self._compute_tab.cancelRequested.connect(self._on_compute_cancel_requested)
         self._qualitative_tab.qualitativeScored.connect(self._on_qualitative_scored)
         self._qualitative_tab.assessmentLockChanged.connect(self._on_assessment_lock_changed)
+        self._results_tab.organGroupsRequested.connect(self._on_review_organ_groups)
 
         self.setCentralWidget(self._tabs)
 
@@ -131,6 +133,33 @@ class MainWindow(QMainWindow):
         self._organ_index = index
         self._results.set_organ_index(index)
         self._results_tab.refresh()
+
+    def _on_review_organ_groups(self) -> None:
+        """Open Review Organ Groups and apply whatever the user decides."""
+        if self._organ_index is None:
+            QMessageBox.information(
+                self,
+                "Review Organ Groups",
+                "Load a folder first — organ groups are derived from the loaded cohort.",
+            )
+            return
+        try:
+            synonyms = flatten_synonyms(load_synonyms(synonyms_path()))
+        except Exception:  # noqa: BLE001
+            synonyms = {}
+        dialog = OrganGroupsDialog(
+            self._organ_index,
+            dict(self._settings.get("organ_assignments", {}) or {}),
+            synonyms_flat=synonyms,
+            parent=self,
+        )
+        if dialog.exec() != OrganGroupsDialog.DialogCode.Accepted:
+            return
+        self._settings["organ_assignments"] = dialog.assignments()
+        save_settings(self._settings)
+        # Rebuilding re-labels the rows already in the results table; no metric
+        # is recomputed, because tagging happens when rows are read.
+        self._rebuild_organ_index()
 
     def _on_library_loaded(self, library: Any) -> None:
         """Stash the loaded library so Match Contours / Compute tabs can read it."""
@@ -421,6 +450,7 @@ class MainWindow(QMainWindow):
             consensus_groups=self._consensus_tab.session_state(),
             qualitative=self._qualitative_tab.session_state(),
             link_overrides=dict(getattr(self._library, "link_overrides", {}) or {}),
+            organ_assignments=dict(self._settings.get("organ_assignments", {}) or {}),
         )
         try:
             save_session(path, data)
@@ -454,6 +484,7 @@ class MainWindow(QMainWindow):
         # moment the scan finishes, so the restored answers are already in
         # place by the time any tab resolves a link.
         self._settings["link_overrides"] = dict(data.get("link_overrides", {}) or {})
+        self._settings["organ_assignments"] = dict(data.get("organ_assignments", {}) or {})
         save_settings(self._settings)
         # Refresh the in-tab settings reference so dialogs pre-populate from disk.
         self._match_tab.set_settings(self._settings)

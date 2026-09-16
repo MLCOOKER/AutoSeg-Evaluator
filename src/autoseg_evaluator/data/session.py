@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_SUFFIX = ".session.json"
 
 
@@ -33,6 +33,7 @@ def build_session_dict(
     consensus_groups: list[dict[str, Any]] | None = None,
     qualitative: dict[str, Any] | None = None,
     link_overrides: dict[str, str] | None = None,
+    organ_assignments: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the on-disk JSON dictionary.
 
@@ -57,6 +58,12 @@ def build_session_dict(
     alone. Keys come from ``linkage.override_key()``. Sessions saved before v5
     omit the key, which simply means every link is resolved automatically; an
     override naming data no longer present is ignored rather than fatal.
+
+    ``organ_assignments`` (added in schema v6) maps a raw ROI name to the organ
+    the user grouped it under in Review Organ Groups, so a cohort whose
+    free-text contour names had to be sorted out by hand does not have to be
+    sorted out again. Absent means every name is grouped automatically, which
+    is a valid state rather than an unfinished one.
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -68,6 +75,7 @@ def build_session_dict(
         "consensus_groups": list(consensus_groups or []),
         "qualitative": dict(qualitative or {}),
         "link_overrides": dict(link_overrides or {}),
+        "organ_assignments": dict(organ_assignments or {}),
     }
 
 

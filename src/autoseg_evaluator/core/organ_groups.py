@@ -588,6 +588,32 @@ def index_signature(name: str) -> tuple[str, ...]:
     )
 
 
+#: Tokens this short are codes rather than words, so a one-character
+#: difference between them changes the structure instead of misspelling it.
+_SHORT_CODE_LENGTH = 3
+
+
+def differs_by_a_short_code(a: str, b: str) -> bool:
+    """True when two names differ in exactly one token and that token is a code.
+
+    ``UJ_Front_L`` and ``LJ_Front_L`` are the upper and the lower jaw;
+    ``A_Aorta`` and ``V_Aorta`` are an artery and a vein. Each pair differs by
+    a single character inside a two-letter token, which any string metric reads
+    as near-identical. The same single-character difference inside a long word
+    — ``Artefact`` against ``Artifact``, ``Humeral_Head`` against
+    ``Humerus_Head`` — really is a spelling variant, which is what the fuzzy
+    tier exists to catch. Length is what separates the two cases.
+    """
+    ta, tb = _tokens(a), _tokens(b)
+    if len(ta) != len(tb):
+        return False
+    differing = [(x, y) for x, y in zip(ta, tb, strict=False) if x != y]
+    if len(differing) != 1:
+        return False
+    x, y = differing[0]
+    return min(len(x), len(y)) <= _SHORT_CODE_LENGTH
+
+
 @dataclass
 class FuzzyProposal:
     """A suggested merge of unresolved names. Never applied automatically."""
@@ -649,7 +675,9 @@ def propose_fuzzy_groups(
                     rules=replacement_rules,
                     synonyms_flat=syn,
                 ).score
-                if score >= rules.fuzzy_threshold:
+                if score >= rules.fuzzy_threshold and not differs_by_a_short_code(
+                    item.roi_name, seed.roi_name
+                ):
                     proposal.members.append(item.roi_name)
                     proposal.scores[item.roi_name] = float(score)
                     placed = True
@@ -729,6 +757,7 @@ __all__ = [
     "OrganRules",
     "assign",
     "classify_qualifier",
+    "differs_by_a_short_code",
     "dominant_type",
     "extract_laterality",
     "group_by_key",
