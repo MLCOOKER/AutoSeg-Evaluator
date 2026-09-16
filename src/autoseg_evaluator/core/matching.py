@@ -132,6 +132,59 @@ def canonicalise_with_meta(
     return s, False
 
 
+#: ``match_method`` values meaning "these name different structures". The score
+#: is 0 and the UI shows the reason, rather than a high similarity quietly
+#: carrying a wrong pairing into metric computation.
+MISMATCH_LATERALITY = "mismatch-laterality"
+MISMATCH_INDEX = "mismatch-index"
+MISMATCH_POSITION = "mismatch-position"
+
+MISMATCH_REASONS = {
+    MISMATCH_LATERALITY: "opposite sides of the body",
+    MISMATCH_INDEX: "different numbered structures",
+    MISMATCH_POSITION: "opposite anatomical positions",
+}
+
+
+def structural_mismatch(a: str, b: str) -> str:
+    """Name the axis on which two ROI names describe different structures.
+
+    Returns one of the ``MISMATCH_*`` values, or ``""`` when nothing rules the
+    pair out. This exists because string similarity cannot make the call:
+    ``Lens_R`` against ``Lens_L`` scores 0.85, comfortably above the default
+    0.6 matching threshold, while ``Parotid_L`` against ``Submandibular_L`` —
+    genuinely different organs — scores 0.38. Ranking by similarity alone will
+    therefore pair a right lens with a left one whenever the right one is the
+    only candidate a vendor produced, and nothing downstream will notice.
+
+    Only *conflicting* values block a pair. A name that specifies a side and
+    one that does not (``Parotid_L`` against ``Parotid``) is left alone, since
+    that is an omission rather than a contradiction.
+    """
+    # Imported inside the function: organ_groups depends on this module for
+    # canonicalisation, so a module-level import here would be a cycle.
+    from autoseg_evaluator.core.organ_groups import (
+        extract_laterality,
+        index_signature,
+        positional_signature,
+    )
+
+    lat_a = extract_laterality(a)[1]
+    lat_b = extract_laterality(b)[1]
+    if lat_a and lat_b and lat_a != lat_b:
+        return MISMATCH_LATERALITY
+
+    idx_a, idx_b = index_signature(a), index_signature(b)
+    if idx_a and idx_b and idx_a != idx_b:
+        return MISMATCH_INDEX
+
+    pos_a, pos_b = positional_signature(a), positional_signature(b)
+    if pos_a and pos_b and pos_a != pos_b:
+        return MISMATCH_POSITION
+
+    return ""
+
+
 def similarity(
     a: str,
     b: str,
@@ -143,6 +196,9 @@ def similarity(
 
     Behaviour:
 
+    * If the two names conflict on side, numbering or anatomical position,
+      return ``Match(0.0, "mismatch-…")``. See :func:`structural_mismatch` —
+      similarity scores these pairs high, so the check has to come first.
     * If **both** inputs resolve to the **same** TG-263 canonical via the
       synonyms dictionary, return ``Match(1.0, "tg263")`` — the
       high-confidence dictionary-grounded path.
@@ -159,6 +215,12 @@ def similarity(
     _cb, b_resolved = canonicalise_with_meta(b, rules, synonyms_flat)
     if not _ca or not _cb:
         return Match(0.0, "none")
+
+    # Checked before the dictionary short-circuit: two names can resolve to
+    # the same canonical stem and still be opposite sides of the body.
+    conflict = structural_mismatch(a, b)
+    if conflict:
+        return Match(0.0, conflict)
 
     # TG-263 short-circuit — both sides resolved to the same canonical.
     if a_resolved and b_resolved and _ca == _cb:
@@ -230,8 +292,14 @@ def best_match(
     return is ``(None, Match(0.0, "none"))``. When every candidate scored 0
     we fall through to the first candidate so callers always get something
     they can label as a "best (poor) match" rather than silently dropping
-    the file — the accompanying :class:`Match` keeps ``score=0`` and
-    ``method="none"`` so the UI can show that honestly.
+    the file — the accompanying :class:`Match` keeps ``score=0`` so the UI can
+    show that honestly.
+
+    That fall-through keeps the first candidate's own :class:`Match` rather
+    than a blank one, because its ``method`` may carry *why* nothing matched.
+    When the only contour a vendor produced is the opposite side of the body,
+    "no match" and "that is the other side" are very different things to show
+    a user, and the second is the one worth saying.
     """
     best: T | None = None
     best_match_obj = Match(0.0, "none")
@@ -241,5 +309,6 @@ def best_match(
             best_match_obj = m
             best = candidate
     if best is None and candidates:
-        return candidates[0], Match(0.0, "none")
+        first = candidates[0]
+        return first, similarity(target, key(first), rules=rules, synonyms_flat=synonyms_flat)
     return best, best_match_obj

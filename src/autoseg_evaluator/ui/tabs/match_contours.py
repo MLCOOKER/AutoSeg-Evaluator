@@ -66,6 +66,7 @@ from autoseg_evaluator.data.metadata import (
     OrganEntry,
     RTSTRUCTEntry,
 )
+from autoseg_evaluator.data.organ_index import drawer_consensus
 from autoseg_evaluator.data.synonyms import flatten_synonyms, load_synonyms
 from autoseg_evaluator.ui.dialogs.replacement_rules import ReplacementRulesDialog
 from autoseg_evaluator.ui.dialogs.template import TemplateDialog
@@ -142,6 +143,27 @@ class MatchContoursTab(QWidget):
             return
         self._tree.populate(library)
         self._set_empty_state(False)
+
+    def set_organ_index(self, index) -> None:
+        """Supply canonical organ grouping so drawers can show what they hold.
+
+        A drawer is named after whichever ground-truth ROI created it, so two
+        drawers can be the same organ spelled differently. The badge says which
+        organ a drawer will be grouped under, and flags a drawer whose patients
+        do not agree with each other.
+        """
+        self._organ_index = index
+        self._refresh_organ_badges()
+
+    def _refresh_organ_badges(self) -> None:
+        index = getattr(self, "_organ_index", None)
+        for drawer in self._drawers.values():
+            if index is None:
+                drawer.set_canonical_organ("")
+                continue
+            gt_names = [sub.gt_roi_name for sub in drawer.all_subsections() if sub.gt_roi_name]
+            key, mixed = drawer_consensus(index, gt_names)
+            drawer.set_canonical_organ(key.label() if key else "", mixed=mixed)
 
     def drawer_for_organ(self, organ_name: str) -> OrganDrawer | None:
         return self._drawers.get(organ_name)

@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from autoseg_evaluator.core.matching import MISMATCH_REASONS
 from autoseg_evaluator.ui.widgets.collapsible_box import CollapsibleBox
 from autoseg_evaluator.ui.widgets.signal_bar import SignalBar
 
@@ -138,6 +139,39 @@ class OrganDrawer(CollapsibleBox):
 
     def organ_name(self) -> str:
         return self._organ_name
+
+    def set_canonical_organ(self, label: str, *, mixed: bool = False) -> None:
+        """Show which organ this drawer represents, per the organ index.
+
+        ``mixed`` marks a drawer whose patients do not agree — holding
+        ``Parotid_L`` for one and ``Parotid_R`` for another, say. That is a
+        matching error with no other way of being noticed, so it is shown in
+        the header rather than left to be discovered in the results.
+        """
+        if not label:
+            self._organ_badge.setVisible(False)
+            return
+        if mixed:
+            self._organ_badge.setText(f"⚠ mixed: {label}")
+            self._organ_badge.setStyleSheet(
+                "background-color: #FDECEA; color: #A31515; border-radius: 3px; "
+                "padding: 0 5px; font-size: 9pt; font-weight: bold;"
+            )
+            self._organ_badge.setToolTip(
+                "Patients in this drawer resolve to different organs — check that "
+                "the ground-truth contours are all the same structure and side."
+            )
+        else:
+            self._organ_badge.setText(label)
+            self._organ_badge.setStyleSheet(
+                "background-color: #EDF7ED; color: #1B5E20; border-radius: 3px; "
+                "padding: 0 5px; font-size: 9pt;"
+            )
+            self._organ_badge.setToolTip(
+                f"Results from this drawer are grouped under '{label}' for "
+                f"cohort statistics, alongside any other drawer of the same organ."
+            )
+        self._organ_badge.setVisible(True)
 
     def patient_ids(self) -> list[str]:
         return list(self._patients.keys())
@@ -320,6 +354,14 @@ class OrganDrawer(CollapsibleBox):
         self._count_label.setStyleSheet("color: #888;")
         layout.addWidget(self._count_label)
 
+        # Which organ this drawer actually holds. The drawer is named after
+        # whatever the first ground-truth ROI was called, so two drawers can be
+        # the same organ under different spellings; the badge is what a cohort
+        # statistic will group them by. Hidden until an organ index is supplied.
+        self._organ_badge = QLabel("", header)
+        self._organ_badge.setVisible(False)
+        layout.addWidget(self._organ_badge)
+
         layout.addStretch(1)
 
         self._truncate_check = QCheckBox("Truncate", header)
@@ -484,7 +526,23 @@ class OrganDrawer(CollapsibleBox):
         score.setMinimumWidth(40)
         row_layout.addWidget(score)
 
-        if test.match_method == "tg263":
+        if test.match_method in MISMATCH_REASONS:
+            # A structural conflict, not a weak match: these names describe
+            # different structures however similar they look. Loud on purpose —
+            # the failure this replaces was a right-sided organ silently
+            # matched to a left-sided one and carried into metric computation.
+            badge = QLabel("MISMATCH", row)
+            badge.setStyleSheet(
+                "background-color: #FDECEA; color: #A31515; "
+                "border-radius: 3px; padding: 0 4px; font-size: 9pt; font-weight: bold;"
+            )
+            badge.setToolTip(
+                f"'{test.organ_name}' and the ground truth name "
+                f"{MISMATCH_REASONS[test.match_method]}. They were not matched to each "
+                f"other by similarity — remove this row, or add the correct contour."
+            )
+            row_layout.addWidget(badge)
+        elif test.match_method == "tg263":
             badge = QLabel("TG-263", row)
             badge.setStyleSheet(
                 "background-color: #E3F2FD; color: #0D47A1; "

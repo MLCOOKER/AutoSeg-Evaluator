@@ -136,10 +136,6 @@ def _band_for_metric_key(key: str) -> str:
 class ResultsTab(QWidget):
     """Results table view + CSV export controls."""
 
-    #: Emitted when the user asks to review canonical organ grouping.
-    #: MainWindow owns the organ index, so the dialog is opened there.
-    organGroupsRequested = Signal()
-
     cleared = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -235,14 +231,6 @@ class ResultsTab(QWidget):
         self._row_count_label = QLabel("0 rows", self)
         self._row_count_label.setStyleSheet("color: #666;")
         toolbar.addWidget(self._row_count_label)
-        self._organs_btn = QPushButton("Review Organ Groups…", self)
-        self._organs_btn.setToolTip(
-            "Confirm which ROI names mean the same organ, so a statistic can pool "
-            "across patients whose contours were named differently. Optional — "
-            "unreviewed names simply stay in a group of their own."
-        )
-        self._organs_btn.clicked.connect(self.organGroupsRequested.emit)
-        toolbar.addWidget(self._organs_btn)
         self._clear_btn = QPushButton("Clear", self)
         self._clear_btn.setEnabled(False)
         self._clear_btn.clicked.connect(self._on_clear_clicked)
