@@ -22,6 +22,7 @@ from autoseg_evaluator.core.source_labels import (
     SourceLabel,
     derive_source_label,
 )
+from autoseg_evaluator.data.linkage import assign_linkage_ids
 
 # ---- Dataclasses ----------------------------------------------------------
 
@@ -40,6 +41,14 @@ class ImageSeriesEntry:
     modality: str
     frame_of_reference_uid: str
     files: list[str] = field(default_factory=list)
+    # v3: explicit-reference linking. ``sop_instance_uids`` lets an RTSTRUCT's
+    # ContourImageSequence be matched slice-by-slice against this series even
+    # when the SeriesInstanceUID was re-issued (partial re-export, some
+    # anonymisers). ``study_instance_uid`` backs the FoR+Study resolver tier.
+    # All defaulted so older sessions and existing tests construct unchanged.
+    study_instance_uid: str = ""
+    sop_instance_uids: set[str] = field(default_factory=set)
+    linkage_id: str = ""
 
     @property
     def folder(self) -> str:
@@ -71,6 +80,19 @@ class RTSTRUCTEntry:
     # default to "" so older sessions / tests load unchanged.
     reviewer_name: str = ""  # (300E,0008) RT Approval module
     operators_name: str = ""  # (0008,1070) General Equipment / Series
+
+    # ---- v3: explicit DICOM reference edges --------------------------------
+    # Read from ReferencedFrameOfReferenceSequence → RTReferencedStudySequence
+    # → RTReferencedSeriesSequence (SeriesInstanceUID + ContourImageSequence).
+    # This is the same traversal SlicerRT uses in
+    # ``vtkSlicerDicomRtReader::GetReferencedSeriesInstanceUID()``, except we
+    # collect EVERY item rather than ``gotoFirstItem()`` so that a structure
+    # set spanning two series is detected as ambiguous instead of silently
+    # resolving to the first one.
+    referenced_series_uids: set[str] = field(default_factory=set)
+    referenced_image_sop_uids: set[str] = field(default_factory=set)
+    referenced_for_uids: set[str] = field(default_factory=set)
+    linkage_id: str = ""
 
     # ---- Synthetic STAPLE-consensus support ---------------------------------
     # When True, this entry has no real DICOM file backing it. The masks are
@@ -110,6 +132,14 @@ class RTDOSEEntry:
     frame_of_reference_uid: str
     study_instance_uid: str
     dose_summation_type: str  # "PLAN", "BEAM", "FRACTION", "MULTI_PLAN", or ""
+    # ---- v3: explicit DICOM reference edges --------------------------------
+    # ``referenced_structure_set_uids`` is the direct dose → RTSTRUCT edge and
+    # is what makes plan-free linking possible. ``referenced_plan_uids`` is
+    # captured for display/diagnostics only — RTPLAN files are never required
+    # nor traversed (deliberate project constraint).
+    referenced_structure_set_uids: set[str] = field(default_factory=set)
+    referenced_plan_uids: set[str] = field(default_factory=set)
+    linkage_id: str = ""
 
     @property
     def filename(self) -> str:
@@ -183,10 +213,23 @@ class MetadataLibrary:
 
     def __init__(self) -> None:
         self.patients: dict[str, PatientEntry] = {}
+        # User-chosen answers to ambiguous links, keyed by
+        # ``linkage.override_key(...)``. Persisted in the session and applied
+        # by the resolver ahead of every automatic tier. Deliberately NOT
+        # cleared by :meth:`scan_folder` so a session can restore its answers
+        # around a rescan; an override naming data that is no longer present
+        # is ignored rather than treated as an error.
+        self.link_overrides: dict[str, str] = {}
         self.root_folder: str = ""
         self.issues: list[ScanIssue] = []
         self._total_files_scanned: int = 0
         self._total_files_failed: int = 0
+        # SOPInstanceUIDs already ingested this scan. A SOP UID identifies a
+        # DICOM *object*, so two files carrying the same one are the same
+        # object exported twice — ingesting both would double-count a series
+        # or offer the same dose as two candidates.
+        self._seen_sop_uids: set[str] = set()
+        self._total_files_duplicate: int = 0
 
     # ---- Scanning ---------------------------------------------------------
 
@@ -213,6 +256,8 @@ class MetadataLibrary:
         self.issues.clear()
         self._total_files_scanned = 0
         self._total_files_failed = 0
+        self._seen_sop_uids.clear()
+        self._total_files_duplicate = 0
         self.root_folder = folder_path
 
         all_files: list[str] = []
@@ -236,6 +281,10 @@ class MetadataLibrary:
         # Merge anonymisation aliases BEFORE issue derivation — the merge
         # turns "orphan RTSTRUCT" warnings into resolved links.
         self._merge_anonymisation_aliases()
+        # Linkage runs after the alias merge (which can move entries between
+        # PatientEntries) and before issue derivation, so the reference graph
+        # is built over the final grouping.
+        assign_linkage_ids(self)
         self._derive_issues()
 
     def _ingest_file(self, file_path: str, custom_overrides: Mapping[str, str] | None) -> None:
@@ -252,6 +301,14 @@ class MetadataLibrary:
             self._total_files_failed += 1
             return
         study_date = _get_str(ds, "StudyDate")
+
+        # Same DICOM object exported to two paths — ingest it once.
+        sop_uid = _get_str(ds, "SOPInstanceUID")
+        if sop_uid:
+            if sop_uid in self._seen_sop_uids:
+                self._total_files_duplicate += 1
+                return
+            self._seen_sop_uids.add(sop_uid)
 
         # Resolve FrameOfReferenceUID based on modality (RTSTRUCT stores it differently).
         for_uid = _resolve_frame_of_reference_uid(ds, modality)
@@ -272,7 +329,7 @@ class MetadataLibrary:
             context.study_dates.add(study_date)
 
         if modality in _IMAGE_MODALITIES:
-            self._add_image_file(context, ds, file_path, modality, for_uid)
+            self._add_image_file(context, ds, file_path, modality, for_uid, study_uid)
         elif modality == "RTSTRUCT":
             self._add_rtstruct(context, ds, file_path, for_uid, study_uid, custom_overrides)
         elif modality == "RTDOSE":
@@ -299,13 +356,17 @@ class MetadataLibrary:
         file_path: str,
         modality: str,
         for_uid: str,
+        study_uid: str = "",
     ) -> None:
         series_uid = _get_str(ds, "SeriesInstanceUID")
         if not series_uid:
             return
+        sop_uid = _get_str(ds, "SOPInstanceUID")
         for entry in context.image_series:
             if entry.series_instance_uid == series_uid:
                 entry.files.append(file_path)
+                if sop_uid:
+                    entry.sop_instance_uids.add(sop_uid)
                 return
         context.image_series.append(
             ImageSeriesEntry(
@@ -313,6 +374,8 @@ class MetadataLibrary:
                 modality=modality,
                 frame_of_reference_uid=for_uid,
                 files=[file_path],
+                study_instance_uid=study_uid,
+                sop_instance_uids={sop_uid} if sop_uid else set(),
             )
         )
 
@@ -328,6 +391,7 @@ class MetadataLibrary:
         sop_uid = _get_str(ds, "SOPInstanceUID")
         source = derive_source_label(ds, file_path, custom_overrides=custom_overrides)
         organs = _extract_organs(ds)
+        ref_series, ref_images, ref_fors = _extract_rtstruct_references(ds)
         context.rtstructs.append(
             RTSTRUCTEntry(
                 sop_instance_uid=sop_uid,
@@ -345,6 +409,9 @@ class MetadataLibrary:
                 manufacturer_model_name=_get_str(ds, "ManufacturerModelName"),
                 reviewer_name=_get_str(ds, "ReviewerName"),
                 operators_name=_get_str(ds, "OperatorsName"),
+                referenced_series_uids=ref_series,
+                referenced_image_sop_uids=ref_images,
+                referenced_for_uids=ref_fors,
             )
         )
 
@@ -357,6 +424,7 @@ class MetadataLibrary:
         study_uid: str,
     ) -> None:
         sop_uid = _get_str(ds, "SOPInstanceUID")
+        ref_structs, ref_plans = _extract_rtdose_references(ds)
         context.rtdoses.append(
             RTDOSEEntry(
                 sop_instance_uid=sop_uid,
@@ -364,6 +432,8 @@ class MetadataLibrary:
                 frame_of_reference_uid=for_uid,
                 study_instance_uid=study_uid,
                 dose_summation_type=_get_str(ds, "DoseSummationType"),
+                referenced_structure_set_uids=ref_structs,
+                referenced_plan_uids=ref_plans,
             )
         )
 
@@ -608,6 +678,82 @@ def _resolve_frame_of_reference_uid(ds: Any, modality: str) -> str:
                     return uid
         # Some files (rare) also carry a top-level tag
     return _get_str(ds, "FrameOfReferenceUID")
+
+
+def _extract_rtstruct_references(ds: Any) -> tuple[set[str], set[str], set[str]]:
+    """Read an RTSTRUCT's explicit references to its imaging series.
+
+    Returns ``(series_uids, image_sop_uids, for_uids)`` gathered from
+    ``ReferencedFrameOfReferenceSequence`` → ``RTReferencedStudySequence`` →
+    ``RTReferencedSeriesSequence``. Every item at every level is collected
+    (SlicerRT stops at the first), which is what lets the resolver tell a
+    single unambiguous reference apart from a structure set that genuinely
+    spans two series.
+
+    ``ContourImageSequence`` is read from the RTReferencedSeries level rather
+    than by walking ``ROIContourSequence``: it carries the same per-slice SOP
+    UIDs but is a single flat list per series, so a structure set with
+    thousands of contours costs one short loop instead of tens of thousands.
+    """
+    series_uids: set[str] = set()
+    image_sops: set[str] = set()
+    for_uids: set[str] = set()
+
+    for for_item in getattr(ds, "ReferencedFrameOfReferenceSequence", None) or []:
+        uid = _get_str(for_item, "FrameOfReferenceUID")
+        if uid:
+            for_uids.add(uid)
+        for study_item in getattr(for_item, "RTReferencedStudySequence", None) or []:
+            for series_item in getattr(study_item, "RTReferencedSeriesSequence", None) or []:
+                series_uid = _get_str(series_item, "SeriesInstanceUID")
+                if series_uid:
+                    series_uids.add(series_uid)
+                for image_item in getattr(series_item, "ContourImageSequence", None) or []:
+                    sop = _get_str(image_item, "ReferencedSOPInstanceUID")
+                    if sop:
+                        image_sops.add(sop)
+
+    # Fallback for writers that omit the RTReferencedSeries level entirely but
+    # still reference images per contour. Only walked when the cheap path came
+    # back empty, so the common case never pays for it.
+    if not series_uids and not image_sops:
+        for roi_contour in getattr(ds, "ROIContourSequence", None) or []:
+            for contour in getattr(roi_contour, "ContourSequence", None) or []:
+                for image_item in getattr(contour, "ContourImageSequence", None) or []:
+                    sop = _get_str(image_item, "ReferencedSOPInstanceUID")
+                    if sop:
+                        image_sops.add(sop)
+
+    return series_uids, image_sops, for_uids
+
+
+def _extract_rtdose_references(ds: Any) -> tuple[set[str], set[str]]:
+    """Read an RTDOSE's explicit references — ``(structure_set_uids, plan_uids)``.
+
+    ``ReferencedStructureSetSequence`` on the dose is the edge that closes the
+    dose → structure set → series chain without needing an RTPLAN. It is not
+    populated by every treatment planning system, which is why the resolver
+    keeps lower tiers behind it. Plan UIDs are recorded but never traversed.
+    """
+    struct_uids: set[str] = set()
+    plan_uids: set[str] = set()
+    for item in getattr(ds, "ReferencedStructureSetSequence", None) or []:
+        uid = _get_str(item, "ReferencedSOPInstanceUID")
+        if uid:
+            struct_uids.add(uid)
+    for item in getattr(ds, "ReferencedRTPlanSequence", None) or []:
+        uid = _get_str(item, "ReferencedSOPInstanceUID")
+        if uid:
+            plan_uids.add(uid)
+        # Some writers nest the structure-set reference inside the plan
+        # reference rather than placing it at the top level. Reading it here
+        # is still plan-file-free: it is a UID sitting in the dose object, not
+        # a traversal into an RTPLAN file.
+        for nested in getattr(item, "ReferencedStructureSetSequence", None) or []:
+            uid = _get_str(nested, "ReferencedSOPInstanceUID")
+            if uid:
+                struct_uids.add(uid)
+    return struct_uids, plan_uids
 
 
 def _extract_organs(ds: Any) -> list[OrganEntry]:

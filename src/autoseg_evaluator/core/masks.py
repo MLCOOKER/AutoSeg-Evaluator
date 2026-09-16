@@ -379,26 +379,14 @@ def gt_z_extent_mm(gt_mask: sitk.Image) -> tuple[float, float] | None:
 def find_reference_image_folder(library, patient_id: str, rtstruct_sop_uid: str) -> str | None:
     """Locate the folder containing the CT/MR/PT series referenced by an RTSTRUCT.
 
-    Uses ``FrameOfReferenceUID`` from the loaded :class:`MetadataLibrary` —
-    falls back to ``None`` if no matching image series is found.
+    Delegates to :mod:`autoseg_evaluator.data.linkage`, which resolves the link
+    from the structure set's explicit DICOM references and only falls back to
+    FrameOfReferenceUID when those are absent. Returns ``None`` when nothing
+    matched *or* when several series matched equally well — an ambiguous link
+    is never silently resolved to the first candidate, which is what this
+    function used to do. The Load Data tab surfaces those cases so the user
+    can settle them before any computation starts.
     """
-    patient = library.patients.get(patient_id)
-    if patient is None:
-        return None
-    target_for = None
-    for ctx in patient.contexts:
-        for rtss in ctx.rtstructs:
-            if rtss.sop_instance_uid == rtstruct_sop_uid:
-                target_for = rtss.frame_of_reference_uid
-                break
-        if target_for is not None:
-            break
-    if target_for is None:
-        return None
-    for ctx in patient.contexts:
-        if ctx.frame_of_reference_uid != target_for:
-            continue
-        for series in ctx.image_series:
-            if series.files:
-                return os.path.dirname(series.files[0])
-    return None
+    from autoseg_evaluator.data.linkage import reference_image_folder
+
+    return reference_image_folder(library, patient_id, rtstruct_sop_uid)

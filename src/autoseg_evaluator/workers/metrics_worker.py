@@ -35,6 +35,7 @@ from autoseg_evaluator.core.staple import (
     compute_staple,
     sensitivity_specificity_vs_reference,
 )
+from autoseg_evaluator.data.linkage import resolve_dose
 
 # "Mode" value for the per-organ STAPLE summary row (sensitivity/specificity
 # live on the per-rater rows; this row carries the aggregate consensus metrics
@@ -85,9 +86,14 @@ class MetricsWorker(QObject):
         self._cancelled = False
         # Caches keyed by SOP UID / patient ID to avoid redundant DICOM I/O
         self._rtstruct_cache: dict[str, Any] = {}
-        self._ct_cache: dict[str, Any] = {}
+        # Keyed by (patient_id, image folder) and (patient_id, dose SOP UID)
+        # rather than by patient alone: one patient can legitimately have more
+        # than one CT and more than one dose (re-irradiation, replans), and a
+        # patient-level key silently served the first one to every structure
+        # set that followed.
+        self._ct_cache: dict[tuple[str, str], Any] = {}
         self._mask_cache: dict[tuple[str, str, int], Any] = {}
-        self._dose_cache: dict[str, Any] = {}
+        self._dose_cache: dict[tuple[str, str], Any] = {}
         # STAPLE summary scalars captured while synthesising a multi-observer
         # consensus GT (Tab 2), keyed by (patient_id, synthetic_sop, roi_number).
         # Lets the GT branch emit a "STAPLE Details" row without re-running EM.
@@ -355,7 +361,7 @@ class MetricsWorker(QObject):
         # doesn't hold the extra ~200 MB. The dose dataset stays cached — it
         # is consulted by the DVH branch below.
         if drop_ct_after_masks:
-            self._ct_cache.pop(group["patient_id"], None)
+            self._release_ct(group["patient_id"], group["gt_sop"])
             del ct  # noqa: F841 — drop the local ref too so refcount can hit 0
             gc.collect()
 
@@ -469,7 +475,7 @@ class MetricsWorker(QObject):
                     row["metrics"]["staple_sensitivity"] = ss[0]
                     row["metrics"]["staple_specificity"] = ss[1]
             if self._dvh_config.any_enabled():
-                dose_ds = self._load_dose(group["patient_id"])
+                dose_ds = self._load_dose(group["patient_id"], group["gt_sop"])
                 if dose_ds is not None:
                     try:
                         row["metrics"].update(
@@ -523,7 +529,7 @@ class MetricsWorker(QObject):
         GT vs itself is degenerate. Returns ``None`` if no dose is
         available for the patient (silently skipped).
         """
-        dose_ds = self._load_dose(group["patient_id"])
+        dose_ds = self._load_dose(group["patient_id"], group["gt_sop"])
         if dose_ds is None:
             return None
         row = self._make_row_skeleton(
@@ -642,7 +648,11 @@ class MetricsWorker(QObject):
         pool_idx_by_id = {id(r): i for i, r in enumerate(staple_pool)}
         # Dose is computed per rater (each source label's own contour), so the
         # results carry dose for every rater — not just the consensus.
-        dose_ds = self._load_dose(group["patient_id"]) if self._dvh_config.any_enabled() else None
+        dose_ds = (
+            self._load_dose(group["patient_id"], group["gt_sop"])
+            if self._dvh_config.any_enabled()
+            else None
+        )
         # When truncation is active the test raters' masks were cropped to the
         # GT extent, so truncate their DVH contour planes to match. The GT
         # rater is never truncated.
@@ -711,7 +721,7 @@ class MetricsWorker(QObject):
 
         # Consensus dose row (gt_dose): DVH of the binary thresholded consensus.
         if self._dvh_config.any_enabled():
-            dose_ds = self._load_dose(group["patient_id"])
+            dose_ds = self._load_dose(group["patient_id"], group["gt_sop"])
             if dose_ds is not None:
                 out.append(self._make_consensus_dose_row(group, consensus_mask, dose_ds))
         return out
@@ -1052,19 +1062,25 @@ class MetricsWorker(QObject):
         return None
 
     def _load_ct(self, patient_id: str, rtstruct_sop_uid: str):
-        if patient_id in self._ct_cache:
-            return self._ct_cache[patient_id]
         folder = find_reference_image_folder(self._library, patient_id, rtstruct_sop_uid)
         if folder is None:
-            self._ct_cache[patient_id] = None
             return None
+        key = (patient_id, folder)
+        if key in self._ct_cache:
+            return self._ct_cache[key]
         try:
             image = read_dicom_image(folder)
         except Exception:  # noqa: BLE001 — corrupt CT folder shouldn't crash the batch
-            self._ct_cache[patient_id] = None
+            self._ct_cache[key] = None
             return None
-        self._ct_cache[patient_id] = image
+        self._ct_cache[key] = image
         return image
+
+    def _release_ct(self, patient_id: str, rtstruct_sop_uid: str) -> None:
+        """Drop one cached CT volume — the counterpart to :meth:`_load_ct`."""
+        folder = find_reference_image_folder(self._library, patient_id, rtstruct_sop_uid)
+        if folder is not None:
+            self._ct_cache.pop((patient_id, folder), None)
 
     def _get_mask(self, patient_id: str, sop_uid: str, roi_number: int, ct, rtss):
         key = (patient_id, sop_uid, roi_number)
@@ -1126,30 +1142,34 @@ class MetricsWorker(QObject):
         gc.collect()
         return consensus
 
-    def _load_dose(self, patient_id: str):
-        if patient_id in self._dose_cache:
-            return self._dose_cache[patient_id]
-        patient = self._library.patients.get(patient_id) if self._library else None
-        if patient is None:
-            self._dose_cache[patient_id] = None
+    def _load_dose(self, patient_id: str, rtstruct_sop_uid: str):
+        """The dose belonging to one structure set, or ``None``.
+
+        v2 picked a dose per *patient* — it walked every imaging context and
+        kept the first PLAN-summation dose it saw, never consulting the
+        structure set at all. On a patient with two courses that silently
+        applied one course's dose to both. Resolution now goes through
+        :func:`~autoseg_evaluator.data.linkage.resolve_dose`, which follows the
+        dose's own ``ReferencedStructureSetSequence`` first and returns nothing
+        when two doses are equally plausible. The Load Data tab blocks on those
+        ambiguities before a run can start, so reaching ``None`` here means the
+        patient genuinely has no dose for this structure set.
+        """
+        if self._library is None:
             return None
-        # Prefer PLAN-summation dose; otherwise any dose
-        chosen = None
-        for ctx in patient.contexts:
-            for dose in ctx.rtdoses:
-                if chosen is None or (
-                    dose.dose_summation_type == "PLAN" and chosen.dose_summation_type != "PLAN"
-                ):
-                    chosen = dose
-        if chosen is None:
-            self._dose_cache[patient_id] = None
+        res = resolve_dose(self._library, patient_id, rtstruct_sop_uid)
+        if not res.is_resolved:
             return None
+        chosen = res.target
+        key = (patient_id, chosen.sop_instance_uid)
+        if key in self._dose_cache:
+            return self._dose_cache[key]
         try:
             ds = pydicom.dcmread(chosen.file_path, force=True)
         except Exception:  # noqa: BLE001
-            self._dose_cache[patient_id] = None
+            self._dose_cache[key] = None
             return None
-        self._dose_cache[patient_id] = ds
+        self._dose_cache[key] = ds
         return ds
 
     def _evict_patient_caches(self, patient_id: str) -> None:
@@ -1162,8 +1182,10 @@ class MetricsWorker(QObject):
         cohorts. Without eviction, peak RAM grows linearly with the cohort
         size; with it, peak RAM is bounded by a single patient's data.
         """
-        self._ct_cache.pop(patient_id, None)
-        self._dose_cache.pop(patient_id, None)
+        for key in [k for k in self._ct_cache if k[0] == patient_id]:
+            self._ct_cache.pop(key, None)
+        for key in [k for k in self._dose_cache if k[0] == patient_id]:
+            self._dose_cache.pop(key, None)
         # Drop every mask whose key starts with this patient_id.
         mask_keys = [k for k in self._mask_cache if k[0] == patient_id]
         for k in mask_keys:

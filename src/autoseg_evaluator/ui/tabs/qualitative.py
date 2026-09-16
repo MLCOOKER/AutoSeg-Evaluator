@@ -161,7 +161,7 @@ class QualitativeTab(QWidget):
         self._source_color: dict[str, int] = {}
 
         # Loading caches (bounded to a couple of patients)
-        self._ct_cache: dict[str, sitk.Image] = {}
+        self._ct_cache: dict[tuple[str, str], sitk.Image] = {}
         self._mask_cache: dict[tuple[str, int], np.ndarray] = {}
         self._anim: QPropertyAnimation | None = None
 
@@ -681,18 +681,22 @@ class QualitativeTab(QWidget):
     # ---- Data loading + cache --------------------------------------------
 
     def _get_ct(self, patient_id: str, gt_sop_uid: str) -> sitk.Image | None:
-        if patient_id in self._ct_cache:
-            return self._ct_cache[patient_id]
         if self._library is None:
             return None
         folder = find_reference_image_folder(self._library, patient_id, gt_sop_uid)
         if folder is None:
             return None
+        # Keyed by the resolved image folder, not by patient: a patient with
+        # two planning CTs would otherwise have the first one shown for every
+        # structure set that followed.
+        key = (patient_id, folder)
+        if key in self._ct_cache:
+            return self._ct_cache[key]
         if len(self._ct_cache) >= 2:
             self._ct_cache.pop(next(iter(self._ct_cache)))
             self._mask_cache.clear()
         image = read_dicom_image(folder)
-        self._ct_cache[patient_id] = image
+        self._ct_cache[key] = image
         return image
 
     def _get_mask(self, item: QualitativeItem, ct: sitk.Image) -> np.ndarray | None:

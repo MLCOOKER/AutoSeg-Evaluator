@@ -6,6 +6,55 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Dose was matched to structure sets by PatientID alone.** `_load_dose()`
+  walked every imaging context for the patient and kept the first
+  PLAN-summation dose it found, never consulting the structure set. On a
+  patient with two courses (re-irradiation, replan, composite) that silently
+  applied one course's dose to both — a wrong answer, reported without any
+  warning. Dose is now resolved per structure set.
+- **The reference CT was cached per patient.** `_load_ct()` resolved the right
+  series for the first structure set, then served that same volume to every
+  later structure set of the same patient regardless of which image it was
+  actually drawn on. Both the metrics worker and the qualitative (Likert)
+  viewer are now keyed by the resolved image folder. The same fix applies to
+  the dose cache, keyed by dose SOPInstanceUID.
+- **Files sharing a SOPInstanceUID are ingested once.** A SOP UID identifies a
+  DICOM object, so the same object exported to two paths (`X.dcm` and
+  `X.0001.dcm`, which Eclipse exports routinely produce) was being counted
+  twice — presenting one structure set as two vendor entries and one dose as
+  two candidates.
+
+### Added
+- **Explicit-reference DICOM linking (`autoseg_evaluator.data.linkage`).**
+  Answers the reviewer criticism that `FrameOfReferenceUID` alone cannot match
+  dose to structure set when one Frame of Reference holds several imaging
+  studies, structure sets and doses. Links are now resolved from the UID
+  references DICOM already carries, through an ordered cascade — `explicit`
+  (a referenced UID names the target outright) → `sop-overlap` (per-slice
+  `ContourImageSequence` UIDs) → `for+study` → `for` → `singleton` — and,
+  critically, **an ambiguous link is reported rather than guessed**. Where two
+  candidates tie, every candidate is surfaced for the user to choose between,
+  and the choice is recorded in `MetadataLibrary.link_overrides`.
+
+  RTPLAN is never required nor traversed: the dose → structure set edge comes
+  straight off the dose object's `ReferencedStructureSetSequence` (including
+  the copy some writers nest inside `ReferencedRTPlanSequence`), so the chain
+  dose → structure set → series closes with no plan file present. Verified on
+  the HN1 sample set, where all 7 vendor structure sets and the dose resolve at
+  the `explicit` tier.
+- `linkage.assign_linkage_ids()` stamps a `linkage_id` on every series,
+  structure set and dose — the connected component of the explicit reference
+  graph, i.e. one coherent treatment context. Frame of Reference is never used
+  to *merge* components, only as a per-entry fallback label.
+- `tests/test_slicer_linkage_equivalence.py` pins the RTSTRUCT → series
+  traversal against a port of SlicerRT's
+  `vtkSlicerDicomRtReader::GetReferencedSeriesInstanceUID()`, and records the
+  one deliberate divergence: SlicerRT's `gotoFirstItem()` silently returns the
+  first of several referenced series, where we report an ambiguity.
+- `tests/test_linkage.py` — 19 tests over synthetic DICOM, including a
+  two-course re-irradiation fixture sharing one Frame of Reference.
+
 ### Changed
 - **The sub-voxel (`continuous`) mask rasteriser is now the default.**
   ⚠️ **This changes numerical output.** Every mask-derived metric moves —
