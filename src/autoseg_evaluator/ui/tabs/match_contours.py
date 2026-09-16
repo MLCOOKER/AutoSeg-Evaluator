@@ -156,6 +156,7 @@ class MatchContoursTab(QWidget):
         self._refresh_organ_badges()
 
     def _refresh_organ_badges(self) -> None:
+        """Stamp every drawer with the organ it will be grouped under."""
         index = getattr(self, "_organ_index", None)
         for drawer in self._drawers.values():
             if index is None:
@@ -686,7 +687,13 @@ class MatchContoursTab(QWidget):
         tree's ✓ marks always reflect what is *actually* in the drawers right
         now. Cheaper and more correct than threading per-organ mark/unmark
         calls through every code path.
+
+        Organ badges are refreshed here for the same reason. The organ index
+        arrives when a folder loads, which is *before* auto-match has created
+        any drawer, so stamping badges only when the index is set leaves every
+        drawer blank forever.
         """
+        self._refresh_organ_badges()
         marks: set[tuple[str, str, int]] = set()
         for drawer in self._drawers.values():
             for triple in drawer.all_assigned_organs():
