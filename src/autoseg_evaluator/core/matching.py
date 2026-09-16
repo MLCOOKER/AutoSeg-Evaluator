@@ -140,12 +140,22 @@ MISMATCH_INDEX = "mismatch-index"
 MISMATCH_POSITION = "mismatch-position"
 MISMATCH_CANONICAL = "mismatch-canonical"
 
-MISMATCH_REASONS = {
+MISMATCH_REASONS: dict[str, str] = {
     MISMATCH_LATERALITY: "opposite sides of the body",
     MISMATCH_INDEX: "different numbered structures",
     MISMATCH_POSITION: "opposite anatomical positions",
     MISMATCH_CANONICAL: "two different structures named in TG-263",
 }
+
+
+def is_mismatch(method: str) -> bool:
+    """True when a match method means "these name different structures".
+
+    Callers use this rather than comparing the score, because a flagged pair
+    keeps its real similarity — the point is that a high score is exactly when
+    the warning matters.
+    """
+    return method in MISMATCH_REASONS
 
 
 def structural_mismatch(a: str, b: str) -> str:
@@ -218,11 +228,12 @@ def similarity(
     if not _ca or not _cb:
         return Match(0.0, "none")
 
-    # Checked before the dictionary short-circuit: two names can resolve to
-    # the same canonical stem and still be opposite sides of the body.
+    # Recorded, not acted on. Zeroing the score only pushes the ranking onto
+    # the next candidate, which on real data is another wrong organ - Lens_R
+    # blocked from Lens_L simply lands on Lung_R instead. There is always a
+    # next-best string match, so the useful thing to show is the *closest*
+    # structure the vendor actually has, carrying a visible warning.
     conflict = structural_mismatch(a, b)
-    if conflict:
-        return Match(0.0, conflict)
 
     # TG-263 short-circuit — both sides resolved to the same canonical.
     if a_resolved and b_resolved and _ca == _cb:
@@ -230,29 +241,25 @@ def similarity(
 
     # …and its mirror image. When the dictionary recognises *both* names and
     # gives them different canonicals, the standard itself has said these are
-    # two structures, and no amount of string resemblance should overrule that.
-    # ``Lens_L`` against ``Lung_L`` scores 0.67 on characters — enough to pass
-    # the default 0.6 threshold and become the chosen match when the real lens
-    # is missing from a vendor's output.
-    #
-    # The risk is a dictionary that splits two genuinely equivalent names, in
-    # which case a correct pair is refused. That costs a red badge on a good
-    # match, which is visible and dismissible; the alternative costs a wrong
-    # organ in a published metric, which is neither.
+    # two structures. ``Lens_L`` against ``Lung_L`` scores 0.67 on characters,
+    # enough to pass the default 0.6 threshold and be chosen whenever the real
+    # lens is missing from a vendor's output.
     if a_resolved and b_resolved and _ca != _cb:
-        return Match(0.0, MISMATCH_CANONICAL)
+        conflict = conflict or MISMATCH_CANONICAL
 
     # Fall back to fuzzy on the cleaned RAW forms (no dictionary substitution).
     ca = _normalise_only(a, rules)
     cb = _normalise_only(b, rules)
-    if ca == cb:
-        return Match(1.0, "fuzzy")
-    if ca.replace(" ", "") == cb.replace(" ", ""):
-        return Match(1.0, "fuzzy")
+    if ca == cb or ca.replace(" ", "") == cb.replace(" ", ""):
+        return Match(1.0, conflict or "fuzzy")
     lev_norm = _normalised_levenshtein(ca, cb)
     cos_dist = _cosine_char_distance(ca, cb)
     distance = 0.5 * lev_norm + 0.5 * cos_dist
     score = max(0.0, min(1.0, 1.0 - distance))
+    if conflict:
+        # The score is kept so ranking still surfaces the nearest structure;
+        # the method is what tells the user not to trust it.
+        return Match(score, conflict)
     return Match(score, "fuzzy" if score > 0 else "none")
 
 

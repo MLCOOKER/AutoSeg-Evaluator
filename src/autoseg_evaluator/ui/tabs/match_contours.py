@@ -59,6 +59,7 @@ from autoseg_evaluator.core.masks import (
 from autoseg_evaluator.core.matching import (
     ReplacementRule,
     best_match,
+    is_mismatch,
     similarity,
 )
 from autoseg_evaluator.data.metadata import (
@@ -942,7 +943,7 @@ class MatchContoursTab(QWidget):
                         rtstruct_sop_uid=rtss.sop_instance_uid,
                         roi_number=chosen.roi_number,
                         similarity=match.score,
-                        below_threshold=match.score < threshold,
+                        below_threshold=match.score < threshold or is_mismatch(match.method),
                         match_method=match.method,
                     )
                 )
@@ -1006,7 +1007,9 @@ class MatchContoursTab(QWidget):
                 rules=self._replacement_rules(),
                 synonyms_flat=self._synonyms_flat,
             )
-            below = match.score < self._similarity_threshold()
+            # A structural mismatch is flagged however well it scored — a high
+            # score is precisely when the warning matters.
+            below = match.score < self._similarity_threshold() or is_mismatch(match.method)
             sub.tests.append(
                 TestRow(
                     source_label=rtss.source_label,

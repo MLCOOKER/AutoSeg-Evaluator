@@ -18,6 +18,7 @@ from autoseg_evaluator.core.matching import (
     best_match,
     canonicalise,
     canonicalise_with_meta,
+    is_mismatch,
     similarity,
     structural_mismatch,
 )
@@ -278,8 +279,12 @@ def test_integration_rules_then_synonyms():
 def test_opposite_sides_never_match(gt, candidate, synonyms_flat):
     assert structural_mismatch(gt, candidate) == MISMATCH_LATERALITY
     match = similarity(gt, candidate, synonyms_flat=synonyms_flat)
-    assert match.score == 0.0
     assert match.method == MISMATCH_LATERALITY
+    assert is_mismatch(match.method)
+    # Flagged, not zeroed: zeroing only pushes the ranking onto the next
+    # candidate, which on real data is another wrong organ. The nearest
+    # structure the vendor actually has is the useful thing to show.
+    assert match.score > 0.0
 
 
 def test_a_side_against_no_side_is_still_allowed(synonyms_flat):
@@ -297,9 +302,9 @@ def test_a_side_against_no_side_is_still_allowed(synonyms_flat):
         ("A_Aorta_Asc", "A_Aorta_Desc", MISMATCH_POSITION),
     ],
 )
-def test_other_structural_conflicts_are_blocked(gt, candidate, reason, synonyms_flat):
+def test_other_structural_conflicts_are_flagged(gt, candidate, reason, synonyms_flat):
     assert structural_mismatch(gt, candidate) == reason
-    assert similarity(gt, candidate, synonyms_flat=synonyms_flat).score == 0.0
+    assert similarity(gt, candidate, synonyms_flat=synonyms_flat).method == reason
 
 
 @pytest.mark.parametrize(
@@ -330,17 +335,17 @@ def test_best_match_prefers_the_right_side_over_a_closer_wrong_one(synonyms_flat
     assert match.score == 1.0
 
 
-def test_the_only_candidate_being_the_wrong_side_scores_zero(synonyms_flat):
+def test_the_only_candidate_being_the_wrong_side_is_flagged(synonyms_flat):
     """The reported failure: the wrong side is all a vendor produced.
 
-    It is still returned — the app surfaces a poor match rather than dropping
-    a contour silently — but with score 0 and a reason, so it is flagged
-    instead of feeding metric computation unnoticed.
+    The contour is still offered, and still ranked on its real similarity, so
+    the user sees the closest thing that vendor has. What changed is that it
+    now arrives carrying a reason instead of looking like an ordinary match.
     """
     chosen, match = best_match("Lens_R", ["Lens_L"], key=lambda x: x, synonyms_flat=synonyms_flat)
     assert chosen == "Lens_L"
-    assert match.score == 0.0
     assert match.method in MISMATCH_REASONS
+    assert match.score > 0.6, "scores high — which is exactly why it needs flagging"
 
 
 def test_every_mismatch_reason_is_explainable():
@@ -363,7 +368,7 @@ def test_every_mismatch_reason_is_explainable():
         ("Esophagus", "Esophagus_S"),
     ],
 )
-def test_two_known_canonicals_never_match_each_other(gt, candidate, synonyms_flat):
+def test_two_known_canonicals_are_flagged_against_each_other(gt, candidate, synonyms_flat):
     """Reported case: Lens_L matched Lung_L at 0.67 once the real lens was missing.
 
     When the dictionary recognises both names and gives them different
@@ -371,8 +376,8 @@ def test_two_known_canonicals_never_match_each_other(gt, candidate, synonyms_fla
     resemblance does not get to overrule that.
     """
     match = similarity(gt, candidate, synonyms_flat=synonyms_flat)
-    assert match.score == 0.0
     assert match.method == MISMATCH_CANONICAL
+    assert is_mismatch(match.method)
 
 
 @pytest.mark.parametrize(
@@ -383,9 +388,9 @@ def test_two_known_canonicals_never_match_each_other(gt, candidate, synonyms_fla
         ("Parotids", "Parotid_R"),
     ],
 )
-def test_a_pair_organ_does_not_match_one_of_its_sides(gt, candidate, synonyms_flat):
+def test_a_pair_organ_is_flagged_against_one_of_its_sides(gt, candidate, synonyms_flat):
     """Comparing both lungs against the left one would give a meaningless Dice."""
-    assert similarity(gt, candidate, synonyms_flat=synonyms_flat).score == 0.0
+    assert is_mismatch(similarity(gt, candidate, synonyms_flat=synonyms_flat).method)
 
 
 def test_an_unknown_name_still_reaches_the_fuzzy_tier(synonyms_flat):

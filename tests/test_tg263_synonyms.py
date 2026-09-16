@@ -329,3 +329,61 @@ def test_colliding_canonicals_are_known():
     seen = Counter(_norm(c) for c in raw if _norm(c))
     colliding = sorted(k for k, n in seen.items() if n > 1)
     assert colliding == ["vbs"], f"unexpected canonical collisions: {colliding}"
+
+
+def test_laterality_inverted_variants_are_refiled():
+    """A variant naming the opposite side belongs to the opposite canonical.
+
+    The shipped dictionary swaps the left and right variant lists wholesale for
+    two organs. Read literally, "Left_Femur Neck" resolves to the *right*
+    femoral neck, and which of the pair wins otherwise depends on dictionary
+    ordering rather than on anything meaningful.
+    """
+    flat = flatten_synonyms(
+        {
+            "Femur_Neck_L": ["Right_Femur Neck", "Femur Neck_Rt"],
+            "Femur_Neck_R": ["Left_Femur Neck", "Femur Neck_Lt"],
+        }
+    )
+    assert flat["rightfemurneck"] == "Femur_Neck_R"
+    assert flat["femurneckrt"] == "Femur_Neck_R"
+    assert flat["leftfemurneck"] == "Femur_Neck_L"
+    assert flat["femurnecklt"] == "Femur_Neck_L"
+
+
+def test_an_inverted_variant_with_no_sibling_is_dropped():
+    """Mis-filing a side is worse than losing a synonym."""
+    flat = flatten_synonyms({"Femur_Neck_L": ["Right_Femur Neck"]})
+    assert "rightfemurneck" not in flat
+
+
+def test_shipped_dictionary_has_no_surviving_laterality_inversion():
+    """Guards the real data, not only the rule.
+
+    24 inverted variants ship in the dictionary today, covering Femur_Neck and
+    V_Iliac. None may survive flattening.
+    """
+    from autoseg_evaluator.core.organ_groups import extract_laterality
+
+    raw = load_synonyms(str(files("autoseg_evaluator.resources").joinpath("synonyms.json")))
+    flat = flatten_synonyms(raw)
+    for variant_key, canonical in flat.items():
+        c_side = extract_laterality(canonical)[1]
+        v_side = extract_laterality(variant_key)[1]
+        if c_side and v_side:
+            assert c_side == v_side, f"{variant_key!r} resolves to {canonical!r}"
+
+
+def test_the_two_known_inverted_organs_resolve_correctly():
+    """End to end on the real dictionary, for the organs actually affected."""
+    raw = load_synonyms(str(files("autoseg_evaluator.resources").joinpath("synonyms.json")))
+    flat = flatten_synonyms(raw)
+    cases = {
+        "Right_Femur Neck": "Femur_Neck_R",
+        "Left_Femur Neck": "Femur_Neck_L",
+        "Rt_Common iliac vein": "V_Iliac_R",
+        "Lt_Common iliac vein": "V_Iliac_L",
+    }
+    for spelling, expected in cases.items():
+        key = spelling.lower().replace(" ", "").replace("_", "").replace("-", "")
+        assert flat[key] == expected, f"{spelling} -> {flat[key]}"
