@@ -15,6 +15,15 @@ from typing import Any
 # Order of the fixed metadata columns shown before the dynamic metric columns.
 META_COLUMNS: list[tuple[str, str]] = [
     ("drawer", "Drawer"),
+    # Canonical organ grouping. ``drawer`` is whatever the ground-truth ROI
+    # happened to be called, so two patients whose manual contours were named
+    # differently sit in different drawers; these columns say which organ those
+    # drawers are actually of, which is what a cohort statistic groups on.
+    # Laterality and qualifier are broken out as their own columns because the
+    # downstream analysis pivots on them.
+    ("canonical_organ", "Organ"),
+    ("organ_laterality", "Side"),
+    ("organ_qualifier", "Structure type"),
     ("patient_id", "Patient"),
     ("comparison_mode", "Mode"),
     ("was_designated_gt", "Designated GT"),
@@ -28,6 +37,7 @@ META_COLUMNS: list[tuple[str, str]] = [
     ("truncated_slices", "Truncated slices"),
     ("truncated_extent_mm", "Truncated extent (mm)"),
     ("similarity", "Name similarity"),
+    ("organ_tier", "Organ match"),
     ("error", "Error"),
 ]
 
@@ -254,6 +264,40 @@ class ResultsManager:
         # at different tolerances can't be silently merged in Excel.
         self._sd_tau_mm: float | None = None
         self._apl_tau_mm: float | None = None
+        # ``{roi_name: OrganAssignment}``. Applied at read time rather than
+        # baked into rows when they are computed, so changing an organ
+        # assignment in the review dialog re-labels existing results instead of
+        # requiring the whole cohort to be recomputed.
+        self._organ_index: dict[str, Any] = {}
+
+    def set_organ_index(self, index: Any | None) -> None:
+        """Supply canonical organ assignments, keyed by raw ROI name.
+
+        Accepts either an :class:`~autoseg_evaluator.data.organ_index.OrganIndex`
+        or a plain mapping. Passing ``None`` clears the tagging, which simply
+        leaves the organ columns blank — results remain valid, they just are
+        not grouped.
+        """
+        if index is None:
+            self._organ_index = {}
+            return
+        mapping = getattr(index, "assignments", index)
+        self._organ_index = dict(mapping or {})
+
+    def organ_index(self) -> dict[str, Any]:
+        return dict(self._organ_index)
+
+    def _overlay_organ(self, row: dict[str, Any]) -> None:
+        """Label a row with the organ its ground-truth contour belongs to."""
+        if not self._organ_index:
+            return
+        found = self._organ_index.get(str(row.get("gt_roi_name") or ""))
+        if found is None:
+            return
+        row["canonical_organ"] = found.key.label()
+        row["organ_laterality"] = found.key.laterality
+        row["organ_qualifier"] = found.key.qualifier
+        row["organ_tier"] = found.tier
 
     def set_tolerances(self, sd_tau_mm: float | None, apl_tau_mm: float | None) -> None:
         """Record the τ values active for the *next* batch of rows added.
@@ -383,6 +427,8 @@ class ResultsManager:
     def clear(self) -> None:
         self._rows.clear()
         self._qualitative.clear()
+        # The organ index belongs to the loaded cohort, not to a batch of
+        # results, so it deliberately survives a clear.
         # Tolerances are batch-scoped — drop them when the batch is cleared.
         self._sd_tau_mm = None
         self._apl_tau_mm = None
@@ -402,6 +448,7 @@ class ResultsManager:
         for row in self._rows:
             r = dict(row)
             r["metrics"] = dict(row.get("metrics") or {})
+            self._overlay_organ(r)
             key = self._row_contour_key(row)
             if key is not None and has_qual:
                 assessed = key in self._qualitative
@@ -414,7 +461,9 @@ class ResultsManager:
             out.append(r)
         for key, entry in self._qualitative.items():
             if key not in consumed:
-                out.append(self._synthetic_qualitative_row(entry))
+                synthetic = self._synthetic_qualitative_row(entry)
+                self._overlay_organ(synthetic)
+                out.append(synthetic)
         return out
 
     def __len__(self) -> int:

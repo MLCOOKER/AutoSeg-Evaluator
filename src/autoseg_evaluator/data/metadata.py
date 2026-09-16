@@ -31,6 +31,15 @@ from autoseg_evaluator.data.linkage import assign_linkage_ids
 class OrganEntry:
     roi_number: int
     roi_name: str
+    #: ``RTROIInterpretedType`` (3006,00A4) from RTROIObservationsSequence —
+    #: ORGAN, CTV, PTV, EXTERNAL, SUPPORT, CONTROL, MARKER and so on. The only
+    #: non-guessed signal for what kind of structure a contour is, and on a
+    #: multi-vendor cohort it classifies roughly two names in five without
+    #: touching the name at all. Empty when the writer omits it (MIM and
+    #: MVision never populate it), in which case the organ-grouping layer falls
+    #: back to reading the name. Defaulted so older sessions and existing
+    #: tests construct unchanged.
+    interpreted_type: str = ""
 
 
 @dataclass
@@ -760,6 +769,19 @@ def _extract_organs(ds: Any) -> list[OrganEntry]:
     seq = getattr(ds, "StructureSetROISequence", None)
     if not seq:
         return []
+
+    # The interpreted type lives in a parallel sequence keyed by ROI number,
+    # so build the lookup once rather than rescanning it per ROI.
+    types_by_roi: dict[int, str] = {}
+    for item in getattr(ds, "RTROIObservationsSequence", None) or []:
+        try:
+            ref = int(getattr(item, "ReferencedROINumber", -1))
+        except (TypeError, ValueError):
+            continue
+        value = _get_str(item, "RTROIInterpretedType").upper()
+        if value:
+            types_by_roi[ref] = value
+
     organs: list[OrganEntry] = []
     for roi in seq:
         roi_name = _get_str(roi, "ROIName") or "UnknownOrgan"
@@ -767,7 +789,13 @@ def _extract_organs(ds: Any) -> list[OrganEntry]:
             roi_number = int(getattr(roi, "ROINumber", 0))
         except (TypeError, ValueError):
             roi_number = 0
-        organs.append(OrganEntry(roi_number=roi_number, roi_name=roi_name))
+        organs.append(
+            OrganEntry(
+                roi_number=roi_number,
+                roi_name=roi_name,
+                interpreted_type=types_by_roi.get(roi_number, ""),
+            )
+        )
     return organs
 
 

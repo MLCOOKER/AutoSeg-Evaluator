@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from autoseg_evaluator import __version__
+from autoseg_evaluator.data.organ_index import build_organ_index
 from autoseg_evaluator.data.results import ResultsManager
 from autoseg_evaluator.data.session import (
     DEFAULT_SUFFIX,
@@ -26,6 +27,7 @@ from autoseg_evaluator.data.session import (
     load_session_file,
     save_session,
 )
+from autoseg_evaluator.data.synonyms import flatten_synonyms, load_synonyms
 from autoseg_evaluator.ui.tabs.build_consensus import BuildConsensusTab
 from autoseg_evaluator.ui.tabs.compute import ComputeTab
 from autoseg_evaluator.ui.tabs.load_data import LoadDataTab
@@ -33,6 +35,7 @@ from autoseg_evaluator.ui.tabs.match_contours import MatchContoursTab
 from autoseg_evaluator.ui.tabs.qualitative import QualitativeTab
 from autoseg_evaluator.ui.tabs.results import ResultsTab
 from autoseg_evaluator.ui.theme import apply_theme
+from autoseg_evaluator.utils.paths import synonyms_path
 from autoseg_evaluator.utils.settings import save_settings
 from autoseg_evaluator.workers.metrics_worker import MetricsWorker
 
@@ -51,6 +54,8 @@ class MainWindow(QMainWindow):
         self._pending_session_restore: dict[str, Any] | None = None
         # Background metric computation
         self._results = ResultsManager()
+        # Canonical organ grouping for the loaded cohort; rebuilt on load.
+        self._organ_index: Any = None
         self._metrics_thread: QThread | None = None
         self._metrics_worker: MetricsWorker | None = None
 
@@ -103,6 +108,30 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self._tabs)
 
+    def _rebuild_organ_index(self) -> None:
+        """Re-derive canonical organ groups for the loaded cohort.
+
+        Cheap — a dictionary lookup per distinct ROI name — and re-run whenever
+        the cohort or the user's organ answers change. The result is handed to
+        the ResultsManager, which applies it at read time, so relabelling an
+        organ never means recomputing a metric.
+        """
+        if self._library is None:
+            self._results.set_organ_index(None)
+            return
+        try:
+            synonyms = flatten_synonyms(load_synonyms(synonyms_path()))
+        except Exception:  # noqa: BLE001 — a bad dictionary must not block loading
+            synonyms = {}
+        index = build_organ_index(
+            self._library,
+            synonyms_flat=synonyms,
+            manual=dict(self._settings.get("organ_assignments", {}) or {}),
+        )
+        self._organ_index = index
+        self._results.set_organ_index(index)
+        self._results_tab.refresh()
+
     def _on_library_loaded(self, library: Any) -> None:
         """Stash the loaded library so Match Contours / Compute tabs can read it."""
         self._library = library
@@ -110,6 +139,7 @@ class MainWindow(QMainWindow):
         self._match_tab.set_library(library)
         self._qualitative_tab.set_library(library)
         self._compute_tab.set_library(library)
+        self._rebuild_organ_index()
         # Persist updated last_folder right away — survives crashes mid-session
         save_settings(self._settings)
         # If a Load Session is in progress, this scan completion is the trigger
