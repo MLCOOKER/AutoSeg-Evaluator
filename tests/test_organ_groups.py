@@ -583,3 +583,40 @@ def test_a_spelling_the_dictionary_knows_is_not_left_to_the_fuzzy_tier(syn):
     # Saying so by hand resolves it.
     fixed = _assign("Oesophagus", syn=syn, manual={"Oesophagus": known.key.base})
     assert fixed.key == known.key
+
+
+def test_laterality_inside_a_parenthetical_is_not_stripped_away(syn):
+    """``Mammary tissue(Lt)`` and ``(Rt)`` are two organs, not one.
+
+    Found on a real paediatric cohort: the trailing-parenthetical rule was
+    removing the very token that carried the side, merging the left and the
+    right breast. The earlier corpus check missed it because it split names on
+    whitespace only, so "tissue(Lt)" never looked like a laterality token.
+    """
+    left = _assign("Mammary tissue(Lt)", syn=syn)
+    right = _assign("Mammary tissue(Rt)", syn=syn)
+    neither = _assign("Mammary tissue", syn=syn)
+
+    assert left.key.laterality == LATERALITY_L
+    assert right.key.laterality == LATERALITY_R
+    assert neither.key.laterality == LATERALITY_NONE
+    assert len({left.key, right.key, neither.key}) == 3
+    assert left.key.base == right.key.base == neither.key.base
+
+
+@pytest.mark.parametrize(
+    ("name", "side"),
+    [
+        ("Lung(L)", LATERALITY_L),
+        ("Kidney (Right)", LATERALITY_R),
+        ("Parotid(rt)", LATERALITY_R),
+    ],
+)
+def test_parenthetical_sides_survive_in_every_spelling(name, side, syn):
+    assert _assign(name, syn=syn).key.laterality == side
+
+
+def test_ordinary_annotations_are_still_stripped(syn):
+    """The guard must not stop the parenthetical rule doing its job."""
+    assert _assign("Brain(DRtoReview)", syn=syn).key == _assign("Brain", syn=syn).key
+    assert _assign("SpinalCord(StJude)", syn=syn).key == _assign("SpinalCord", syn=syn).key

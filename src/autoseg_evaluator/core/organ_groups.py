@@ -135,10 +135,19 @@ NONANATOMIC_TYPES = frozenset(
 DEFAULT_DECORATIONS: tuple[tuple[str, str], ...] = (
     (r"[_\s-]*experimental\b", "vendor model marker"),
     # A trailing parenthetical is usually an annotation — ``(BrachialPlex_proxy)``,
-    # ``(1)``, ``(StJude)`` — and safe to drop. One naming a target volume is
-    # not: ``Kidney_L(PTV)`` is the kidney cropped to the PTV, a different
-    # structure from the kidney, so the negative lookahead keeps it intact.
-    (r"\s*\((?![^)]*(?i:gtv|ctv|ptv|itv))[^)]*\)\s*$", "trailing parenthetical"),
+    # ``(1)``, ``(StJude)`` — and safe to drop. Two kinds are not.
+    #
+    # One naming a target volume marks a derived structure: ``Kidney_L(PTV)``
+    # is the kidney cropped to the PTV, not the kidney.
+    #
+    # One holding a side *is* the laterality: real data carries
+    # ``Mammary tissue(Lt)`` and ``Mammary tissue(Rt)``, and stripping those
+    # collapses the left and the right breast into one organ — precisely the
+    # merge this module exists to make impossible.
+    (
+        r"\s*\((?![^)]*(?i:gtv|ctv|ptv|itv))(?!\s*(?i:l|r|lt|rt|left|right)\s*\))[^)]*\)\s*$",
+        "trailing parenthetical",
+    ),
     (r"[_\s-]+MR\b", "contoured on MR"),
     (r"[_\s-]+F\b", "sex-specific template"),
     (r"[_\s-]+v\d+\s*$", "version suffix"),
@@ -422,6 +431,22 @@ def _split_canonical(canonical: str) -> tuple[str, str]:
     return base.replace(" ", "_") if lat else canonical, lat
 
 
+def _laterality_of(*candidates: str) -> str:
+    """First laterality found across several spellings of one name.
+
+    Decoration stripping can remove the very token that carries the side, so
+    the raw name is always consulted as well as the cleaned one. Losing a side
+    silently is far worse than keeping a decoration.
+    """
+    for candidate in candidates:
+        if not candidate:
+            continue
+        _stem, lat = extract_laterality(candidate)
+        if lat:
+            return lat
+    return LATERALITY_NONE
+
+
 def assign(
     roi_name: str,
     interpreted_type: str = "",
@@ -462,7 +487,7 @@ def assign(
         base, lat = _split_canonical(canonical)
         return OrganAssignment(
             roi_name=roi_name,
-            key=OrganKey(_slug(base), lat, qualifier),
+            key=OrganKey(_slug(base), lat or _laterality_of(roi_name), qualifier),
             tier=TIER_DICTIONARY,
             interpreted_type=interpreted_type,
         )
@@ -477,7 +502,7 @@ def assign(
             base, lat = _split_canonical(canonical)
             return OrganAssignment(
                 roi_name=roi_name,
-                key=OrganKey(_slug(base), lat, qualifier),
+                key=OrganKey(_slug(base), lat or _laterality_of(roi_name), qualifier),
                 tier=TIER_STRIPPED,
                 removed=removed,
                 interpreted_type=interpreted_type,
@@ -486,7 +511,8 @@ def assign(
     # Unresolved — stands alone, but still decomposed so that laterality and
     # qualifier are correct and a later fuzzy pass can only ever merge it with
     # something sharing both.
-    stem, lat = extract_laterality(clean or roi_name)
+    stem, _lat = extract_laterality(clean or roi_name)
+    lat = _laterality_of(clean or roi_name, roi_name)
     return OrganAssignment(
         roi_name=roi_name,
         key=OrganKey(_slug(stem), lat, qualifier),
