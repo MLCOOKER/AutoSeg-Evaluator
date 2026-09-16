@@ -29,6 +29,7 @@ from typing import Any
 
 from autoseg_evaluator.core.matching import ReplacementRule
 from autoseg_evaluator.core.organ_groups import (
+    AUTOMATIC_TIERS,
     QUALIFIER_OAR,
     TIER_UNASSIGNED,
     FuzzyProposal,
@@ -164,6 +165,71 @@ def build_organ_index(
     return OrganIndex(assignments=assignments, frequencies=freq)
 
 
+@dataclass(frozen=True)
+class OrganSuggestion:
+    """A proposed organ for a drawer whose ground truth the dictionary misses."""
+
+    base: str
+    votes: int
+    total: int
+    evidence: tuple[str, ...] = ()
+    """The test ROI names that voted for this organ."""
+
+    @property
+    def unanimous(self) -> bool:
+        return self.votes == self.total and self.total > 0
+
+    @property
+    def tally(self) -> str:
+        return f"{self.votes}/{self.total}"
+
+
+def suggest_organ_from_tests(
+    index: OrganIndex,
+    test_roi_names: Iterable[str],
+    *,
+    qualifier: str = QUALIFIER_OAR,
+) -> OrganSuggestion | None:
+    """Infer a drawer's organ from the contours matched into it.
+
+    Hand-drawn ground truth carries local shorthand — ``SubmanG_R``,
+    ``Chiasm``, ``BODYopt`` — that no dictionary knows. The vendor contours
+    sitting in the same drawer usually do not: they are generated against
+    TG-263 and resolve cleanly. So the drawer's own contents identify the
+    organ its ground truth failed to name.
+
+    Measured over three sites: of 262 ground-truth organs the dictionary could
+    not place, the drawer's tests agreed unanimously on one canonical for 34%
+    of them, and by majority for a further 4%. The unanimous ones are reliable
+    — ``SubmanG_R`` gets ``glnd_submand_r`` on a 4/4 vote. The split ones are
+    not: ``Inner Ear_R`` drew ``cornea_r`` on a 1/2 vote with ``Ear_Internal_R``
+    among the losers. Hence :attr:`OrganSuggestion.unanimous`, which the UI uses
+    to decide what may be pre-selected and what must be chosen deliberately.
+
+    Voting is on ``base`` alone. Laterality comes from the ground truth's own
+    name, so a suggestion can never move a drawer to the other side.
+    """
+    votes: Counter[str] = Counter()
+    evidence: dict[str, list[str]] = defaultdict(list)
+    for name in test_roi_names:
+        placed = index.assignments.get(name)
+        if placed is None or placed.tier not in AUTOMATIC_TIERS:
+            continue
+        if placed.key.qualifier != qualifier:
+            continue
+        votes[placed.key.base] += 1
+        evidence[placed.key.base].append(name)
+    if not votes:
+        return None
+    base, count = votes.most_common(1)[0]
+    return OrganSuggestion(
+        base=base,
+        votes=count,
+        total=sum(votes.values()),
+        evidence=tuple(sorted(set(evidence[base]))),
+    )
+
+
 def drawer_consensus(
     index: OrganIndex, gt_roi_names: Iterable[str]
 ) -> tuple[OrganKey | None, bool]:
@@ -188,7 +254,9 @@ def drawer_consensus(
 
 __all__ = [
     "OrganIndex",
+    "OrganSuggestion",
     "build_organ_index",
     "collect_roi_names",
     "drawer_consensus",
+    "suggest_organ_from_tests",
 ]

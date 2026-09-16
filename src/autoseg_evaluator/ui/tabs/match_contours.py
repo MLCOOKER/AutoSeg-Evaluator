@@ -62,7 +62,7 @@ from autoseg_evaluator.core.matching import (
     is_mismatch,
     similarity,
 )
-from autoseg_evaluator.core.organ_groups import AUTOMATIC_TIERS
+from autoseg_evaluator.core.organ_groups import AUTOMATIC_TIERS, QUALIFIER_OAR
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
     OrganEntry,
@@ -86,6 +86,10 @@ _STATUS_VISIBLE_MS = 6000
 
 class MatchContoursTab(QWidget):
     """The Match Contours screen — left panel (tree) + right panel (drawers)."""
+
+    #: Emitted when the user asks to label drawers the dictionary could not
+    #: name. MainWindow owns the organ index and the saved labels.
+    organLabelsRequested = Signal()
 
     # Workflow strip signals (kept for back-compat; the tab now handles them itself).
     replacementRulesRequested = Signal()
@@ -146,6 +150,40 @@ class MatchContoursTab(QWidget):
         self._tree.populate(library)
         self._set_empty_state(False)
 
+    def unrecognised_drawers(self) -> list:
+        """Drawers whose ground-truth name the dictionary could not place.
+
+        The worklist for Label Organs, and the count shown on its button.
+        """
+        index = getattr(self, "_organ_index", None)
+        if index is None:
+            return []
+        out = []
+        for drawer in self._drawers.values():
+            gt_names = [s.gt_roi_name for s in drawer.all_subsections() if s.gt_roi_name]
+            if not gt_names:
+                continue
+            recognised = any(
+                (placed := index.assignments.get(name)) is not None
+                and placed.tier in AUTOMATIC_TIERS
+                for name in gt_names
+            )
+            if recognised:
+                continue
+            # Same rule the dialog uses, so the count on the button matches
+            # what opening it actually shows.
+            first = next(
+                (index.assignments.get(n) for n in gt_names if index.assignments.get(n)),
+                None,
+            )
+            if first is not None and first.key.qualifier != QUALIFIER_OAR:
+                continue
+            out.append(drawer)
+        return out
+
+    def drawers(self) -> list:
+        return list(self._drawers.values())
+
     def set_organ_index(self, index) -> None:
         """Supply canonical organ grouping so drawers can show what they hold.
 
@@ -177,6 +215,16 @@ class MatchContoursTab(QWidget):
             drawer.set_canonical_organ(
                 key.label() if key else "", mixed=mixed, recognised=recognised
             )
+        self._refresh_label_button()
+
+    def _refresh_label_button(self) -> None:
+        """Badge the Label Organs button with how many drawers still need one."""
+        button = getattr(self, "_label_organs_btn", None)
+        if button is None:
+            return
+        outstanding = len(self.unrecognised_drawers())
+        button.setText(f"4. Label Organs… ({outstanding})" if outstanding else "4. Label Organs…")
+        button.setEnabled(bool(outstanding))
 
     def drawer_for_organ(self, organ_name: str) -> OrganDrawer | None:
         return self._drawers.get(organ_name)
@@ -444,6 +492,18 @@ class MatchContoursTab(QWidget):
         self._run_match_btn = QPushButton("3. Run Auto-Match")
         self._run_match_btn.clicked.connect(self._on_run_auto_match_clicked)
         layout.addWidget(self._run_match_btn)
+
+        layout.addWidget(QLabel("→"))
+
+        self._label_organs_btn = QPushButton("4. Label Organs…")
+        self._label_organs_btn.setToolTip(
+            "The last step, once the drawers are clean: say which organ each drawer "
+            "holds where its ground-truth name is not one TG-263 recognises. "
+            "Suggestions come from the contours already matched into it. "
+            "This labels only - no drawer is merged, renamed or moved."
+        )
+        self._label_organs_btn.clicked.connect(self.organLabelsRequested.emit)
+        layout.addWidget(self._label_organs_btn)
 
         layout.addStretch(1)
 

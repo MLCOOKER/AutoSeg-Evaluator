@@ -28,6 +28,7 @@ from autoseg_evaluator.data.session import (
     save_session,
 )
 from autoseg_evaluator.data.synonyms import flatten_synonyms, load_synonyms
+from autoseg_evaluator.ui.dialogs.organ_labels import OrganLabelsDialog
 from autoseg_evaluator.ui.tabs.build_consensus import BuildConsensusTab
 from autoseg_evaluator.ui.tabs.compute import ComputeTab
 from autoseg_evaluator.ui.tabs.load_data import LoadDataTab
@@ -100,6 +101,7 @@ class MainWindow(QMainWindow):
         self._consensus_tab.observerLabelsChanged.connect(self._on_observer_labels_changed)
         self._match_tab.replacementRulesChanged.connect(self._on_replacement_rules_changed)
         self._match_tab.templateChanged.connect(self._on_template_changed)
+        self._match_tab.organLabelsRequested.connect(self._on_label_organs)
         self._compute_tab.metricConfigChanged.connect(self._on_metric_config_changed)
         self._compute_tab.computeRequested.connect(self._on_compute_requested)
         self._compute_tab.cancelRequested.connect(self._on_compute_cancel_requested)
@@ -132,6 +134,36 @@ class MainWindow(QMainWindow):
         self._results.set_organ_index(index)
         self._match_tab.set_organ_index(index)
         self._results_tab.refresh()
+
+    def _on_label_organs(self) -> None:
+        """Open Label Organs and apply whatever the user decides.
+
+        Labelling changes no drawer and recomputes no metric — the index is
+        rebuilt and the results table is re-read, so existing rows simply
+        re-label.
+        """
+        if self._organ_index is None:
+            QMessageBox.information(
+                self,
+                "Label Organs",
+                "Load a folder and run Auto-Match first — organ labels apply to drawers.",
+            )
+            return
+        drawers = self._match_tab.drawers()
+        if not drawers:
+            QMessageBox.information(self, "Label Organs", "There are no drawers to label yet.")
+            return
+        dialog = OrganLabelsDialog(
+            self._organ_index,
+            drawers,
+            dict(self._settings.get("organ_assignments", {}) or {}),
+            parent=self,
+        )
+        if dialog.exec() != OrganLabelsDialog.DialogCode.Accepted:
+            return
+        self._settings["organ_assignments"] = dialog.labels()
+        save_settings(self._settings)
+        self._rebuild_organ_index()
 
     def _on_library_loaded(self, library: Any) -> None:
         """Stash the loaded library so Match Contours / Compute tabs can read it."""
