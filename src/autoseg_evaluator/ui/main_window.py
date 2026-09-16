@@ -57,6 +57,13 @@ class MainWindow(QMainWindow):
         self._results = ResultsManager()
         # Canonical organ grouping for the loaded cohort; rebuilt on load.
         self._organ_index: Any = None
+        # Organ labels the user has given in Label Organs. Deliberately NOT in
+        # settings: they describe one cohort's naming, not a preference, and
+        # writing them the moment a dialog closes would both leak them into
+        # unrelated folders and record work the user never chose to keep. They
+        # live here until a session is saved, which is how drawers and matches
+        # already behave.
+        self._organ_assignments: dict[str, str] = {}
         self._metrics_thread: QThread | None = None
         self._metrics_worker: MetricsWorker | None = None
 
@@ -121,6 +128,12 @@ class MainWindow(QMainWindow):
         if self._library is None:
             self._results.set_organ_index(None)
             return
+        pending = getattr(self, "_pending_organ_assignments", None)
+        if pending is not None:
+            # A session restore triggers a rescan; its labels land here once
+            # the library exists rather than being applied to an empty one.
+            self._organ_assignments = dict(pending)
+            self._pending_organ_assignments = None
         try:
             synonyms = flatten_synonyms(load_synonyms(synonyms_path()))
         except Exception:  # noqa: BLE001 — a bad dictionary must not block loading
@@ -128,7 +141,7 @@ class MainWindow(QMainWindow):
         index = build_organ_index(
             self._library,
             synonyms_flat=synonyms,
-            manual=dict(self._settings.get("organ_assignments", {}) or {}),
+            manual=dict(self._organ_assignments),
         )
         self._organ_index = index
         self._results.set_organ_index(index)
@@ -156,14 +169,18 @@ class MainWindow(QMainWindow):
         dialog = OrganLabelsDialog(
             self._organ_index,
             drawers,
-            dict(self._settings.get("organ_assignments", {}) or {}),
+            dict(self._organ_assignments),
             parent=self,
         )
         if dialog.exec() != OrganLabelsDialog.DialogCode.Accepted:
             return
-        self._settings["organ_assignments"] = dialog.labels()
-        save_settings(self._settings)
+        self._organ_assignments = dialog.labels()
         self._rebuild_organ_index()
+        self.statusBar().showMessage(
+            f"{len(self._organ_assignments)} organ label(s) applied — "
+            f"save the session to keep them.",
+            8000,
+        )
 
     def _on_library_loaded(self, library: Any) -> None:
         """Stash the loaded library so Match Contours / Compute tabs can read it."""
@@ -454,7 +471,7 @@ class MainWindow(QMainWindow):
             consensus_groups=self._consensus_tab.session_state(),
             qualitative=self._qualitative_tab.session_state(),
             link_overrides=dict(getattr(self._library, "link_overrides", {}) or {}),
-            organ_assignments=dict(self._settings.get("organ_assignments", {}) or {}),
+            organ_assignments=dict(self._organ_assignments),
         )
         try:
             save_session(path, data)
@@ -488,7 +505,7 @@ class MainWindow(QMainWindow):
         # moment the scan finishes, so the restored answers are already in
         # place by the time any tab resolves a link.
         self._settings["link_overrides"] = dict(data.get("link_overrides", {}) or {})
-        self._settings["organ_assignments"] = dict(data.get("organ_assignments", {}) or {})
+        self._pending_organ_assignments = dict(data.get("organ_assignments", {}) or {})
         save_settings(self._settings)
         # Refresh the in-tab settings reference so dialogs pre-populate from disk.
         self._match_tab.set_settings(self._settings)
