@@ -14,6 +14,7 @@ merging.
 
 from __future__ import annotations
 
+from collections import Counter
 from importlib.resources import files
 
 import pytest
@@ -263,3 +264,68 @@ def test_partial_match_method_is_fuzzy(synonyms_flat):
     m = similarity("MyOrgan_LeftSide", "MyOrgan_Left", synonyms_flat=synonyms_flat)
     assert m.method == "fuzzy"
     assert m.score < 1.0
+
+
+# ---- A canonical name is never another entry's synonym --------------------
+
+
+def test_a_canonical_name_always_resolves_to_itself():
+    """A canonical listed inside another entry's variants must not be captured.
+
+    The shipped dictionary does this eleven times. Two invert laterality:
+    Femur_Neck_L lists "Femur Neck_R" as a variant and vice versa, so a
+    single-pass flatten leaves Femur_Neck_R resolving to the *left* femoral
+    neck — and since organ grouping reads the side off the canonical, right
+    contours would be filed under the left organ.
+    """
+    flat = flatten_synonyms(
+        {
+            "Bowel_Small": ["Small_Bowel"],
+            "Spc_Bowel_Small": ["Bowel_Small"],
+            "Femur_Neck_L": ["Femur Neck_R"],
+            "Femur_Neck_R": ["Femur Neck_L"],
+        }
+    )
+    assert flat["bowelsmall"] == "Bowel_Small"
+    assert flat["femurneckl"] == "Femur_Neck_L"
+    assert flat["femurneckr"] == "Femur_Neck_R"
+
+
+def test_variants_still_resolve_to_their_canonical():
+    flat = flatten_synonyms({"Bowel_Small": ["Small_Bowel", "Small"]})
+    assert flat["smallbowel"] == "Bowel_Small"
+    assert flat["small"] == "Bowel_Small"
+
+
+def _norm(name: str) -> str:
+    return name.lower().replace(" ", "").replace("_", "").replace("-", "")
+
+
+def test_no_shipped_canonical_is_hijacked():
+    """Guards the real dictionary, not just the principle.
+
+    Canonicals that collide with *each other* after normalisation are excluded:
+    ``VB_S`` and ``VBs`` are two separate TG-263 entries that both reduce to
+    ``vbs``, so the lookup can only hold one of them. That is an ambiguity in
+    the standard's naming as this dictionary encodes it, not something the
+    flattener can resolve — see :func:`test_colliding_canonicals_are_known`.
+    """
+    raw = load_synonyms(str(files("autoseg_evaluator.resources").joinpath("synonyms.json")))
+    flat = flatten_synonyms(raw)
+    seen = Counter(_norm(c) for c in raw if _norm(c))
+    for canonical in raw:
+        key = _norm(canonical)
+        if key and seen[key] == 1:
+            assert flat[key] == canonical, f"{canonical} resolves to {flat[key]}"
+
+
+def test_colliding_canonicals_are_known():
+    """Two canonicals reducing to one lookup key is worth noticing, not ignoring.
+
+    Pinned so a future dictionary edit that introduces more collisions fails
+    here rather than silently making one of the pair unreachable.
+    """
+    raw = load_synonyms(str(files("autoseg_evaluator.resources").joinpath("synonyms.json")))
+    seen = Counter(_norm(c) for c in raw if _norm(c))
+    colliding = sorted(k for k, n in seen.items() if n > 1)
+    assert colliding == ["vbs"], f"unexpected canonical collisions: {colliding}"

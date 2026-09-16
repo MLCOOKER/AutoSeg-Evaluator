@@ -53,17 +53,28 @@ def flatten_synonyms(synonyms: dict[str, list[str]]) -> dict[str, str]:
 
     Each canonical name is itself added as a variant of itself so a
     spelling that already matches the canonical key resolves cleanly.
+
+    Canonical names are written **after** every variant list, because a
+    canonical name may appear inside some *other* entry's variants and must not
+    be captured by it. The shipped dictionary does this eleven times, and two
+    of them invert laterality: ``Femur_Neck_L`` lists ``Femur Neck_R`` as a
+    variant and vice versa, so a single pass leaves ``Femur_Neck_R`` resolving
+    to the left femoral neck. Since laterality is read from the canonical, that
+    would file right-sided contours under the left organ.
+
+    A name that is canonical in its own right is therefore never anything
+    else's synonym, whatever the data says.
     """
     flat: dict[str, str] = {}
     for canonical, variants in synonyms.items():
-        canonical_norm = _normalise_for_lookup(canonical)
-        canonical_display = canonical  # what we return to the matcher
-        if canonical_norm:
-            flat[canonical_norm] = canonical_display
         for variant in variants:
             v_norm = _normalise_for_lookup(variant)
             if v_norm:
-                flat[v_norm] = canonical_display
+                flat[v_norm] = canonical
+    for canonical in synonyms:
+        canonical_norm = _normalise_for_lookup(canonical)
+        if canonical_norm:
+            flat[canonical_norm] = canonical
     return flat
 
 

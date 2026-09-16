@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from autoseg_evaluator.core.matching import (
+    MISMATCH_CANONICAL,
     MISMATCH_INDEX,
     MISMATCH_LATERALITY,
     MISMATCH_POSITION,
@@ -346,3 +347,54 @@ def test_every_mismatch_reason_is_explainable():
     """The UI shows the reason, so each value needs wording."""
     for value in (MISMATCH_LATERALITY, MISMATCH_INDEX, MISMATCH_POSITION):
         assert MISMATCH_REASONS[value]
+
+
+# ---- Two names the dictionary knows, and knows apart ----------------------
+
+
+@pytest.mark.parametrize(
+    ("gt", "candidate"),
+    [
+        ("Lens_L", "Lung_L"),
+        ("Lens_R", "Lung_R"),
+        ("Brainstem", "SpinalCord"),
+        ("Spinal Canal", "SpinalCord"),
+        ("Larynx", "Larynx_SG"),
+        ("Esophagus", "Esophagus_S"),
+    ],
+)
+def test_two_known_canonicals_never_match_each_other(gt, candidate, synonyms_flat):
+    """Reported case: Lens_L matched Lung_L at 0.67 once the real lens was missing.
+
+    When the dictionary recognises both names and gives them different
+    canonicals, TG-263 has already said these are two structures. String
+    resemblance does not get to overrule that.
+    """
+    match = similarity(gt, candidate, synonyms_flat=synonyms_flat)
+    assert match.score == 0.0
+    assert match.method == MISMATCH_CANONICAL
+
+
+@pytest.mark.parametrize(
+    ("gt", "candidate"),
+    [
+        ("Lungs", "Lung_L"),
+        ("Kidneys", "Kidney_L"),
+        ("Parotids", "Parotid_R"),
+    ],
+)
+def test_a_pair_organ_does_not_match_one_of_its_sides(gt, candidate, synonyms_flat):
+    """Comparing both lungs against the left one would give a meaningless Dice."""
+    assert similarity(gt, candidate, synonyms_flat=synonyms_flat).score == 0.0
+
+
+def test_an_unknown_name_still_reaches_the_fuzzy_tier(synonyms_flat):
+    """The rule needs *both* sides recognised — it cannot judge what it cannot see."""
+    match = similarity("Wibble_Xyz", "Wobble_Xyz", synonyms_flat=synonyms_flat)
+    assert match.method == "fuzzy"
+    assert match.score > 0.6
+
+
+def test_one_known_and_one_unknown_still_matches(synonyms_flat):
+    match = similarity("Parotid_L", "Parotd_L", synonyms_flat=synonyms_flat)
+    assert match.score > 0.6

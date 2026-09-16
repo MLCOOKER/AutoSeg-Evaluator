@@ -138,11 +138,13 @@ def canonicalise_with_meta(
 MISMATCH_LATERALITY = "mismatch-laterality"
 MISMATCH_INDEX = "mismatch-index"
 MISMATCH_POSITION = "mismatch-position"
+MISMATCH_CANONICAL = "mismatch-canonical"
 
 MISMATCH_REASONS = {
     MISMATCH_LATERALITY: "opposite sides of the body",
     MISMATCH_INDEX: "different numbered structures",
     MISMATCH_POSITION: "opposite anatomical positions",
+    MISMATCH_CANONICAL: "two different structures named in TG-263",
 }
 
 
@@ -225,6 +227,20 @@ def similarity(
     # TG-263 short-circuit — both sides resolved to the same canonical.
     if a_resolved and b_resolved and _ca == _cb:
         return Match(1.0, "tg263")
+
+    # …and its mirror image. When the dictionary recognises *both* names and
+    # gives them different canonicals, the standard itself has said these are
+    # two structures, and no amount of string resemblance should overrule that.
+    # ``Lens_L`` against ``Lung_L`` scores 0.67 on characters — enough to pass
+    # the default 0.6 threshold and become the chosen match when the real lens
+    # is missing from a vendor's output.
+    #
+    # The risk is a dictionary that splits two genuinely equivalent names, in
+    # which case a correct pair is refused. That costs a red badge on a good
+    # match, which is visible and dismissible; the alternative costs a wrong
+    # organ in a published metric, which is neither.
+    if a_resolved and b_resolved and _ca != _cb:
+        return Match(0.0, MISMATCH_CANONICAL)
 
     # Fall back to fuzzy on the cleaned RAW forms (no dictionary substitution).
     ca = _normalise_only(a, rules)

@@ -425,10 +425,23 @@ def classify_qualifier(
 # ---- Assignment -----------------------------------------------------------
 
 
-def _split_canonical(canonical: str) -> tuple[str, str]:
-    """Split laterality off a TG-263 canonical, which uses a strict suffix."""
+def _split_canonical(canonical: str, roi_name: str = "") -> tuple[str, str]:
+    """Split laterality off a TG-263 canonical, which uses a strict suffix.
+
+    When the original name states a side and the canonical states the opposite,
+    the original wins. That disagreement can only mean the dictionary is wrong —
+    a hand-maintained synonym list can and does invert laterality — and reading
+    the side off the contour's own name is the safer of the two.
+    """
     base, lat = extract_laterality(canonical)
-    return base.replace(" ", "_") if lat else canonical, lat
+    stem = base.replace(" ", "_") if lat else canonical
+    if roi_name:
+        raw_lat = extract_laterality(roi_name)[1]
+        if raw_lat and lat and raw_lat != lat:
+            return stem, raw_lat
+        if raw_lat and not lat:
+            return stem, raw_lat
+    return stem, lat
 
 
 def _laterality_of(*candidates: str) -> str:
@@ -484,7 +497,7 @@ def assign(
         roi_name, replacement_rules, dict(synonyms_flat or {})
     )
     if resolved:
-        base, lat = _split_canonical(canonical)
+        base, lat = _split_canonical(canonical, roi_name)
         return OrganAssignment(
             roi_name=roi_name,
             key=OrganKey(_slug(base), lat or _laterality_of(roi_name), qualifier),
@@ -499,7 +512,7 @@ def assign(
             clean, replacement_rules, dict(synonyms_flat or {})
         )
         if resolved:
-            base, lat = _split_canonical(canonical)
+            base, lat = _split_canonical(canonical, roi_name)
             return OrganAssignment(
                 roi_name=roi_name,
                 key=OrganKey(_slug(base), lat or _laterality_of(roi_name), qualifier),
