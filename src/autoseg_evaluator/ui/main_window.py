@@ -34,6 +34,7 @@ from autoseg_evaluator.ui.tabs.compute import ComputeTab
 from autoseg_evaluator.ui.tabs.load_data import LoadDataTab
 from autoseg_evaluator.ui.tabs.match_contours import MatchContoursTab
 from autoseg_evaluator.ui.tabs.qualitative import QualitativeTab
+from autoseg_evaluator.ui.tabs.report import ReportTab
 from autoseg_evaluator.ui.tabs.results import ResultsTab
 from autoseg_evaluator.ui.theme import apply_theme
 from autoseg_evaluator.utils.paths import synonyms_path
@@ -96,9 +97,12 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._qual_page, "4. Qualitative Assessment")
         self._tabs.addTab(_wrap_scroll(self._compute_tab), "5. Compute")
         self._tabs.addTab(_wrap_scroll(self._results_tab), "6. Results")
+        self._report_tab = ReportTab()
+        self._tabs.addTab(_wrap_scroll(self._report_tab), "7. Report")
         active = min(int(self._settings.get("active_tab", 0)), self._tabs.count() - 1)
         self._tabs.setCurrentIndex(max(0, active))
         self._results_tab.set_results_manager(self._results)
+        self._report_tab.set_results_manager(self._results)
 
         # Wire cross-tab signals
         self._load_tab.libraryLoaded.connect(self._on_library_loaded)
@@ -147,6 +151,7 @@ class MainWindow(QMainWindow):
         self._results.set_organ_index(index)
         self._match_tab.set_organ_index(index)
         self._results_tab.refresh()
+        self._report_tab.refresh()
 
     def _on_label_organs(self) -> None:
         """Open Label Organs and apply whatever the user decides.
@@ -255,6 +260,7 @@ class MainWindow(QMainWindow):
             blinded=payload["blinded"],
         )
         self._results_tab.refresh()
+        self._report_tab.refresh()
 
     def _on_assessment_lock_changed(self, locked: bool) -> None:
         """Lock the other tabs during a (blinded) assessment to prevent leakage.
@@ -341,6 +347,7 @@ class MainWindow(QMainWindow):
     def _on_metric_result(self, row: dict) -> None:
         self._results.add_row(row)
         self._results_tab.refresh()
+        self._report_tab.refresh()
 
     def _on_metrics_finished(self, errors: int) -> None:
         cancelled = bool(self._metrics_worker and self._metrics_worker._cancelled)
