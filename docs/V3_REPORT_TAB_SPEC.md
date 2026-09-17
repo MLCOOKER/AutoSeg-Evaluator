@@ -1,6 +1,23 @@
 # v3 — Statistical Report Tab (Implementation Spec)
 
-_Status: agreed design, not yet implemented. Written 2026-09-17._
+_Status: implemented and under test. Written 2026-09-17._
+
+| | |
+|---|---|
+| **Code** | [`core/statistics.py`](../src/autoseg_evaluator/core/statistics.py) · [`data/report.py`](../src/autoseg_evaluator/data/report.py) · [`ui/widgets/stat_plots.py`](../src/autoseg_evaluator/ui/widgets/stat_plots.py) · [`ui/tabs/report.py`](../src/autoseg_evaluator/ui/tabs/report.py) |
+| **Tests** | `test_statistics.py` · `test_report_model.py` · `test_report_tab.py` |
+| **Decisions** | [`V3_REPORT_STATISTICS_REGISTER.md`](V3_REPORT_STATISTICS_REGISTER.md) — fourteen entries, written for external audit |
+
+Two things in the built tab departed from this spec as written, both recorded in
+the register:
+
+- **The Holm family is selected in the UI, not fixed by the metric and source
+  pair** (D8). This makes the confirmatory/exploratory distinction expressible
+  rather than implied.
+- **The Hodges–Lehmann interval and the signed-rank p-value are not
+  unconditionally in agreement** (D6). Under Pratt's zero handling they can
+  diverge at exact ties, so each row carries a flag and the tab warns instead of
+  claiming an equivalence that does not always hold.
 
 Specifies a new **Report** tab, placed after Results, that turns the per-contour
 metric rows into an analysis a clinician can act on. This is the consumer of the

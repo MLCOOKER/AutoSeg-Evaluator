@@ -2,14 +2,27 @@
 
 _AutoSeg Evaluator · for external audit · written 2026-09-17_
 
-Twelve decisions behind the proposed Report tab, each with the alternative it rejected
-and the assumption it rests on. Written to be argued with: every decision carries an ID
-so it can be cited, and a note on what evidence would overturn it.
+Fourteen decisions behind the Report tab, each with the alternative it rejected and the
+assumption it rests on. Written to be argued with: every decision carries an ID so it can
+be cited, and a statement of what would prompt revisiting it.
+
+Each entry has the same six fields:
+
+| Field | What it is |
+|---|---|
+| **Rationale** | Why this was chosen. |
+| **Rejected** | The most credible alternative, and why it lost. Named even where it is the more conventional choice. |
+| **Assumes** | What has to be true for the decision to hold. |
+| **Costs** | What is given up. Every decision here gives something up. |
+| **Revisit if** | The observation that would prompt changing it. Not a falsification criterion — these are design decisions, not hypotheses — but a stated trigger, so the decision cannot be quietly defended forever. |
+| **In code** | Where it lives, and how it is checked. |
 
 | | |
 |---|---|
-| **Status** | Agreed design, not implemented |
+| **Status** | Implemented and under test |
 | **Spec** | [`docs/V3_REPORT_TAB_SPEC.md`](V3_REPORT_TAB_SPEC.md) |
+| **Code** | [`core/statistics.py`](../src/autoseg_evaluator/core/statistics.py) · [`data/report.py`](../src/autoseg_evaluator/data/report.py) · [`ui/tabs/report.py`](../src/autoseg_evaluator/ui/tabs/report.py) |
+| **Tests** | `test_statistics.py` · `test_report_model.py` · `test_report_tab.py` |
 | **Typical n** | 10 patients per site |
 | **Sources** | 4–7 per cohort |
 
@@ -36,8 +49,8 @@ Three questions are folded into that sentence, and they need three different out
 
 # The register
 
-Each decision states what was chosen, why, what was rejected, what it assumes, and what
-would falsify it. **The last field is the one to attack.**
+**"Revisit if" is the field to attack.** It is where each decision states the terms of its
+own replacement; a decision with a vague one is a decision that has not been thought through.
 
 ---
 
@@ -54,8 +67,12 @@ test, and left/right are separate by default.
   per-organ analysis answers assumption-free.
 - **Assumes** — Patients are independent of one another. Fails if the cohort contains repeat
   scans of the same patient.
-- **Falsified by** — A cohort where organ-level conclusions differ from a mixed model fitted
-  to the same data.
+- **Costs** — Statistical power. A mixed model borrows strength across organs; this does not,
+  so each organ is tested on ten observations alone.
+- **Revisit if** — A cohort arrives with repeat scans of the same patient, or organ-level
+  conclusions are shown to differ from a mixed model fitted to the same data.
+- **In code** — `ReportModel.observations` is keyed on `(organ, source, metric, patient)`;
+  duplicates are collapsed and counted rather than averaged.
 
 ## D2 — Median [Q1, Q3] is primary; mean (SD) is supplementary
 
@@ -69,13 +86,22 @@ are reported alongside but subordinate.
 - **Rejected** — *Mean (SD) as primary.* Familiar, and what most vendor literature reports —
   which is part of why it should not be primary here.
 - **Assumes** — Nothing distributional. That is the point.
-- **Falsified by** — Metrics that turn out symmetric and light-tailed in practice, making the
-  distinction cosmetic.
+- **Costs** — Comparability with vendor white papers, which almost universally report mean (SD).
+  Both are printed, so the comparison is still possible; only the emphasis differs.
+- **Revisit if** — The metrics in use turn out symmetric and light-tailed in practice, making
+  the distinction cosmetic.
+- **In code** — `statistics.describe()`; the descriptive table leads with median [Q1, Q3].
 
-## D3 — The median's 95% CI comes from order statistics, and does not exist below n = 6
+## D3 — The median's 95% CI comes from order statistics, and none attains 95% below n = 6
 
 The interval is `[x₍k₎, x₍n−k+1₎]` for the largest k with `P(Bin(n, ½) < k) ≤ 0.025`. Below
 six observations the report prints an em dash.
+
+The precise claim matters. It is not that no interval can be written down below n = 6 — it
+is that **no interval built from the order statistics attains 95% coverage**. The widest one
+available is the full range, and its coverage is `1 − 2·2⁻ⁿ`: 0.875 at n = 4, 0.9375 at
+n = 5, 0.96875 at n = 6. Five observations cannot reach 95% however they fall, so nothing
+is reported rather than something reported at 93.75%.
 
 | n | Interval | Actual coverage |
 |---|---|---|
@@ -90,8 +116,12 @@ six observations the report prints an em dash.
 - **Rejected** — *Bootstrap percentile CI.* Would always return a number, including where no
   valid 95% interval exists — which is worse than returning nothing.
 - **Assumes** — Only that observations are exchangeable within the organ.
-- **Consequence** — At n = 10 the interval spans the 2nd to 9th ordered values. It looks
-  wide. It is wide correctly, and should not be tuned.
+- **Costs** — At n = 10 the interval spans the 2nd to 9th ordered values. It looks wide. It
+  is wide correctly, and should not be tuned. Cohorts of five leave the column empty.
+- **Revisit if** — A defensible interval for n ≤ 5 is proposed that does not silently trade
+  coverage for the appearance of precision.
+- **In code** — `statistics.median_ci()` returns `None` below six observations; both the
+  descriptive table and the CSV export print `— not estimable` rather than a number.
 
 ## D4 — Wilcoxon signed-rank, paired within patient
 
@@ -105,8 +135,11 @@ blocks, followed by pairwise post-hoc.
   this sample size.
 - **Assumes** — Differences are symmetric about their median. Weaker than normality, but not
   nothing — worth checking on real data.
-- **Falsified by** — Strongly asymmetric paired differences, which would argue for a sign
-  test instead.
+- **Costs** — Power relative to a t-test when the differences really are normal, and an
+  assumption (symmetry) that is weaker than normality but not free — see D14.
+- **Revisit if** — The paired differences on real data are strongly asymmetric. The exact
+  sign test reported beside every comparison (D14) is the assumption-free fallback.
+- **In code** — `statistics.signed_rank_exact_p()`, exact for every n the cohort can produce.
 
 ## D5 — Zero differences handled by Pratt's method, not discarded
 
@@ -119,22 +152,45 @@ Ties at zero are kept in the ranking rather than dropped, which is **not** the S
   commonly reported — which makes stating the choice mandatory.
 - **Assumes** — Exact ties are genuine agreement rather than rounding. True for Dice at full
   precision; check for metrics reported to two decimals.
-- **Falsified by** — Ties arising from quantisation rather than agreement.
+- **Costs** — Pratt's method makes the p-value non-monotone in the shift parameter at exact
+  ties, which breaks the clean equivalence between the test and its interval — see D6.
+- **Revisit if** — Ties are found to arise from quantisation rather than genuine agreement.
+- **In code** — `signed_rank_exact_p(..., zero_method="pratt")`; `n_zero` is reported per row
+  so the reader can see how many ties the result rests on.
 
 ## D6 — Hodges–Lehmann estimate with its own exact interval
 
 The point estimate is the median of all `n(n+1)/2` Walsh averages `(dᵢ + dⱼ)/2` for `i ≤ j`,
 and its interval is derived from the same signed-rank distribution the test uses.
 
+The interval is obtained by **inverting the reported test**: the values of δ that would not
+be rejected at α. Two implementation details turned out to matter, both found by testing
+rather than by reading:
+
+1. `p(δ)` is a step function that is constant **between** consecutive Walsh averages, not at
+   them. Inverting at the grid points produced coverage violations in 4 of 400 randomised
+   samples. The implementation tests the `M+1` open regions instead.
+2. Under Pratt's zero handling (D5), `p(δ)` is not monotone across exact ties, so the
+   acceptance region need not be an interval and the equivalence below can genuinely fail.
+
 - **Rationale** — This is the location estimate the Wilcoxon test is built around, so the
-  interval and the p-value are guaranteed to agree. Pair a plain median-of-differences with a
-  bootstrap interval instead and the report will eventually print p = 0.03 beside an interval
-  crossing zero.
+  interval and the p-value agree by construction wherever no paired difference is exactly
+  zero. Pair a plain median-of-differences with a bootstrap interval instead and the report
+  will eventually print p = 0.03 beside an interval crossing zero, with no principled account
+  of which to believe.
 - **Rejected** — *Median of paired differences + bootstrap CI.* Defensible in isolation,
   incoherent in combination with the test being reported next to it.
 - **Assumes** — Same symmetry assumption as D4 — they are the same procedure.
-- **Verified by** — A property test asserting that, across randomised samples, the interval
-  excludes zero if and only if the test reports p < 0.05.
+- **Costs** — The agreement is not unconditional, and saying it were would be the easy
+  overclaim. With exact ties present it can break, so every row carries a
+  `ci_agrees_with_test` flag and the tab warns when any row in the family has one.
+  At small n the acceptance region can also be unbounded — at n = 4 no finite interval exists
+  at all, and the row reads `— not estimable` rather than showing the estimate alone.
+- **Revisit if** — Exact ties prove common enough in real cohorts that the flag fires
+  routinely, at which point the zero-handling choice in D5 is what should be reconsidered.
+- **In code** — `statistics.hodges_lehmann_ci()`. Verified by a property test over randomised
+  samples: **0 violations in 770 samples with no exact ties**. Samples containing exact ties
+  reproduce the Pratt exception, which is why it is reported rather than suppressed.
 
 ## D7 — Rank-biserial correlation as the standardised effect size
 
@@ -146,12 +202,34 @@ difference rather than instead of it.
 - **Rejected** — *Cliff's delta.* Near-equivalent; rank-biserial falls directly out of the
   statistic already computed.
 - **Assumes** — Nothing beyond the test itself.
-- **Caveat** — No conventional small/medium/large thresholds are printed. Importing
-  Cohen-style cut-offs would invent clinical meaning the statistic does not carry.
+- **Costs** — No conventional small/medium/large thresholds are printed. Importing
+  Cohen-style cut-offs would invent clinical meaning the statistic does not carry, so the
+  reader gets a number without a label for it.
+- **Revisit if** — A radiotherapy-specific convention for interpreting rank effect sizes on
+  contour metrics is established in the literature.
+- **In code** — `statistics.rank_biserial()`. Note the ceiling: whenever every paired
+  difference has the same sign, `r = ±1.00` exactly, which at n = 4 is the *only* value
+  compatible with the smallest attainable p. An r of ±1.00 beside a large p is arithmetic,
+  not a contradiction.
 
-## D8 — Holm correction, applied per metric per source-pair across organs
+## D8 — Holm correction, applied per metric per source-pair across organs, in two tiers
 
-Both raw and adjusted p are shown. The family definition is printed beside the table.
+Both raw and adjusted p are shown. The family definition is printed beside the table and
+recorded in the auto-written methods paragraph.
+
+The family is **chosen by the user, not inferred from the view**, which makes two tiers
+possible and keeps them honestly separate:
+
+| Tier | Family | What it supports |
+|---|---|---|
+| **Confirmatory** | A small set of organs named *before* looking at results — typically the two or three that would actually change practice. | A familywise claim. This is the tier a conclusion may be drawn from. |
+| **Exploratory** | Everything else, including "all organs". | Hypothesis generation. Adjusted p is still shown, but a finding here is a candidate for the next cohort, not a result. |
+
+Nothing in the software can tell which tier the user is in — that is a matter of what they
+declared beforehand. What the software does is make the family an explicit, visible choice
+rather than a silent consequence of a filter, so the distinction is at least recordable.
+Narrowing the family from four organs to two moved a Holm-adjusted p from 0.0078 to 0.0039
+in testing; that sensitivity is exactly why the choice cannot be left implicit.
 
 - **Rationale** — That family is the set read as one question: *"across these organs, where
   does vendor X differ from vendor Y on Dice?"*. Extending it across metrics would be badly
@@ -162,8 +240,12 @@ Both raw and adjusted p are shown. The family definition is printed beside the t
   when a single organ's result could change practice.
 - **Assumes** — The family is the right one. **This is a judgement, not a fact, and is the
   decision most open to challenge.**
-- **Falsified by** — An argument that the whole report is one family, which would make the
-  correction far harsher and is defensible.
+- **Costs** — A finding selected across several families does not carry familywise control,
+  and nothing in the software can detect that it was selected that way.
+- **Revisit if** — A reviewer argues the whole report is one family. That is defensible and
+  substantially harsher; the two-tier structure below is the answer offered instead.
+- **In code** — `ReportModel.family()` takes the organ list explicitly. The Holm family is
+  never inferred from what happens to be on screen.
 
 ## D9 — No post-hoc power; interval width answers "do I need more data"
 
@@ -175,8 +257,11 @@ Both raw and adjusted p are shown. The family definition is printed beside the t
   suggests, and a known statistical anti-pattern.
 - **Assumes** — Readers will interpret an interval. Mitigated by stating the verdict in words
   alongside it.
-- **Open** — Whether to go further and classify each result against a user-supplied
-  clinically important difference. Unresolved; see questions below.
+- **Costs** — An interval demands more of the reader than a single number, and some readers
+  will want the number anyway.
+- **Revisit if** — Clinicians supply a minimum clinically important difference, which would
+  let each result be classified directly. Still unresolved; see questions below.
+- **In code** — No power calculation exists anywhere in the module, deliberately.
 
 ## D10 — Coverage is a result, and its effect on pairing is surfaced
 
@@ -190,7 +275,13 @@ reports `n_pairs` against each source's own n.
 - **Rejected** — *Reporting n only.* Hides the selection entirely.
 - **Assumes** — Absence is informative. A vendor not run on a patient is different from one
   that ran and produced nothing; the matrix separates them.
-- **Unresolved** — Whether to refuse the comparison below some coverage ratio, rather than warn.
+- **Costs** — The warning can be ignored. A reader determined to quote the estimate from a
+  four-of-ten comparison is not prevented from doing so.
+- **Revisit if** — Reports are found in circulation quoting low-coverage comparisons without
+  the caveat, which would argue for refusing rather than warning.
+- **In code** — `CoverageCell` separates `produced` / `not_produced` / `source_absent` /
+  `metric_invalid`; `PairedResult` carries `n_a`, `n_b` and `coverage_fraction`; the tab warns
+  below 80% coverage.
 
 ## D11 — Violin plots with overlaid points, never bare box plots
 
@@ -202,7 +293,11 @@ reports `n_pairs` against each source's own n.
 - **Assumes** — A kernel density estimate at n = 10 is interpretable. It largely is not —
   which is why individual points are always overlaid and the violin is treated as
   interpretation rather than evidence.
-- **Falsified by** — Consistently unimodal distributions, making the violin ornament.
+- **Costs** — Below fifteen observations no violin is drawn at all, so the figure is plainer
+  than the equivalent from a vendor report.
+- **Revisit if** — Distributions prove consistently unimodal, making the violin ornament.
+- **In code** — `stat_plots.MIN_N_FOR_VIOLIN = 15`; points, median and IQR are always drawn,
+  the density only above that threshold.
 
 ## D12 — Forest plot against one user-chosen reference source
 
@@ -212,81 +307,151 @@ reports `n_pairs` against each source's own n.
 - **Rejected** — *All-pairs matrix.* Complete, unreadable, and invites the reader to find the
   one comparison that suits them.
 - **Assumes** — A meaningful reference exists, normally the vendor in current clinical use.
-- **Caveat** — Choosing the reference after seeing results is a form of selection. The report
-  should record which reference was chosen.
+- **Costs** — Choosing the reference after seeing results is a form of selection, and one the
+  software cannot detect.
+- **Revisit if** — Reference choice is observed to shift between drafts of the same analysis.
+- **In code** — The methods paragraph names the reference, the challenger, the metric and the
+  family size, so the choice travels with any text copied out of the tab.
+
+## D13 — When the design cannot reach significance, say so before showing p-values
+
+If the smallest attainable p at the available sample sizes exceeds the Holm threshold for the
+declared family, no result in that family can be significant however the data fall. The tab
+says this above the table rather than letting a column of adjusted p = 1.000 be read as
+evidence of agreement.
+
+At n = 10 the smallest attainable two-sided p is `2/2¹⁰ = 0.001953`. A Holm family of 26 or
+more organs therefore cannot reject at α = 0.05 — the first threshold is 0.05/26 = 0.00192 —
+regardless of how different the sources are.
+
+- **Rationale** — This is a property of the design, knowable before the data are seen, and it
+  is the honest answer to "why is nothing significant?". Without it, an under-powered analysis
+  is indistinguishable on screen from a genuine null result.
+- **Rejected** — *Silently reporting the adjusted p-values.* Formally correct and routinely
+  misread.
+- **Assumes** — Nothing. The bound is arithmetic.
+- **Costs** — The warning is blunt: it says the family cannot detect anything, not how much
+  larger a cohort would need to be. That is deliberate — the latter is a power calculation,
+  which D9 rejects.
+- **Revisit if** — Cohorts grow past the point where the ceiling can bind, making the check
+  dead code.
+- **In code** — `statistics.holm_detection_ceiling()`, surfaced by `family_can_detect()`. The
+  check is judged on the family's **most favourable** member, not its thinnest: Holm's
+  strictest threshold applies to the smallest p in the family, so the comparison with the most
+  pairs decides. Judging it on the thinnest member produced a banner announcing that nothing
+  could reach significance while a ten-patient organ sat two rows below at adjusted p = 0.008.
+  Two regression tests fail against that version.
+
+## D14 — An exact sign test is reported beside every comparison
+
+Every row shows the signed-rank result and, alongside it, `k/m · p` from an exact binomial
+sign test on the same pairs.
+
+- **Rationale** — D4 assumes the paired differences are symmetric about their median. That
+  assumption is untestable at n = 10, so rather than assert it, the analysis that does not
+  need it is printed next to the one that does. Where they agree, the symmetry assumption is
+  not doing any work. Where they diverge, the reader knows the conclusion rests on it.
+- **Rejected** — *Reporting a symmetry diagnostic.* At ten observations a skewness test has
+  no power, and would give false reassurance rather than information.
+- **Assumes** — Only that the pairs are independent.
+- **Costs** — A second p-value per row, which invites reporting whichever is smaller. The
+  signed-rank result is the declared primary analysis and the sign test is labelled as a
+  robustness check, in that order, in the table and in the methods paragraph.
+- **Revisit if** — The two are found to diverge often enough that the primary test should
+  change rather than be accompanied.
+- **In code** — `statistics.sign_test()`, exact, reported as `n_positive/n_nonzero · p`.
 
 ---
 
 # What the report looks like
 
-> **All tables below are illustrative and do not represent measured results.**
+> Figures below use **synthetic data**, not measured results. Every number is produced by
+> the shipped implementation by `scripts/make_register_tables.py` — the tables are internally
+> consistent and an auditor can recompute any cell. An earlier draft hand-wrote plausible
+> rows and drifted into combinations that cannot occur: an interval at n = 4, and r = 0.80
+> beside p = 0.125 when p = 0.125 at n = 4 forces r = ±1.00 exactly.
 
 ## Descriptive statistics · Dice
 
 | Organ | Source | n | Median [Q1, Q3] | 95% CI (median) | Mean (SD) | Min / Max |
 |---|---|---|---|---|---|---|
-| Parotid (L) | Limbus | 10 | 0.842 [0.811, 0.868] | 0.798 – 0.879 | 0.833 (0.041) | 0.742 / 0.881 |
-| Parotid (L) | MVision | 10 | 0.806 [0.779, 0.834] | 0.761 – 0.849 | 0.799 (0.048) | 0.698 / 0.862 |
-| Brainstem | Limbus | 9 | 0.871 [0.850, 0.889] | 0.828 – 0.901 | 0.864 (0.033) | 0.799 / 0.902 |
-| Glnd Submand (R) | MVision | 4 | 0.774 [0.751, 0.802] | **— not estimable** | 0.778 (0.036) | 0.740 / 0.821 |
+| Parotid (L) | Limbus | 10 | 0.839 [0.820, 0.860] | 0.811 – 0.868 | 0.840 (0.027) | 0.799 / 0.881 |
+| Parotid (L) | MVision | 10 | 0.802 [0.783, 0.823] | 0.779 – 0.834 | 0.804 (0.026) | 0.766 / 0.845 |
+| Brainstem | Limbus | 9 | 0.864 [0.850, 0.879] | 0.845 – 0.889 | 0.865 (0.023) | 0.828 / 0.902 |
+| Brainstem | MVision | 9 | 0.866 [0.851, 0.879] | 0.838 – 0.884 | 0.862 (0.024) | 0.819 / 0.897 |
+| Glnd Submand (R) | Limbus | 10 | 0.818 [0.804, 0.831] | 0.796 – 0.840 | 0.816 (0.021) | 0.779 / 0.844 |
+| Glnd Submand (R) | MVision | 4 | 0.768 [0.759, 0.781] | **— not estimable** | 0.772 (0.022) | 0.751 / 0.802 |
 
-The fourth row shows **D3** in operation: at n = 4 no distribution-free 95% interval exists,
-so none is invented. Quartiles are still shown because they are descriptive rather than
-inferential.
 
-## Paired comparison · Dice · MVision vs Limbus
+The `Glnd Submand (R)` rows show **D3** and **D6** together. The challenger produced this
+organ for four of ten patients; at n = 4 neither the median's interval nor the
+Hodges–Lehmann interval attains 95%, so both read `— not estimable`. Quartiles are still
+shown, because they are descriptive rather than inferential.
 
-_Holm family = Dice × this pair × 14 organs_
+## Paired comparison · Dice · MVision vs Limbus  (family = 5 organs)
 
-| Organ | n pairs | nA / nB | HL difference | 95% CI | r | p | p Holm | Verdict |
-|---|---|---|---|---|---|---|---|---|
-| Parotid (L) | 10 | 10 / 10 | +0.038 | +0.014, +0.061 | 0.82 | 0.002 | **0.028** | favours Limbus |
-| Parotid (R) | 10 | 10 / 10 | +0.031 | +0.004, +0.058 | 0.71 | 0.014 | 0.168 | not significant |
-| Brainstem | 9 | 9 / 10 | +0.009 | −0.011, +0.028 | 0.29 | 0.380 | 1.000 | no difference |
-| Glnd Submand (R) | 4 | 10 / 4 | +0.061 | −0.008, +0.130 | 0.80 | 0.125 | 1.000 | **coverage 40%** |
+| Organ | n pairs | n chall. / n ref. | HL difference | 95% CI (unadjusted) | r | zeros | p | p (Holm) | Sign test | Reading |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Parotid (L) | 10 | 10 / 10 | -0.0360 | -0.0380, -0.0340 | -1.00 | 0 | 0.0020 | 0.0098 | 0/10 · p=0.002 | favours Limbus |
+| Parotid (R) | 10 | 10 / 10 | -0.0105 | -0.0175, -0.0010 | -0.71 | 0 | 0.0488 | 0.1953 | 2/10 · p=0.109 | no detectable difference |
+| Brainstem | 9 | 9 / 9 | -0.0025 | -0.0080, +0.0000 | -0.60 | 0 | 0.1172 | 0.3516 | 3/9 · p=0.508 | no detectable difference |
+| SpinalCord | 10 | 10 / 10 | +0.0025 | -0.0040, +0.0090 | +0.56 | 0 | 0.1289 | 0.3516 | 6/10 · p=0.754 | no detectable difference |
+| Glnd Submand (R) | 4 | 4 / 10 | -0.0453 | **— not estimable** | -1.00 | 0 | 0.1250 | 0.3516 | 0/4 · p=0.125 | no detectable difference |
 
-**D10** in operation on the last row: one source produced this organ for four of ten patients,
-so the comparison rests on those four — very likely the easier four. The estimate is shown,
-flagged, and should not be read as a performance comparison.
+Four things in that table are worth reading carefully.
 
-Note also **Parotid (R)**: raw p = 0.014 would be "significant" and Holm correction removes it.
-That is the multiplicity control doing its job across 14 organs.
+- **Parotid (R)** — raw p = 0.0488 would be reported as "significant" on its own; Holm across
+  five organs moves it to 0.195. That is **D8** doing its job, and it is why the family has to
+  be declared rather than discovered.
+- **Glnd Submand (R)** — the largest effect in the table, on the fewest patients, with no
+  interval. The challenger declined this organ for six of ten patients and is compared only on
+  the four it attempted — very likely the four it found easiest (**D10**).
+- **r = −1.00 on two rows** — every paired difference has the same sign, which forces the
+  rank-biserial correlation to its bound. Beside p = 0.002 that is a strong result; beside
+  p = 0.125 at n = 4 it is the *only* value arithmetically available (**D7**).
+- **The Reading column never says "no difference"** — a large p means no difference was
+  detected, which is not the same claim and would need a margin nobody has supplied.
 
-## Forest · Dice · vendors vs Limbus (reference)
+## Forest · Dice · MVision vs Limbus (reference)
 
 ```
-                              ← favours MVision    0    favours Limbus →
+                      ← favours Limbus                favours MVision →
 
-  Parotid (L)      n=10                            │    ├────●────┤          +0.038  p_holm 0.028
-  Parotid (R)      n=10                            ├──────○──────┤           +0.031         0.168
-  Brainstem         n=9                      ├─────○─────┤                   +0.009         1.000
-  SpinalCord       n=10          ├───────────○───────────┤                   −0.012         1.000
-  Glnd Submand (R)  n=4                ├──────────○──────────────────┤       +0.061  coverage 40%
+  Glnd Submand (R)   n=4       ○                                            │            -0.0453   p_holm 0.3516   no interval at n=4
+  Parotid (L)        n=10             ├─●─┤                                 │            -0.0360   p_holm 0.0098
+  Parotid (R)        n=10                                 ├──────○─────────┤│            -0.0105   p_holm 0.1953
+  Brainstem          n=9                                            ├─────○─┤            -0.0025   p_holm 0.3516
+  SpinalCord         n=10                                               ├─────○──────┤   +0.0025   p_holm 0.3516
 
-                   −0.04     −0.02       0      +0.02     +0.04     +0.06
-                            Hodges–Lehmann difference in Dice
+                         -0.05   -0.04     -0.03     -0.02     -0.01     +0.00     +0.01
+                         Hodges–Lehmann difference in Dice   (MVision − Limbus)
 
   ● significant after Holm correction        ○ not significant
 ```
 
-Rows sorted by effect size so the actionable organs sit at the top.
+Rows sorted by effect size. Markers are filled on Holm significance while the intervals are
+**unadjusted**, so the two can legitimately disagree — an interval excluding zero beside a
+non-significant adjusted p is the correction working, not an inconsistency. The figure states
+this in its footer rather than leaving a reader to reconcile it.
 
 ## Coverage · organs × sources
 
 | Organ | Limbus | MVision | Radformation | TheraPanacea |
 |---|---|---|---|---|
 | Parotid (L) | 10 / 10 | 10 / 10 | 10 / 10 | 10 / 10 |
-| Brainstem | 10 / 10 | 9 / 10 | 10 / 10 | 8 / 8 *(2 absent)* |
+| Brainstem | 10 / 10 | 9 / 10 | 10 / 10 | 8 / 8 · 2 not run |
 | Glnd Submand (R) | 10 / 10 | **4 / 10** | 10 / 10 | — |
 | Cochlea (L) | 10 / 10 | — | 7 / 10 | — |
 
 Three states, deliberately distinguished:
 
 - `4 / 10` — a model that ran and **declined to contour**
-- `8 / 8 · 2 absent` — **missing data**, the model was not run on those patients
+- `8 / 8 · 2 not run` — **missing data**, the model was not run on those patients
 - `—` — an organ the source **never produces at all**
 
-Only the first is a performance finding.
+Only the first is a performance finding. The cell text above is what the tab renders verbatim;
+`test_report_tab.py` asserts these exact strings, so the three states cannot quietly collapse
+into one.
 
 ---
 
@@ -311,12 +476,17 @@ Only the first is a performance finding.
    question directly, at the cost of asking clinicians for a number they may not have.
 3. **Should low coverage block a comparison rather than warn it?** Currently the estimate is
    shown and flagged (D10). Refusing below some ratio would be safer and less informative.
-4. **Is Wilcoxon's symmetry assumption met?** Worth checking empirically on the paired
-   differences before the design is fixed; a sign test is the fallback.
-5. **Does the reference-source choice need recording?** Selecting it after seeing results is a
-   mild form of selection, currently mitigated only by convention (D12).
+4. **Is Wilcoxon's symmetry assumption met?** Untestable at n = 10. Addressed rather than
+   resolved: the exact sign test is reported beside every comparison (D14), so a reader can
+   see whether the conclusion depends on the assumption.
+5. **Does the reference-source choice need recording?** Partly resolved — the methods
+   paragraph names it (D12) — but nothing prevents choosing it after seeing results.
+6. **Should the confirmatory family be recorded before the data are seen?** The two-tier
+   structure in D8 only works if the confirmatory family is declared in advance, and the
+   software currently has no way to record that it was.
 
 ---
 
-_AutoSeg Evaluator v3 · statistical design for the Report tab · not yet implemented._
-_All tables and figures on this page are illustrative and do not represent measured results._
+_AutoSeg Evaluator v3 · statistical design for the Report tab · implemented and under test._
+_All tables and figures on this page are computed from synthetic data and do not represent_
+_measured results._
