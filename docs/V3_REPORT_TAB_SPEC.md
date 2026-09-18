@@ -56,7 +56,7 @@ pivot of organ against vendor. The report absorbs both and adds the inference.
 | Topic | Decision |
 |---|---|
 | Primary descriptive | **Median [Q1, Q3] with a 95% CI for the median.** Mean (SD) and min/max are supplementary. |
-| Paired test | **Wilcoxon signed-rank** for two sources; **Friedman** plus post-hoc pairwise Wilcoxon for three or more. |
+| Paired test | **Wilcoxon signed-rank**, exact, Pratt zeros. For three or more sources, a source-wise correction family rather than Friedman — see 4.3. |
 | Point estimate | **Hodges–Lehmann**, with its exact Wilcoxon-derived CI — so estimate and test can never disagree. |
 | Multiplicity | **Holm**, applied per metric per source-pair across organs. Raw and adjusted p both shown. |
 | Distribution figure | **Violin with overlaid points and median/IQR marks.** No bare box plots. |
@@ -196,12 +196,27 @@ Restricted to patients where **both** sources produced the organ.
 
 ### 4.3 Three or more sources
 
-Friedman test across sources on complete blocks — patients where *every* source
-produced the organ. Report the number of complete blocks prominently, because it
-can be far smaller than any individual source's coverage.
+**Superseded during implementation.** This section originally specified a
+Friedman test on complete blocks, followed by pairwise Wilcoxon post-hoc. That
+was not built, and should not be.
 
-A significant Friedman result is followed by pairwise Wilcoxon post-hoc tests,
-Holm-corrected within that organ's pairwise family.
+Friedman needs complete blocks — patients where *every* source produced the
+organ. Coverage in this cohort is precisely what is not complete: one vendor
+declines submandibular glands on six of ten patients, another was never run on
+two. Complete blocks would discard most of the cohort, non-randomly, which is
+the selection bias the coverage columns exist to expose.
+
+What is built instead is a **source-wise correction family**: every other source
+compared with one chosen reference, on one organ, each comparison paired and
+exact, Holm-corrected across the sources. No patient needs to have been
+contoured by everybody — each pairwise comparison uses whatever that pair
+shares.
+
+Two consequences are stated in the UI rather than left implicit. The rows all
+share the reference arm, so they are correlated and do not compare the other
+sources with each other. And the family axis is one or the other — organs or
+sources, never both at once, because at ten pairs a family beyond 25 can reject
+nothing whatever the data show.
 
 ### 4.4 Multiplicity
 

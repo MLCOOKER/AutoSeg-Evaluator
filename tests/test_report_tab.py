@@ -716,3 +716,121 @@ def test_long_organ_names_are_elided_on_the_axis(tab):
     long_name = "Glnd Submandibular Superior Left"
     assert len(_elide(long_name)) == MAX_TICK_LABEL
     assert _elide(long_name).endswith("…")
+
+
+# ---- Comparing across sources ---------------------------------------------
+
+
+def _across_sources(tab, organ="Parotid (L)"):
+    tab._axis_combo.setCurrentIndex(1)
+    for index in range(tab._organ_list.count()):
+        if tab._organ_list.item(index).text() == organ:
+            tab._organ_list.setCurrentRow(index)
+            return
+    pytest.fail(f"no {organ} in the organ list")
+
+
+def test_switching_axis_reshapes_the_controls(tab):
+    """Across sources the list names one organ, and the challenger is every source."""
+    from PySide6.QtWidgets import QAbstractItemView
+
+    _across_sources(tab)
+    assert tab._organ_list.selectionMode() is QAbstractItemView.SelectionMode.SingleSelection
+    assert not tab._challenger_combo.isEnabled()
+    assert "Organ to compare every source on" in tab._organ_list_label.text()
+
+    tab._axis_combo.setCurrentIndex(0)
+    assert tab._organ_list.selectionMode() is QAbstractItemView.SelectionMode.MultiSelection
+    assert tab._challenger_combo.isEnabled()
+    assert "correction family" in tab._organ_list_label.text()
+
+
+def test_the_comparison_table_is_keyed_by_source(tab):
+    _across_sources(tab)
+    assert tab._comparison_table.horizontalHeaderItem(0).text() == "Source"
+    labels = {
+        tab._comparison_table.item(r, 0).text() for r in range(tab._comparison_table.rowCount())
+    }
+    assert labels == {CHALLENGER, THIRD}
+    assert REFERENCE not in labels  # never compared with itself
+
+
+def test_the_reading_names_the_row_not_the_disabled_challenger(tab):
+    """The challenger combo is inert here; using its text would misattribute."""
+    _across_sources(tab)
+    tab._challenger_combo.setCurrentText(THIRD)  # inert, but set to a wrong answer
+    row = _find(tab._comparison_table, CHALLENGER)
+    assert row["Reading"] == f"favours {REFERENCE}"
+
+
+def test_the_forest_names_no_single_challenger(tab):
+    """Writing one vendor's name across a figure of several would be a misstatement."""
+    _across_sources(tab)
+    axes = tab._forest.figure.axes[0]
+    assert "the source in each row" in axes.get_title()
+    assert f"(each source − {REFERENCE})" in axes.get_xlabel()
+    assert CHALLENGER not in axes.get_title()
+    assert sorted(t.get_text().split()[0] for t in axes.get_yticklabels()) == sorted(
+        [CHALLENGER, THIRD]
+    )
+
+
+def test_the_forest_footer_warns_that_rows_share_an_arm(tab):
+    """Consistency down the column is the shared reference, not corroboration."""
+    _across_sources(tab)
+    footer = " ".join(t.get_text() for t in tab._forest.figure.texts)
+    assert "shares the same reference arm" in footer
+    assert "do not compare the sources with each other" in footer
+
+    tab._axis_combo.setCurrentIndex(0)
+    footer = " ".join(t.get_text() for t in tab._forest.figure.texts)
+    assert "shares the same reference arm" not in footer
+
+
+def test_the_methods_paragraph_describes_the_source_family(tab):
+    _across_sources(tab)
+    methods = tab._methods.text()
+    assert "Each of 2 sources was compared with Limbus" in methods
+    assert "for Parotid (L)" in methods
+    assert "across the 2 sources compared on this organ and metric" in methods
+    assert "do not constitute comparisons between the other sources" in methods
+
+
+def test_the_source_family_corrects_across_sources_not_organs(tab):
+    """Two challengers is a family of two, however many organs exist.
+
+    Checked against the stored values rather than the table text: the columns
+    show four decimals, and 2 x 0.001953 rounds to 0.0039 rather than 0.0040.
+    """
+    _across_sources(tab)
+    smallest = min(r.p_value for r in tab._family.values())
+    row = next(r for r in tab._family.values() if r.p_value == smallest)
+    assert row.p_adjusted == pytest.approx(2 * smallest)
+    assert len(tab._family) == 2  # the two non-reference sources
+
+
+def test_export_across_sources_keys_rows_by_source(tab, tmp_path, monkeypatch):
+    _across_sources(tab)
+    target = tmp_path / "by_source.csv"
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "CSV"))
+    )
+    tab._export_btn.click()
+
+    with open(target, encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [r["source"] for r in rows] == [CHALLENGER, THIRD]
+    # The challenger column names the row, not the inert combo.
+    assert [r["challenger"] for r in rows] == [CHALLENGER, THIRD]
+    assert all(r["reference"] == REFERENCE for r in rows)
+
+
+def test_switching_back_restores_the_organ_family(tab):
+    """The axis is a view, not a one-way door."""
+    _across_sources(tab)
+    assert tab._comparison_table.horizontalHeaderItem(0).text() == "Source"
+
+    tab._axis_combo.setCurrentIndex(0)
+    _select(tab, ORGANS)
+    assert tab._comparison_table.horizontalHeaderItem(0).text() == "Organ"
+    assert _find(tab._comparison_table, "Parotid (L)")["n pairs"] == "10"

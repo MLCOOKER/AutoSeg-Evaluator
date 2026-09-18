@@ -168,7 +168,7 @@ class DistributionCanvas(_Canvas):
 
 
 class ForestCanvas(_Canvas):
-    """Paired differences per organ against one reference source."""
+    """Paired differences against one reference source, one row per family member."""
 
     def plot(
         self,
@@ -176,10 +176,17 @@ class ForestCanvas(_Canvas):
         metric: str,
         *,
         reference: str,
-        challenger: str,
+        challenger: str | None,
         alpha: float = 0.05,
     ) -> None:
-        """``results`` is ``{organ: PairedResult}`` from ``ReportModel.family``."""
+        """``results`` is ``{label: PairedResult}`` from either family method.
+
+        ``challenger`` is the single source every row was measured against, or
+        ``None`` when the rows *are* the sources. In that second case no row can
+        be labelled with one challenger's name, and the direction annotation has
+        to say "the source in each row" instead — writing one vendor's name
+        across a figure comparing several would be a plain misstatement.
+        """
         self.clear()
         axes = self.figure.add_subplot(111)
         usable = [
@@ -245,13 +252,15 @@ class ForestCanvas(_Canvas):
         axes.set_yticklabels(
             [f"{_elide(organ)}   n={result.n_pairs}" for organ, result in usable], fontsize=8
         )
-        axes.set_xlabel(f"Hodges–Lehmann difference in {metric}   ({challenger} − {reference})")
+        measured = challenger or "each source"
+        axes.set_xlabel(f"Hodges–Lehmann difference in {metric}   ({measured} − {reference})")
         axes.grid(axis="x", alpha=0.25, linewidth=0.6)
         axes.set_axisbelow(True)
 
         direction = metric_direction(metric)
         if direction:
-            better, worse = (challenger, reference) if direction > 0 else (reference, challenger)
+            rows = challenger or "the source in each row"
+            better, worse = (rows, reference) if direction > 0 else (reference, rows)
             axes.set_title(
                 f"← favours {worse}          favours {better} →", fontsize=8, color="#4A5866"
             )
@@ -260,7 +269,13 @@ class ForestCanvas(_Canvas):
         self.figure.text(
             0.01,
             0.01,
-            "Intervals are unadjusted; filled markers are significant after Holm correction.",
+            "Intervals are unadjusted; filled markers are significant after Holm correction."
+            + (
+                ""
+                if challenger
+                else "  Every row shares the same reference arm, so rows are correlated "
+                "and do not compare the sources with each other."
+            ),
             fontsize=7,
             color="#7A8794",
         )

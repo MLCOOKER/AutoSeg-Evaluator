@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
 
 from autoseg_evaluator.core.statistics import IntervalStatus, smallest_attainable_p
 from autoseg_evaluator.data.report import (
+    FamilyAxis,
     ReportModel,
     build_report_model,
     favours,
@@ -306,6 +307,27 @@ class ReportTab(QWidget):
         form = QHBoxLayout(controls)
 
         left = QFormLayout()
+        self._axis_combo = QComboBox(self)
+        self._axis_combo.addItem("Organs — one challenger", FamilyAxis.ORGANS)
+        self._axis_combo.addItem("Sources — one organ", FamilyAxis.SOURCES)
+        self._axis_combo.setToolTip(
+            _tip(
+                "What the correction family varies. Both ask a real question and "
+                "neither contains the other.",
+                "<b>Organs</b> — one challenger against the reference, across the "
+                "organs you select. <i>Where does this vendor differ from the one "
+                "we use?</i>",
+                "<b>Sources</b> — every other source against the reference, on one "
+                "organ. <i>For this organ, how does each vendor compare to the one "
+                "we use?</i>",
+                "Varying both at once is the combination to avoid: at ten patients "
+                "Holm can reject nothing in a family larger than 25, so five "
+                "vendors across more than five organs would show adjusted p = 1.000 "
+                "whatever the data said.",
+            )
+        )
+        self._axis_combo.currentIndexChanged.connect(self._on_axis_changed)
+        left.addRow("Compare across", self._axis_combo)
         self._metric_combo = QComboBox(self)
         self._metric_combo.setToolTip(
             "<p style='margin:0 0 6px 0'>The metric to analyse. Every table and figure on "
@@ -332,11 +354,13 @@ class ReportTab(QWidget):
             "lower.</p>"
         )
         self._challenger_combo.currentIndexChanged.connect(self._recompute)
-        left.addRow("Challenger", self._challenger_combo)
+        self._challenger_row_label = QLabel("Challenger", self)
+        left.addRow(self._challenger_row_label, self._challenger_combo)
         form.addLayout(left, stretch=1)
 
         right = QVBoxLayout()
-        right.addWidget(QLabel("Organs in the correction family", self))
+        self._organ_list_label = QLabel("Organs in the correction family", self)
+        right.addWidget(self._organ_list_label)
         self._organ_list = QListWidget(self)
         self._organ_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         self._organ_list.setMaximumHeight(110)
@@ -348,12 +372,12 @@ class ReportTab(QWidget):
         self._organ_list.itemSelectionChanged.connect(self._recompute)
         right.addWidget(self._organ_list)
         buttons = QHBoxLayout()
-        select_all = QPushButton("All", self)
-        select_all.clicked.connect(lambda: self._organ_list.selectAll())
-        buttons.addWidget(select_all)
-        clear = QPushButton("None", self)
-        clear.clicked.connect(lambda: self._organ_list.clearSelection())
-        buttons.addWidget(clear)
+        self._select_all_btn = QPushButton("All", self)
+        self._select_all_btn.clicked.connect(lambda: self._organ_list.selectAll())
+        buttons.addWidget(self._select_all_btn)
+        self._select_none_btn = QPushButton("None", self)
+        self._select_none_btn.clicked.connect(lambda: self._organ_list.clearSelection())
+        buttons.addWidget(self._select_none_btn)
         buttons.addStretch(1)
         right.addLayout(buttons)
         form.addLayout(right, stretch=1)
@@ -451,6 +475,52 @@ class ReportTab(QWidget):
             item.setSelected(organ in selected if selected else True)
         self._organ_list.blockSignals(False)
 
+    def _axis(self) -> FamilyAxis:
+        data = self._axis_combo.currentData()
+        return data if isinstance(data, FamilyAxis) else FamilyAxis.ORGANS
+
+    def _on_axis_changed(self) -> None:
+        """Reshape the organ list for its new job, then recompute once.
+
+        Across organs the list *is* the family and takes several. Across sources
+        it names the single organ every source is compared on, so multi-select
+        would be meaningless — and the family becomes the other sources, which
+        is fixed by the data rather than chosen.
+        """
+        across_sources = self._axis() is FamilyAxis.SOURCES
+        self._organ_list.blockSignals(True)
+        self._organ_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+            if across_sources
+            else QAbstractItemView.SelectionMode.MultiSelection
+        )
+        if across_sources and self._organ_list.count():
+            current = self._organ_list.selectedItems()
+            self._organ_list.setCurrentRow(self._organ_list.row(current[0]) if current else 0)
+        self._organ_list.blockSignals(False)
+
+        self._organ_list_label.setText(
+            "Organ to compare every source on"
+            if across_sources
+            else "Organs in the correction family"
+        )
+        self._challenger_combo.setEnabled(not across_sources)
+        self._challenger_row_label.setEnabled(not across_sources)
+        self._challenger_row_label.setText(
+            "Challenger  (every other source)" if across_sources else "Challenger"
+        )
+        self._select_all_btn.setEnabled(not across_sources)
+        self._select_none_btn.setEnabled(not across_sources)
+        self._recompute()
+
+    def _selected_organ(self) -> str:
+        """The single organ the source-wise comparison runs on."""
+        chosen = [i.text() for i in self._organ_list.selectedItems()]
+        if chosen:
+            return chosen[0]
+        organs = self._model.organs()
+        return organs[0] if organs else ""
+
     def _selected_organs(self) -> list[str]:
         chosen = [i.text() for i in self._organ_list.selectedItems()]
         return chosen or self._model.organs()
@@ -462,10 +532,14 @@ class ReportTab(QWidget):
         self._methods.setText("")
 
     def _recompute(self) -> None:
+        axis = self._axis()
         metric = self._metric_combo.currentText()
         reference = self._reference_combo.currentText()
         challenger = self._challenger_combo.currentText()
-        organs = self._selected_organs()
+        # Across sources the coverage and descriptive tables narrow to the one
+        # organ being compared on; across organs they span the declared family.
+        organs = [self._selected_organ()] if axis is FamilyAxis.SOURCES else self._selected_organs()
+        organs = [o for o in organs if o]
 
         if not metric or not self._model.sources():
             self._render_empty()
@@ -500,11 +574,14 @@ class ReportTab(QWidget):
         self._fill_descriptive(metric, organs)
 
         family: dict = {}
-        if reference and challenger and reference != challenger:
+        if axis is FamilyAxis.SOURCES:
+            if reference and organs:
+                family = self._model.family_across_sources(metric, reference, organs[0])
+        elif reference and challenger and reference != challenger:
             family = self._model.family(metric, reference, challenger, organs)
         self._family = family
-        self._fill_comparison(metric, family, reference, challenger)
-        self._fill_warning(metric, family, reference, challenger)
+        self._fill_comparison(metric, family, reference, challenger, axis)
+        self._fill_warning(metric, family, reference, challenger, axis)
 
         self._distribution.plot(
             {
@@ -516,8 +593,16 @@ class ReportTab(QWidget):
             },
             metric,
         )
-        self._forest.plot(family, metric, reference=reference, challenger=challenger, alpha=_ALPHA)
-        self._write_methods(metric, family, reference, challenger)
+        self._forest.plot(
+            family,
+            metric,
+            reference=reference,
+            # Across sources the challenger is whatever each row names, so the
+            # figure must not label a single one.
+            challenger=None if axis is FamilyAxis.SOURCES else challenger,
+            alpha=_ALPHA,
+        )
+        self._write_methods(metric, family, reference, challenger, axis)
 
     def _fill_coverage(self, metric: str, organs: list[str]) -> None:
         table = self._coverage_table
@@ -594,8 +679,18 @@ class ReportTab(QWidget):
                 ):
                     table.setItem(row, column, QTableWidgetItem(text))
 
-    def _fill_comparison(self, metric: str, family: dict, reference: str, challenger: str) -> None:
+    def _fill_comparison(
+        self,
+        metric: str,
+        family: dict,
+        reference: str,
+        challenger: str,
+        axis: FamilyAxis = FamilyAxis.ORGANS,
+    ) -> None:
         table = self._comparison_table
+        header = table.horizontalHeaderItem(0)
+        if header is not None:
+            header.setText("Organ" if axis is FamilyAxis.ORGANS else "Source")
         table.setRowCount(0)
         for organ, result in family.items():
             row = table.rowCount()
@@ -640,7 +735,12 @@ class ReportTab(QWidget):
                     f"{result.p_value:.4f}",
                     f"{result.p_adjusted:.4f}" if result.p_adjusted is not None else "—",
                     sign_text,
-                    self._reading(metric, result, reference, challenger),
+                    self._reading(
+                        metric,
+                        result,
+                        reference,
+                        organ if axis is FamilyAxis.SOURCES else challenger,
+                    ),
                 ]
             ):
                 item = QTableWidgetItem(text)
@@ -692,8 +792,16 @@ class ReportTab(QWidget):
             return "differs"
         return f"favours {challenger if side == 'a' else reference}"
 
-    def _fill_warning(self, metric: str, family: dict, reference: str, challenger: str) -> None:
+    def _fill_warning(
+        self,
+        metric: str,
+        family: dict,
+        reference: str,
+        challenger: str,
+        axis: FamilyAxis = FamilyAxis.ORGANS,
+    ) -> None:
         notes: list[str] = []
+        unit = axis.plural
         estimable = {organ: r for organ, r in family.items() if r is not None}
         missing = [organ for organ, r in family.items() if r is None]
         if self._model.conflicting_observations:
@@ -709,8 +817,14 @@ class ReportTab(QWidget):
         excluded = sorted(
             {
                 patient
-                for organ in family
-                for patient in self._model.excluded_patients(organ, metric, challenger, reference)
+                for label in family
+                for patient in self._model.excluded_patients(
+                    *(
+                        (self._selected_organ(), metric, label, reference)
+                        if axis is FamilyAxis.SOURCES
+                        else (label, metric, challenger, reference)
+                    )
+                )
             }
         )
         if excluded:
@@ -737,9 +851,9 @@ class ReportTab(QWidget):
             notes.append(
                 f"<b>This comparison cannot reach significance.</b> With {smallest} paired "
                 f"observations the smallest attainable p-value is larger than the Holm "
-                f"threshold for a family of {len(family)} organs, so no result can be "
+                f"threshold for a family of {len(family)} {unit}, so no result can be "
                 f"significant however the data fall. Reduce the family to a few "
-                f"prespecified organs, or read the intervals rather than the p-values."
+                f"prespecified {unit}, or read the intervals rather than the p-values."
             )
         thin = [
             organ
@@ -781,22 +895,47 @@ class ReportTab(QWidget):
         self._warning.setText("<br><br>".join(notes))
         self._warning.setVisible(bool(notes))
 
-    def _write_methods(self, metric: str, family: dict, reference: str, challenger: str) -> None:
+    def _write_methods(
+        self,
+        metric: str,
+        family: dict,
+        reference: str,
+        challenger: str,
+        axis: FamilyAxis = FamilyAxis.ORGANS,
+    ) -> None:
         estimable = {organ: r for organ, r in family.items() if r is not None}
         if not estimable:
             self._methods.setText("")
             return
         sizes = sorted({r.n_pairs for r in estimable.values()})
         span = f"{sizes[0]}" if len(sizes) == 1 else f"{sizes[0]}–{sizes[-1]}"
+        if axis is FamilyAxis.SOURCES:
+            organ = self._selected_organ()
+            opening = (
+                f"<b>Methods.</b> Each of {len(family)} sources was compared with {reference} "
+                f"on {metric} for {organ}, separately and pairwise"
+            )
+            family_clause = f"across the {len(family)} sources compared on this organ and metric"
+            # Said explicitly because the figure invites the opposite reading.
+            caveat = (
+                " Every comparison shares the same reference arm, so the results are "
+                "correlated and do not constitute comparisons between the other sources."
+            )
+        else:
+            opening = (
+                f"<b>Methods.</b> {challenger} was compared with {reference} on {metric} "
+                f"for each organ separately"
+            )
+            family_clause = f"across the {len(family)} organs of this metric and source pair"
+            caveat = ""
         self._methods.setText(
-            f"<b>Methods.</b> {challenger} was compared with {reference} on {metric} for each "
-            f"organ separately, using the Wilcoxon signed-rank test on patients where both "
+            opening + ", using the Wilcoxon signed-rank test on patients where both "
             f"produced the organ (n = {span} pairs). Zero differences were handled by Pratt's "
-            f"method and p-values computed exactly from the conditional sign-flip distribution. "
-            f"Differences are summarised by the Hodges–Lehmann estimator with a 95% confidence "
-            f"interval obtained by inverting the same test; these intervals are unadjusted. "
-            f"An exact sign test is reported alongside. Holm–Bonferroni correction was applied "
-            f"across the {len(family)} organs of this metric and source pair"
+            "method and p-values computed exactly from the conditional sign-flip distribution. "
+            "Differences are summarised by the Hodges–Lehmann estimator with a 95% confidence "
+            "interval obtained by inverting the same test; these intervals are unadjusted. "
+            "An exact sign test is reported alongside. Holm–Bonferroni correction was applied "
+            + family_clause
             + (
                 f", of which {len(family) - len(estimable)} could not be estimated and were "
                 "retained in the divisor"
@@ -804,9 +943,9 @@ class ReportTab(QWidget):
                 else ""
             )
             + ", and controls the "
-            "familywise error rate within that family only. Descriptive values are median "
-            "[Q1, Q3] with a distribution-free 95% interval for the median, which is not "
-            "estimable below six observations."
+            "familywise error rate within that family only." + caveat + " Descriptive values "
+            "are median [Q1, Q3] with a distribution-free 95% interval for the median, which "
+            "is not estimable below six observations."
         )
 
     # ---- Export -----------------------------------------------------------
@@ -828,20 +967,22 @@ class ReportTab(QWidget):
         try:
             with open(path, "w", encoding="utf-8", newline="") as handle:
                 handle.write(
-                    "organ,metric,challenger,reference,n_pairs,n_challenger,n_reference,"
+                    f"{self._axis().noun},metric,challenger,reference,n_pairs,n_challenger,n_reference,"
                     "n_zero,hl_difference,ci_low,ci_high,ci_status,ci_exhaustive,"
                     "rank_biserial,p_raw,p_holm,"
                     "sign_positive,sign_nonzero,sign_p,ci_agrees_with_test\n"
                 )
+                across_sources = self._axis() is FamilyAxis.SOURCES
                 for organ, r in self._family.items():
+                    row_challenger = organ if across_sources else challenger
                     if r is None:
                         handle.write(
-                            f"{organ},{metric},{challenger},{reference},0,,,,,,,"
+                            f"{organ},{metric},{row_challenger},{reference},0,,,,,,,"
                             "not estimable,,,,,,\n"
                         )
                         continue
                     handle.write(
-                        f"{organ},{metric},{challenger},{reference},{r.n_pairs},{r.n_a},"
+                        f"{organ},{metric},{row_challenger},{reference},{r.n_pairs},{r.n_a},"
                         f"{r.n_b},{r.n_zero},"
                         f"{'' if r.hl_estimate is None else f'{r.hl_estimate:.6f}'},"
                         f"{'' if r.ci_low is None else f'{r.ci_low:.6f}'},"

@@ -158,8 +158,19 @@ is reported rather than something reported at 93.75%.
 
 ## D4 — Wilcoxon signed-rank, paired within patient
 
-Two sources compared with Wilcoxon signed-rank; three or more with Friedman on complete
-blocks, followed by pairwise post-hoc.
+Two sources compared with Wilcoxon signed-rank. **Friedman is not implemented**, and an
+earlier version of this entry claimed it was the plan for three or more sources.
+
+That plan was wrong for this data. Friedman needs *complete blocks*: a patient counts only
+where every source produced the organ. Coverage here is exactly what is not complete — one
+vendor declines submandibular glands on six of ten patients, another was never run on two —
+so complete blocks would discard most of the cohort, and discard it non-randomly, which is
+the bias D10 exists to expose.
+
+What is offered instead is a **source-wise family** (D8): every other source compared with
+one reference on one organ, each comparison paired and exact, corrected across the sources.
+That answers the same question without requiring any patient to have been contoured by
+everybody.
 
 - **Rationale** — Between-patient anatomical variation dwarfs between-vendor performance
   variation, so pairing removes the dominant noise term. At n = 10 an unpaired test on these
@@ -171,8 +182,11 @@ blocks, followed by pairwise post-hoc.
 - **Costs** — Power relative to a t-test when the differences really are normal, and an
   assumption (symmetry) that is weaker than normality but not free — see D14.
 - **Revisit if** — The paired differences on real data are strongly asymmetric. The exact
-  sign test reported beside every comparison (D14) is the assumption-free fallback.
+  sign test reported beside every comparison (D14) is the assumption-free fallback. Friedman
+  becomes worth revisiting if cohorts arrive where every source contours everything, since
+  complete blocks would then cost nothing.
 - **In code** — `statistics.signed_rank_exact_p()`, exact for every n the cohort can produce.
+  No Friedman implementation exists, deliberately.
 
 ## D5 — Zero differences handled by Pratt's method, not discarded
 
@@ -298,6 +312,34 @@ declared beforehand. What the software does is make the family an explicit, visi
 rather than a silent consequence of a filter, so the distinction is at least recordable.
 Narrowing the family from four organs to two moved a Holm-adjusted p from 0.0078 to 0.0039
 in testing; that sensitivity is exactly why the choice cannot be left implicit.
+
+**The family runs along one axis at a time.** The tab offers two, and they answer
+different questions:
+
+| Axis | Family | Question |
+|---|---|---|
+| Organs | one challenger vs the reference, across the selected organs | *Where does this vendor differ from the one we use?* |
+| Sources | every other source vs the reference, on one organ | *For this organ, how does each vendor compare to the one we use?* |
+
+Varying both at once is deliberately not offered. At ten pairs the smallest attainable p is
+0.001953, so Holm can reject nothing in a family larger than 25 (D13) — five challengers
+across more than five organs is already past that, and the whole table would read
+`p = 1.000` whatever the data showed. The budget, at n = 10:
+
+| Challengers | Organs affordable |
+|---|---|
+| 1 | 25 |
+| 3 | 8 |
+| 5 | 5 |
+
+The source-wise family has a property the organ-wise one lacks: *"every other source"* is
+fixed by the data rather than chosen, so it cannot be accused of cherry-picking. It also has
+a trap the organ-wise one lacks — **every row shares the same reference arm**, so the rows
+are correlated. A patient the reference handled badly makes every source look good on that
+patient. Holm holds the familywise rate under arbitrary dependence, so the correction stays
+valid; what is not valid is reading consistency down the column as corroboration, or reading
+two rows against each other as a comparison between those two sources. The figure footer and
+the methods paragraph both say so.
 
 **The divisor is the declared family, not the estimable part of it.** An organ selected into
 the family but with no patient contoured by both sources is a hypothesis that was posed and

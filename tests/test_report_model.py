@@ -429,3 +429,67 @@ def test_the_register_prints_what_the_tab_prints():
     # The n = 4 row of the worked example exercises the status that changed.
     assert "— unbounded at this n" in text
     assert "| Glnd Submand (R) | 4 | 4 / 10 |" in text
+
+
+# ---- Family axis ----------------------------------------------------------
+
+
+def _multi_vendor_rows(organ="Parotid (L)"):
+    rows = []
+    for i in range(10):
+        rows.append(_row(f"P{i}", organ, "Limbus", {"dice": 0.84 + i * 0.003}))
+        rows.append(_row(f"P{i}", organ, "MVision", {"dice": 0.81 + i * 0.003}))
+        rows.append(_row(f"P{i}", organ, "Radformation", {"dice": 0.835 + i * 0.003}))
+        rows.append(_row(f"P{i}", organ, "TheraPanacea", {"dice": 0.82 + i * 0.003}))
+    return rows
+
+
+def test_a_source_wise_family_holds_every_other_source():
+    """ "All the other vendors" is fixed by the data, not chosen — unlike organs."""
+    model = build_report_model(_multi_vendor_rows())
+    family = model.family_across_sources("dice", "Limbus", "Parotid (L)")
+    assert set(family) == {"MVision", "Radformation", "TheraPanacea"}
+    assert "Limbus" not in family  # never compared with itself
+    assert all(r is not None for r in family.values())
+
+
+def test_the_source_wise_divisor_is_the_number_of_sources():
+    """Three challengers is a family of three, whichever organ it runs on."""
+    model = build_report_model(_multi_vendor_rows())
+    family = model.family_across_sources("dice", "Limbus", "Parotid (L)")
+    smallest = min(r.p_value for r in family.values())
+    matching = next(r for r in family.values() if r.p_value == smallest)
+    assert matching.p_adjusted == pytest.approx(min(1.0, 3 * smallest))
+
+
+def test_the_two_axes_agree_on_a_shared_cell():
+    """Same pair, same organ, same numbers — only the family differs."""
+    model = build_report_model(_multi_vendor_rows())
+    by_organ = model.family("dice", "Limbus", "MVision", organs=["Parotid (L)"])
+    by_source = model.family_across_sources("dice", "Limbus", "Parotid (L)")
+
+    organ_row = by_organ["Parotid (L)"]
+    source_row = by_source["MVision"]
+    assert organ_row.hl_estimate == pytest.approx(source_row.hl_estimate)
+    assert organ_row.p_value == pytest.approx(source_row.p_value)
+    # The adjusted values differ, because the families do.
+    assert organ_row.p_adjusted < source_row.p_adjusted
+
+
+def test_a_source_that_never_produced_the_organ_stays_in_the_divisor():
+    rows = _multi_vendor_rows()
+    rows = [r for r in rows if r["test_source_label"] != "TheraPanacea"]
+    rows.append(_row("P0", "Brainstem", "TheraPanacea", {"dice": 0.9}))
+    model = build_report_model(rows)
+    family = model.family_across_sources("dice", "Limbus", "Parotid (L)")
+    assert family["TheraPanacea"] is None
+    assert len(family) == 3
+
+
+def test_the_axis_nouns_are_usable_for_prose():
+    from autoseg_evaluator.data.report import FamilyAxis
+
+    assert FamilyAxis.ORGANS.noun == "organ"
+    assert FamilyAxis.ORGANS.plural == "organs"
+    assert FamilyAxis.SOURCES.noun == "source"
+    assert FamilyAxis.SOURCES.plural == "sources"

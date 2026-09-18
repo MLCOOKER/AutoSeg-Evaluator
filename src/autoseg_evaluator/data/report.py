@@ -122,6 +122,35 @@ def interval_text(found: ConfidenceSet) -> str:
     return "— not estimable"
 
 
+class FamilyAxis(Enum):
+    """What one Holm family varies, holding everything else fixed.
+
+    Both axes ask a real question and neither is a superset of the other:
+
+    ``ORGANS`` — one challenger against one reference, across several organs.
+    *"Where does this vendor differ from the one we use?"*
+
+    ``SOURCES`` — every other source against one reference, on one organ.
+    *"For the parotid, how does each vendor compare to the one we use?"*
+
+    Fanning **both** at once is the combination to avoid. At ten pairs the
+    smallest attainable p is 0.001953, so Holm can reject nothing in a family
+    larger than 25; five challengers times anything past five organs is already
+    past that, and every adjusted p would be 1.000 whatever the data showed.
+    """
+
+    ORGANS = "organs"
+    SOURCES = "sources"
+
+    @property
+    def noun(self) -> str:
+        return "organ" if self is FamilyAxis.ORGANS else "source"
+
+    @property
+    def plural(self) -> str:
+        return "organs" if self is FamilyAxis.ORGANS else "sources"
+
+
 # ---- Coverage -------------------------------------------------------------
 
 
@@ -366,15 +395,51 @@ class ReportModel:
         coverage table exists to expose.
         """
         chosen = list(organs) if organs is not None else self.organs()
-        results: dict[str, PairedResult | None] = {
-            organ: self.compare(organ, metric, challenger, reference, alpha) for organ in chosen
-        }
-        estimable = {organ: r for organ, r in results.items() if r is not None}
+        return self._correct(
+            {organ: self.compare(organ, metric, challenger, reference, alpha) for organ in chosen}
+        )
+
+    def family_across_sources(
+        self,
+        metric: str,
+        reference: str,
+        organ: str,
+        sources: Sequence[str] | None = None,
+        alpha: float = 0.05,
+    ) -> dict[str, PairedResult | None]:
+        """One Holm family: this metric, this organ, every source against one.
+
+        The mirror of :meth:`family`. Keys are source labels rather than organ
+        labels; everything downstream treats them the same way, which is why the
+        family is always ``{label: result}`` rather than something axis-specific.
+
+        Defaults to every test source except the reference, which is a family
+        definition that cannot be accused of cherry-picking — unlike a subset of
+        organs, "all the other vendors" is fixed by the data.
+
+        Note what these rows are not. Each is a separate paired test against the
+        **same** reference arm, so they are correlated: a patient the reference
+        handled badly makes every source look good on that patient. Holm holds
+        the familywise rate under arbitrary dependence, so the correction is
+        valid — but consistency down the column is not extra evidence, and the
+        rows do not compare the sources *with each other*.
+        """
+        chosen = (
+            list(sources) if sources is not None else [s for s in self.sources() if s != reference]
+        )
+        return self._correct(
+            {source: self.compare(organ, metric, source, reference, alpha) for source in chosen}
+        )
+
+    @staticmethod
+    def _correct(results: dict[str, PairedResult | None]) -> dict[str, PairedResult | None]:
+        """Attach Holm p-values, keeping the declared family in the divisor."""
+        estimable = {label: r for label, r in results.items() if r is not None}
         if not estimable:
             return results
-        adjusted = with_holm(list(estimable.values()), family_size=len(chosen))
-        for organ, result in zip(estimable.keys(), adjusted, strict=True):
-            results[organ] = result
+        adjusted = with_holm(list(estimable.values()), family_size=len(results))
+        for label, result in zip(estimable.keys(), adjusted, strict=True):
+            results[label] = result
         return results
 
     def family_can_detect(
@@ -467,6 +532,7 @@ def build_report_model(
 
 __all__ = [
     "HIGHER_IS_BETTER",
+    "FamilyAxis",
     "interval_text",
     "LOWER_IS_BETTER",
     "Coverage",
