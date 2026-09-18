@@ -351,3 +351,140 @@ def test_a_cancelled_save_dialog_writes_nothing(tab, tmp_path, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
     tab._export_btn.click()
     assert list(tmp_path.iterdir()) == []
+
+
+# ---- Stale state ----------------------------------------------------------
+
+
+def test_clearing_the_results_empties_the_report(tab, tmp_path, monkeypatch):
+    """Discarding results must not leave the previous cohort on screen.
+
+    The Results tab's ``cleared`` signal was emitted but connected to nothing,
+    so the whole report — coverage, descriptives, comparisons, figures and the
+    methods paragraph — stayed live after the rows behind it were discarded.
+    """
+    assert tab._comparison_table.rowCount() > 0
+    tab._results.clear()
+    tab.refresh()
+
+    assert tab._coverage_table.rowCount() == 0
+    assert tab._descriptive_table.rowCount() == 0
+    assert tab._comparison_table.rowCount() == 0
+    assert tab._methods.text() == ""
+    assert tab._warning.text() == ""
+    assert "Compute metrics first" in tab._summary_label.text()
+
+
+def test_a_cleared_report_cannot_export_the_previous_cohort(tab, monkeypatch):
+    """The family is what Export writes, so it has to go with the tables."""
+    _select(tab, ["Parotid (L)"])
+    assert tab._family
+
+    tab._results.clear()
+    tab.refresh()
+
+    told: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(lambda _p, _t, text, *a, **k: told.append(text))
+    )
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *a, **k: pytest.fail("offered to export a cleared cohort")),
+    )
+    tab._export_btn.click()
+    assert told and "Nothing to export" in told[0]
+
+
+def test_the_results_tab_clear_signal_reaches_the_report(qapp, monkeypatch):
+    """The wiring itself, not just the tab's own behaviour."""
+    from autoseg_evaluator.ui.main_window import MainWindow
+
+    window = MainWindow({})
+    window._results.add_rows(_rows())
+    window._report_tab.refresh()
+    assert window._report_tab._model.organs()
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    window._results_tab.set_results_manager(window._results)
+    window._results_tab._on_clear_clicked()
+
+    assert window._report_tab._model.organs() == []
+    assert window._report_tab._comparison_table.rowCount() == 0
+    window.close()
+
+
+# ---- Tooltips -------------------------------------------------------------
+
+
+def test_every_column_carries_help(tab):
+    """The table is read by clinicians, not statisticians. No bare columns."""
+    for table in (tab._coverage_table, tab._descriptive_table, tab._comparison_table):
+        for column in range(table.columnCount()):
+            header = table.horizontalHeaderItem(column)
+            tip = header.toolTip()
+            assert tip, f"{header.text()!r} has no tooltip"
+            assert len(tip) > 60, f"{header.text()!r} tooltip is too thin to help"
+
+
+def test_every_control_carries_help(tab):
+    for widget in (
+        tab._metric_combo,
+        tab._reference_combo,
+        tab._challenger_combo,
+        tab._organ_list,
+        tab._export_btn,
+    ):
+        assert widget.toolTip(), f"{widget} has no tooltip"
+
+
+def test_the_help_corrects_the_three_standard_misreadings(tab):
+    """Each tooltip has a job: these are the readings that would mislead."""
+    tips = {
+        tab._comparison_table.horizontalHeaderItem(
+            c
+        ).text(): tab._comparison_table.horizontalHeaderItem(c).toolTip()
+        for c in range(tab._comparison_table.columnCount())
+    }
+    # A p-value is not the size of a difference.
+    assert "not" in tips["p"].lower() and "probability that the difference is real" in tips["p"]
+    # "Not significant" is not evidence of agreement.
+    assert "is not 'no difference.'" in tips["Reading"]
+    # An effect size of +/-1.00 at small n is arithmetic, not strength.
+    assert "arithmetic" in tips["r"]
+    # And the column to judge against 0.05 is named explicitly.
+    assert "0.05" in tips["p (Holm)"]
+
+
+def test_a_coverage_cell_explains_its_own_shorthand(tab):
+    """`8 / 8 · 2 not run` is unreadable without being told what it means."""
+    for row in range(tab._coverage_table.rowCount()):
+        if (
+            tab._coverage_table.item(row, 0).text() == "Parotid (L)"
+            and tab._coverage_table.item(row, 1).text() == THIRD
+        ):
+            tip = tab._coverage_table.item(row, 2).toolTip()
+            assert "produced <b>Parotid (L)</b> for 8" in tip
+            assert "presumably not run" in tip
+            return
+    pytest.fail("no Radformation / Parotid (L) coverage row")
+
+
+def test_a_thin_row_states_the_p_value_it_cannot_beat(tab):
+    """The family banner fires only when nothing can reach significance.
+
+    An individual organ can sit far below that ceiling while others carry the
+    family, so the limit is stated per row too.
+    """
+    _select(tab, ORGANS)
+    for row in range(tab._comparison_table.rowCount()):
+        if tab._comparison_table.item(row, 0).text() == THIN_ORGAN:
+            tip = tab._comparison_table.item(row, 0).toolTip()
+            assert "4</b> paired patient(s)" in tip
+            assert "0.1250" in tip  # smallest attainable p at n = 4
+            assert "unlikely to be" in tip  # the coverage caveat
+            assert "No finite 95% interval" in tip
+            return
+    pytest.fail(f"no {THIN_ORGAN} comparison row")

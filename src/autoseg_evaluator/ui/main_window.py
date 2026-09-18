@@ -103,6 +103,9 @@ class MainWindow(QMainWindow):
         self._tabs.setCurrentIndex(max(0, active))
         self._results_tab.set_results_manager(self._results)
         self._report_tab.set_results_manager(self._results)
+        # Discarding the results must empty the report too. Without this the
+        # Report tab keeps rendering the previous cohort — and exporting it.
+        self._results_tab.cleared.connect(self._report_tab.refresh)
 
         # Wire cross-tab signals
         self._load_tab.libraryLoaded.connect(self._on_library_loaded)

@@ -53,10 +53,204 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from autoseg_evaluator.core.statistics import smallest_attainable_p
 from autoseg_evaluator.data.report import ReportModel, build_report_model, favours
 from autoseg_evaluator.ui.widgets.stat_plots import DistributionCanvas, ForestCanvas
 
 _ALPHA = 0.05
+
+# ---- Column help ----------------------------------------------------------
+#
+# Every column carries a tooltip, because the table is read by clinicians and
+# physicists rather than statisticians and several columns are routinely
+# misread — a p-value as the size of a difference, "not significant" as
+# evidence of agreement, an effect size of ±1.00 as strength rather than
+# arithmetic. Rich text is used so Qt word-wraps; plain text renders as one
+# unreadable line.
+
+
+def _tip(*paragraphs: str) -> str:
+    return "".join(f"<p style='margin:0 0 6px 0'>{text}</p>" for text in paragraphs)
+
+
+COVERAGE_COLUMNS: list[tuple[str, str]] = [
+    (
+        "Organ",
+        _tip(
+            "The canonical organ. Drawers named differently across patients are pooled here if the organ grouping assigned them the same label."
+        ),
+    ),
+    (
+        "Source",
+        _tip(
+            "The auto-contouring source. Ground truth never appears: every metric already measures agreement with it."
+        ),
+    ),
+    (
+        "Coverage",
+        _tip(
+            "<b>Produced / attempted</b> — how often this source actually contoured this organ, out of the patients it ran on.",
+            "<b>· N not run</b> means the source was not run on those patients at all. That says nothing about the model; failing to contour an organ it did attempt says a great deal.",
+            "Caveat: patients where <i>no</i> source produced the organ generate no result row, so they are invisible here. The denominator is 'patients where at least one source produced it', not 'patients who have this organ'.",
+        ),
+    ),
+    (
+        "Produced",
+        _tip("Patients where this source produced the organ and the metric computed successfully."),
+    ),
+    (
+        "Not produced",
+        _tip(
+            "Patients where this source ran, but produced no contour for this organ.",
+            "This is the number that carries information about the model — it declined a case it had the chance to attempt.",
+        ),
+    ),
+    (
+        "Not run",
+        _tip(
+            "Patients where this source produced nothing at all, so it was presumably never run.",
+            "Missing data, not a model failure. Kept separate from 'not produced' for exactly that reason.",
+        ),
+    ),
+]
+
+DESCRIPTIVE_COLUMNS: list[tuple[str, str]] = [
+    (
+        "Organ",
+        _tip(
+            "The canonical organ, from the organ grouping in the Matching tab.",
+            "Patients whose ROI was named differently — <i>SubmanG_R</i>, "
+            "<i>Glnd_Submand_R</i> — are pooled here under one label, which is what "
+            "makes a per-organ sample of ten patients possible at all.",
+            "An organ the grouping could not assign falls back to its drawer name and "
+            "stands alone.",
+        ),
+    ),
+    (
+        "Source",
+        _tip(
+            "The auto-contouring source being summarised. All sources are listed here, not only the two being compared."
+        ),
+    ),
+    (
+        "n",
+        _tip(
+            "Patients contributing a value. One value per patient — repeat exports are collapsed, not counted twice."
+        ),
+    ),
+    (
+        "Median [Q1, Q3]",
+        _tip(
+            "The typical value, with the middle half of the cohort in brackets.",
+            "Reported ahead of the mean because these metrics are bounded and skewed: one failed contour moves a mean Hausdorff more than the rest of the cohort combined, so the mean describes neither the typical case nor the failure.",
+        ),
+    ),
+    (
+        "95% CI",
+        _tip(
+            "A range that would contain the true median in 95% of repeated cohorts. Built from the ordered values alone, assuming nothing about the distribution's shape.",
+            "<b>— not estimable</b> below six patients. That is not a limitation of the software: with five or fewer values, even the full range covers only 93.75%, so no honest 95% interval can be formed.",
+        ),
+    ),
+    (
+        "Mean (SD)",
+        _tip(
+            "Supplementary, for comparison with vendor literature, which almost always reports mean and standard deviation. Prefer the median for these metrics."
+        ),
+    ),
+    (
+        "Min / Max",
+        _tip(
+            "The best and worst single patient. Worth a look — the worst case is often the one that matters clinically."
+        ),
+    ),
+]
+
+COMPARISON_COLUMNS: list[tuple[str, str]] = [
+    (
+        "Organ",
+        _tip(
+            "The canonical organ. Each organ is tested separately; results are never pooled across organs."
+        ),
+    ),
+    (
+        "n pairs",
+        _tip(
+            "Patients the test actually used — those where <b>both</b> sources produced this organ and both metrics computed.",
+            "This is the real sample size for everything else in the row.",
+        ),
+    ),
+    (
+        "n chall. / n ref.",
+        _tip(
+            "What each source produced on its own, before pairing.",
+            "When these exceed <b>n pairs</b>, patients were discarded. A source compared on four of ten patients is being judged on the four it chose to attempt — very likely the four it found easiest.",
+            "Read this before you read the result.",
+        ),
+    ),
+    (
+        "HL difference",
+        _tip(
+            "<b>The most useful number in the row.</b> The typical difference between the two sources, in the metric's own units, signed <i>challenger minus reference</i>.",
+            "So −0.036 on Dice means the challenger scores about 0.036 lower on a typical patient. Unlike a p-value, you can judge this clinically.",
+            "Technically the Hodges–Lehmann estimator: the median of all pairwise averages of the paired differences, which is far less sensitive to one outlying patient than a plain mean difference.",
+        ),
+    ),
+    (
+        "95% CI (unadjusted)",
+        _tip(
+            "The range of differences consistent with the data. Two things to read: whether it crosses zero, and how wide it is.",
+            "Width is what answers 'do I need more patients'. A narrow interval straddling zero means the difference is genuinely small; a wide one means you do not yet know.",
+            "<b>Unadjusted</b> — unlike the Holm column, it is not corrected for testing several organs, so it can exclude zero while the adjusted p is not significant. That is the correction working, not a contradiction.",
+        ),
+    ),
+    (
+        "r",
+        _tip(
+            "How <b>consistently</b> one side wins, from −1 to +1. A value of ±1.00 means every single patient went the same way.",
+            "It says nothing about <b>how much</b> — read the HL difference for that.",
+            "Careful at small n: if all four patients agree, r is ±1.00 automatically. That is arithmetic, not strength of evidence.",
+        ),
+    ),
+    (
+        "zeros",
+        _tip(
+            "Patients where the two sources scored exactly the same.",
+            "Mostly a data-quality check: many ties on a metric rounded to two decimals means the agreement is a rounding artefact rather than real. Zeros are kept in the ranking (Pratt's method), not discarded.",
+        ),
+    ),
+    (
+        "p",
+        _tip(
+            "If the two sources were genuinely equivalent, how often would a pattern this lopsided arise by chance alone? 0.002 is about one in five hundred.",
+            "It is <b>not</b> the probability that the difference is real, and it says nothing about size.",
+            "Exact Wilcoxon signed-rank, computed from the full sign-flip distribution rather than a normal approximation.",
+        ),
+    ),
+    (
+        "p (Holm)",
+        _tip(
+            "<b>This is the column to judge against 0.05</b>, not the raw p.",
+            "Testing many organs at once means some will look significant by luck; Holm corrects for exactly that. Its value depends on how many organs are selected in the family list — a smaller, deliberately chosen family corrects less harshly.",
+            "Familywise control applies within the selected organs only. Picking the best result from across several different families does not carry the guarantee.",
+        ),
+    ),
+    (
+        "Sign test",
+        _tip(
+            "'How <b>often</b>' rather than 'how <b>much</b>': the number of patients the challenger beat the reference on, and an exact p for that count.",
+            "Shown always because the main test assumes the differences are symmetric, and this one does not assume it. Where they agree, that assumption is not doing any work; where they disagree, usually one or two patients carry the whole magnitude.",
+        ),
+    ),
+    (
+        "Reading",
+        _tip(
+            "The verdict in words, taken from the Holm-adjusted p.",
+            "<b>'No detectable difference' is not 'no difference.'</b> At ten patients only fairly large effects are detectable, so a real but modest difference appears here as undetectable. Claiming equivalence would need a margin nobody has supplied.",
+            "Direction is computed from the metric, so a lower Hausdorff and a higher Dice both read as 'better'.",
+        ),
+    ),
+]
 
 
 class ReportTab(QWidget):
@@ -94,6 +288,11 @@ class ReportTab(QWidget):
         self._summary_label.setStyleSheet("color: #777;")
         header.addWidget(self._summary_label, stretch=1)
         self._export_btn = QPushButton("Export CSV…", self)
+        self._export_btn.setToolTip(
+            "<p style='margin:0 0 6px 0'>Writes the paired comparison table — one row per "
+            "organ in the current family — with full precision.</p>"
+            "<p style='margin:0'>Aggregate only: no patient identifiers are written.</p>"
+        )
         self._export_btn.clicked.connect(self._on_export)
         header.addWidget(self._export_btn)
         outer.addLayout(header)
@@ -103,6 +302,12 @@ class ReportTab(QWidget):
 
         left = QFormLayout()
         self._metric_combo = QComboBox(self)
+        self._metric_combo.setToolTip(
+            "<p style='margin:0 0 6px 0'>The metric to analyse. Every table and figure on "
+            "this page reports this one metric.</p>"
+            "<p style='margin:0'>Direction is known to the software, so a lower Hausdorff "
+            'and a higher Dice both read as "better" in the Reading column.</p>'
+        )
         self._metric_combo.currentIndexChanged.connect(self._recompute)
         left.addRow("Metric", self._metric_combo)
         self._reference_combo = QComboBox(self)
@@ -114,6 +319,13 @@ class ReportTab(QWidget):
         self._reference_combo.currentIndexChanged.connect(self._recompute)
         left.addRow("Compare against", self._reference_combo)
         self._challenger_combo = QComboBox(self)
+        self._challenger_combo.setToolTip(
+            "<p style='margin:0 0 6px 0'>The source being evaluated against the reference — "
+            "typically the one you are considering adopting.</p>"
+            "<p style='margin:0'>Differences are reported as <i>challenger minus "
+            "reference</i>, so a negative Dice difference means the challenger scores "
+            "lower.</p>"
+        )
         self._challenger_combo.currentIndexChanged.connect(self._recompute)
         left.addRow("Challenger", self._challenger_combo)
         form.addLayout(left, stretch=1)
@@ -153,32 +365,14 @@ class ReportTab(QWidget):
         body = QSplitter(Qt.Orientation.Vertical, self)
 
         tables = QSplitter(Qt.Orientation.Horizontal, body)
-        self._coverage_table = self._make_table(
-            ["Organ", "Source", "Coverage", "Produced", "Not produced", "Not run"]
-        )
+        self._coverage_table = self._make_table(COVERAGE_COLUMNS)
         tables.addWidget(self._wrap("Coverage", self._coverage_table))
-        self._descriptive_table = self._make_table(
-            ["Organ", "Source", "n", "Median [Q1, Q3]", "95% CI", "Mean (SD)", "Min / Max"]
-        )
+        self._descriptive_table = self._make_table(DESCRIPTIVE_COLUMNS)
         tables.addWidget(self._wrap("Descriptive statistics", self._descriptive_table))
         tables.setSizes([420, 700])
         body.addWidget(tables)
 
-        self._comparison_table = self._make_table(
-            [
-                "Organ",
-                "n pairs",
-                "n chall. / n ref.",
-                "HL difference",
-                "95% CI (unadjusted)",
-                "r",
-                "zeros",
-                "p",
-                "p (Holm)",
-                "Sign test",
-                "Reading",
-            ]
-        )
+        self._comparison_table = self._make_table(COMPARISON_COLUMNS)
         body.addWidget(self._wrap("Paired comparison", self._comparison_table))
 
         figures = QSplitter(Qt.Orientation.Horizontal, body)
@@ -198,9 +392,13 @@ class ReportTab(QWidget):
         outer.addWidget(self._methods)
 
     @staticmethod
-    def _make_table(headers: list[str]) -> QTableWidget:
-        table = QTableWidget(0, len(headers))
-        table.setHorizontalHeaderLabels(headers)
+    def _make_table(columns: list[tuple[str, str]]) -> QTableWidget:
+        table = QTableWidget(0, len(columns))
+        table.setHorizontalHeaderLabels([title for title, _tooltip in columns])
+        for index, (_title, tooltip) in enumerate(columns):
+            header_item = table.horizontalHeaderItem(index)
+            if header_item is not None:
+                header_item.setToolTip(tooltip)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -266,6 +464,12 @@ class ReportTab(QWidget):
 
         if not metric or not self._model.sources():
             self._render_empty()
+            # Drop the family as well as the tables. It is what Export writes,
+            # so leaving it behind would let a cleared cohort be exported from
+            # an empty-looking tab.
+            self._family = {}
+            self._warning.setText("")
+            self._warning.setVisible(False)
             for table in (self._coverage_table, self._descriptive_table, self._comparison_table):
                 table.setRowCount(0)
             self._distribution.plot({}, metric or "")
@@ -315,6 +519,29 @@ class ReportTab(QWidget):
                     continue
                 row = table.rowCount()
                 table.insertRow(row)
+                explanation = _tip(
+                    f"<b>{source}</b> produced <b>{organ}</b> for {cell.produced} of the "
+                    f"{cell.attempted} patient(s) it ran on."
+                    + (
+                        f" It ran on those {cell.attempted} but produced no contour for "
+                        f"{cell.not_produced} of them."
+                        if cell.not_produced
+                        else ""
+                    )
+                    + (
+                        f" A further {cell.source_absent} patient(s) have this organ from "
+                        "another source but nothing at all from this one, so it was "
+                        "presumably not run on them."
+                        if cell.source_absent
+                        else ""
+                    )
+                    + (
+                        f" {cell.metric_invalid} contour(s) exist but the metric could not "
+                        "be computed."
+                        if cell.metric_invalid
+                        else ""
+                    )
+                )
                 for column, text in enumerate(
                     [
                         organ,
@@ -325,7 +552,9 @@ class ReportTab(QWidget):
                         str(cell.source_absent),
                     ]
                 ):
-                    table.setItem(row, column, QTableWidgetItem(text))
+                    item = QTableWidgetItem(text)
+                    item.setToolTip(explanation)
+                    table.setItem(row, column, item)
 
     def _fill_descriptive(self, metric: str, organs: list[str]) -> None:
         table = self._descriptive_table
@@ -384,7 +613,38 @@ class ReportTab(QWidget):
                     self._reading(metric, result, reference, challenger),
                 ]
             ):
-                table.setItem(row, column, QTableWidgetItem(text))
+                item = QTableWidgetItem(text)
+                item.setToolTip(self._row_tooltip(result))
+                table.setItem(row, column, item)
+
+    @staticmethod
+    def _row_tooltip(result) -> str:
+        """What this row's sample size can and cannot show.
+
+        The family-wide banner only fires when *nothing* in the family can reach
+        significance. An individual organ can be far below that ceiling while
+        others carry the family, so the limit is stated per row as well.
+        """
+        floor = smallest_attainable_p(result.n_pairs)
+        notes = [
+            f"Computed on <b>{result.n_pairs}</b> paired patient(s). The smallest "
+            f"p-value any sample of this size could produce is <b>{floor:.4f}</b>, "
+            "before correction for multiple organs."
+        ]
+        if result.coverage_fraction is not None and result.coverage_fraction < 0.8:
+            notes.append(
+                f"Only {result.coverage_fraction:.0%} of the larger source's cases could "
+                "be paired, so this rests on a subset that is unlikely to be "
+                "representative."
+            )
+        if not result.ci_agrees_with_test:
+            notes.append(
+                "Some paired differences are exactly zero, so the interval and the "
+                "p-value need not agree on this row."
+            )
+        if not result.ci_available:
+            notes.append("No finite 95% interval exists at this sample size, so none is shown.")
+        return _tip(*notes)
 
     @staticmethod
     def _reading(metric: str, result, reference: str, challenger: str) -> str:
