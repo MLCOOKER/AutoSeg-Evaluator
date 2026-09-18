@@ -40,11 +40,34 @@ _PALETTE = [
 ]
 
 
+#: Smallest canvas that still leaves room for the axes once the decorations —
+#: rotated organ labels, the legend, the axis title — have been placed.
+#:
+#: Without a floor the splitter can squeeze a canvas until constrained_layout
+#: gives up ("axes sizes collapsed to zero") and the figure renders essentially
+#: blank, with only a warning on stderr that no user sees. Measured: at 14
+#: organs with long names the layout survives 6.0 x 2.0 inches and fails by
+#: 4.0 x 1.2, so the floor sits comfortably above that. The tab scrolls, so a
+#: minimum costs nothing but a scrollbar on a short window.
+MIN_CANVAS_WIDTH = 360
+MIN_CANVAS_HEIGHT = 260
+
+#: Organ labels longer than this are elided on the axis. Long TG-263 names
+#: rotated at 30 degrees are the single largest consumer of vertical space, and
+#: they are the reason the layout collapses at all.
+MAX_TICK_LABEL = 22
+
+
+def _elide(text: str, limit: int = MAX_TICK_LABEL) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 class _Canvas(FigureCanvasQTAgg):
     def __init__(self, width: float = 9.0, height: float = 5.0) -> None:
         self.figure = Figure(figsize=(width, height), layout="constrained")
         super().__init__(self.figure)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(MIN_CANVAS_WIDTH, MIN_CANVAS_HEIGHT)
 
     def clear(self) -> None:
         self.figure.clear()
@@ -123,7 +146,7 @@ class DistributionCanvas(_Canvas):
         axes.set_xticks(range(len(organs)))
         axes.set_xticklabels(
             [
-                f"{organ}\n(n={max((len(v) for v in data[organ].values()), default=0)})"
+                f"{_elide(organ)}\n(n={max((len(v) for v in data[organ].values()), default=0)})"
                 for organ in organs
             ],
             rotation=30,
@@ -220,7 +243,7 @@ class ForestCanvas(_Canvas):
         axes.axvline(0.0, color="#4A5866", linestyle="--", linewidth=1, zorder=1)
         axes.set_yticks(list(positions))
         axes.set_yticklabels(
-            [f"{organ}   n={result.n_pairs}" for organ, result in usable], fontsize=8
+            [f"{_elide(organ)}   n={result.n_pairs}" for organ, result in usable], fontsize=8
         )
         axes.set_xlabel(f"Hodges–Lehmann difference in {metric}   ({challenger} − {reference})")
         axes.grid(axis="x", alpha=0.25, linewidth=0.6)
@@ -244,4 +267,11 @@ class ForestCanvas(_Canvas):
         self.draw_idle()
 
 
-__all__ = ["MIN_N_FOR_VIOLIN", "DistributionCanvas", "ForestCanvas"]
+__all__ = [
+    "MAX_TICK_LABEL",
+    "MIN_CANVAS_HEIGHT",
+    "MIN_CANVAS_WIDTH",
+    "MIN_N_FOR_VIOLIN",
+    "DistributionCanvas",
+    "ForestCanvas",
+]

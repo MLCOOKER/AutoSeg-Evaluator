@@ -671,3 +671,48 @@ def test_rows_without_a_linkage_behave_exactly_as_before(tab):
     assert all(linkage == "" for (_o, _s, _m, _p, linkage) in tab._model.observations)
     assert tab._model.multi_case_patients("Parotid (L)", REFERENCE, "dice") == set()
     assert len(tab._model.values("Parotid (L)", REFERENCE, "dice")) == PATIENTS
+
+
+# ---- Figure sizing --------------------------------------------------------
+
+
+def test_the_canvases_cannot_be_squeezed_until_the_plot_disappears(tab):
+    """Seen on stderr while the app was running, with nothing visible to the user.
+
+    Both figures use matplotlib's constrained layout, which gives up when the
+    decorations no longer fit — "axes sizes collapsed to zero" — and renders an
+    essentially blank figure. Inside a vertical splitter there was nothing
+    stopping that. The tab scrolls, so a floor costs only a scrollbar.
+    """
+    from autoseg_evaluator.ui.widgets.stat_plots import MIN_CANVAS_HEIGHT, MIN_CANVAS_WIDTH
+
+    for canvas in (tab._distribution, tab._forest):
+        assert canvas.minimumHeight() >= MIN_CANVAS_HEIGHT
+        assert canvas.minimumWidth() >= MIN_CANVAS_WIDTH
+
+
+def test_the_figures_draw_cleanly_at_their_smallest_allowed_size(tab):
+    """The floor has to actually clear the collapse, not merely exist."""
+    import warnings
+
+    _select(tab, ORGANS)
+    from autoseg_evaluator.ui.widgets.stat_plots import MIN_CANVAS_HEIGHT, MIN_CANVAS_WIDTH
+
+    for canvas in (tab._distribution, tab._forest):
+        dpi = canvas.figure.dpi
+        canvas.figure.set_size_inches(MIN_CANVAS_WIDTH / dpi, MIN_CANVAS_HEIGHT / dpi)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            canvas.figure.canvas.draw()
+        collapsed = [w for w in caught if "collapsed to zero" in str(w.message)]
+        assert not collapsed, f"{type(canvas).__name__} collapsed at the minimum size"
+
+
+def test_long_organ_names_are_elided_on_the_axis(tab):
+    """Rotated TG-263 names are the largest consumer of vertical space."""
+    from autoseg_evaluator.ui.widgets.stat_plots import MAX_TICK_LABEL, _elide
+
+    assert _elide("Brainstem") == "Brainstem"
+    long_name = "Glnd Submandibular Superior Left"
+    assert len(_elide(long_name)) == MAX_TICK_LABEL
+    assert _elide(long_name).endswith("…")
