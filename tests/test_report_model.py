@@ -99,13 +99,12 @@ def test_a_patient_cannot_contribute_twice_to_the_same_cell():
 
 
 def test_a_repeat_carrying_a_different_value_is_not_a_duplicate():
-    """Raised in external review: the observation key is unsafe.
+    """Two answers for one organ, source and treatment context.
 
-    Observations are keyed on the patient identifier, which does not separate
-    two courses of one patient — a re-irradiation, a replan. When that happens
-    the second value is silently discarded by the first-wins rule, and unlike a
-    duplicated export it changes which number is analysed. Counting the two
-    together would hide it.
+    A second course is not this — it carries its own linkage and becomes its own
+    case. What is left here is a genuine collision inside one context, where
+    first-wins decides which number is analysed, so it cannot be counted
+    alongside harmless duplicated exports.
     """
     rows = [
         _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
@@ -297,3 +296,86 @@ def test_the_ceiling_is_judged_on_the_most_favourable_member():
     assert model.family_can_detect(family.values()) is True
     # …and the claim is consistent with what the family actually produced.
     assert any(r.p_adjusted <= 0.05 for r in family.values())
+
+
+# ---- Treatment context (external review: unsafe observation key) -----------
+
+
+def _linked_row(patient, organ, source, value, linkage):
+    row = _row(patient, organ, source, {"dice": value})
+    row["linkage_id"] = linkage
+    return row
+
+
+def test_a_case_is_a_patient_and_a_treatment_context():
+    """A patient identifier does not identify an observation.
+
+    Re-irradiation and replans give one patient two planning images and two sets
+    of structure sets, all carrying the same PatientID. Keyed on the patient
+    alone, the second silently overwrote nothing and was discarded.
+    """
+    rows = [
+        _linked_row("P1", "Parotid (L)", "VendorA", 0.80, "course-1"),
+        _linked_row("P1", "Parotid (L)", "VendorA", 0.62, "course-2"),
+    ]
+    model = build_report_model(rows)
+    assert model.conflicting_observations == 0
+    assert set(model.cases("Parotid (L)", "VendorA", "dice")) == {
+        ("P1", "course-1"),
+        ("P1", "course-2"),
+    }
+
+
+def test_a_patient_with_two_cases_contributes_neither():
+    """Two courses share an anatomy, so they are not independent observations.
+
+    Analysing both would breach one-observation-per-patient; analysing whichever
+    sorted first would be an undeclared study-design choice.
+    """
+    rows = [
+        _linked_row("P1", "Parotid (L)", "VendorA", 0.80, "course-1"),
+        _linked_row("P1", "Parotid (L)", "VendorA", 0.62, "course-2"),
+        _linked_row("P2", "Parotid (L)", "VendorA", 0.81, "course-1"),
+    ]
+    model = build_report_model(rows)
+    assert model.multi_case_patients("Parotid (L)", "VendorA", "dice") == {"P1"}
+    assert model.values("Parotid (L)", "VendorA", "dice") == {"P2": 0.81}
+
+
+def test_the_exclusion_covers_either_side_of_a_comparison():
+    """A patient ambiguous for one source is unusable for the pair."""
+    rows = [
+        _linked_row("P1", "Parotid (L)", "VendorA", 0.80, "course-1"),
+        _linked_row("P1", "Parotid (L)", "VendorA", 0.62, "course-2"),
+        _linked_row("P1", "Parotid (L)", "VendorB", 0.74, "course-1"),
+        _linked_row("P2", "Parotid (L)", "VendorA", 0.81, "course-1"),
+        _linked_row("P2", "Parotid (L)", "VendorB", 0.75, "course-1"),
+    ]
+    model = build_report_model(rows)
+    assert model.excluded_patients("Parotid (L)", "dice", "VendorA", "VendorB") == {"P1"}
+    result = model.compare("Parotid (L)", "dice", "VendorA", "VendorB")
+    assert result.n_pairs == 1  # only P2 survives
+
+
+def test_an_absent_linkage_keeps_the_previous_behaviour():
+    """Rows from sessions predating the stamp are one case per patient."""
+    rows = [
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
+        _row("P2", "Parotid (L)", "VendorA", {"dice": 0.81}),
+    ]
+    model = build_report_model(rows)
+    assert model.multi_case_patients("Parotid (L)", "VendorA", "dice") == set()
+    assert len(model.values("Parotid (L)", "VendorA", "dice")) == 2
+
+
+def test_coverage_counts_a_withheld_patient_as_not_produced():
+    """An excluded patient is not silently treated as fully covered."""
+    rows = [
+        _linked_row("P1", "Parotid (L)", "VendorA", 0.80, "course-1"),
+        _linked_row("P1", "Parotid (L)", "VendorA", 0.62, "course-2"),
+        _linked_row("P2", "Parotid (L)", "VendorA", 0.81, "course-1"),
+    ]
+    model = build_report_model(rows)
+    cell = model.coverage("Parotid (L)", "dice", "VendorA")
+    assert cell.produced == 1
+    assert cell.attempted == 2

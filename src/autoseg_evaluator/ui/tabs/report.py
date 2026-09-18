@@ -713,11 +713,30 @@ class ReportTab(QWidget):
         if self._model.conflicting_observations:
             notes.append(
                 f"<b>{self._model.conflicting_observations} observation(s) discarded:</b> "
-                "the same patient, organ and source produced more than one differing "
-                "value. Observations are keyed on patient identifier, which does not "
-                "separate two courses of one patient, so the first was kept and the "
-                "rest dropped. Check the Results tab if this cohort contains "
-                "re-irradiation or replans."
+                "the same organ, source and metric were measured more than once "
+                "within a single treatment context, with differing values. The first "
+                "was kept. This is not a second course — those are separated by "
+                "linkage and handled below — so check the Results tab for a repeated "
+                "structure set."
+            )
+
+        excluded = sorted(
+            {
+                patient
+                for organ in family
+                for patient in self._model.excluded_patients(organ, metric, challenger, reference)
+            }
+        )
+        if excluded:
+            notes.append(
+                f"<b>{len(excluded)} patient(s) excluded</b> "
+                f"({', '.join(excluded[:4])}"
+                + (f" and {len(excluded) - 4} more" if len(excluded) > 4 else "")
+                + "): each contributed more than one treatment context — a "
+                "re-irradiation or a replan — for these organs. Two courses of one "
+                "patient are not two independent observations, and choosing between "
+                "them is a study-design decision, so neither is used. Restrict the "
+                "cohort on Tab 1 if you intend to analyse a particular course."
             )
         if missing:
             notes.append(

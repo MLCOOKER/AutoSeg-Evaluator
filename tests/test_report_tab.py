@@ -584,16 +584,17 @@ def test_an_unestimable_organ_exports_as_a_row_not_a_gap(unmatched_tab, tmp_path
     assert rows["Cochlea (L)"]["p_holm"] == ""
 
 
-def test_a_conflicting_repeat_is_reported_not_silently_dropped(qapp):
-    """Raised in external review: the observation key is unsafe.
+def test_a_collision_inside_one_context_is_reported(qapp):
+    """Two differing values for one organ, source and treatment context.
 
-    Two courses under one patient identifier collapse to one observation. That
-    is a different event from a duplicated export and has to be visible.
+    Not a second course — those carry their own linkage and are handled below.
+    This is a repeated structure set inside a single context, where first-wins
+    silently decides which number is analysed.
     """
     widget = ReportTab()
     manager = ResultsManager()
     rows = _rows()
-    rows.append(_row_for("P00", "Parotid (L)", REFERENCE, 0.5))  # a second course
+    rows.append(_row_for("P00", "Parotid (L)", REFERENCE, 0.5))  # same (absent) linkage
     manager.add_rows(rows)
     widget.set_results_manager(manager)
     widget.refresh()
@@ -603,5 +604,70 @@ def test_a_conflicting_repeat_is_reported_not_silently_dropped(qapp):
 
     assert widget._model.conflicting_observations == 1
     assert "conflicting observation(s) discarded" in widget._summary_label.text()
-    assert "keyed on patient identifier" in widget._warning.text()
+    assert "within a single treatment context" in widget._warning.text()
     widget.deleteLater()
+
+
+def _second_course_rows():
+    """P00 returns for a second course, with its own linkage and lower scores."""
+    rows = _rows()
+    for organ in ("Parotid (L)", "Parotid (R)"):
+        for source, dice in ((REFERENCE, 0.70), (CHALLENGER, 0.66)):
+            row = _row_for("P00", organ, source, dice)
+            row["linkage_id"] = "course-2"
+            rows.append(row)
+    return rows
+
+
+@pytest.fixture
+def reirradiation_tab(qapp):
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(_second_course_rows())
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._metric_combo.setCurrentText("dice")
+    widget._reference_combo.setCurrentText(REFERENCE)
+    widget._challenger_combo.setCurrentText(CHALLENGER)
+    yield widget
+    widget.deleteLater()
+
+
+def test_a_second_course_is_a_separate_case_not_a_conflict(reirradiation_tab):
+    """The linkage id distinguishes the contexts, so nothing is 'conflicting'."""
+    model = reirradiation_tab._model
+    assert model.conflicting_observations == 0
+    assert model.duplicates_collapsed == 0
+    # Both contexts are stored.
+    cases = model.cases("Parotid (L)", REFERENCE, "dice")
+    assert ("P00", "") in cases
+    assert ("P00", "course-2") in cases
+    assert cases[("P00", "course-2")] == pytest.approx(0.70)
+
+
+def test_a_patient_with_two_courses_is_excluded_rather_than_guessed(reirradiation_tab):
+    """Two courses are not two independent observations, and picking one is
+    a study-design decision the software must not make silently."""
+    model = reirradiation_tab._model
+    assert model.multi_case_patients("Parotid (L)", REFERENCE, "dice") == {"P00"}
+    assert "P00" not in model.values("Parotid (L)", REFERENCE, "dice")
+
+    _select(reirradiation_tab, ["Parotid (L)", "Parotid (R)"])
+    row = _find(reirradiation_tab._comparison_table, "Parotid (L)")
+    assert row["n pairs"] == "9"  # ten patients, P00 withheld
+    assert "1 patient(s) excluded" in reirradiation_tab._warning.text()
+    assert "P00" in reirradiation_tab._warning.text()
+    assert "re-irradiation or a replan" in reirradiation_tab._warning.text()
+
+
+def test_an_organ_untouched_by_the_second_course_keeps_every_patient(reirradiation_tab):
+    """Exclusion is per organ, not cohort-wide — it applies where it applies."""
+    _select(reirradiation_tab, ["Brainstem"])
+    assert _find(reirradiation_tab._comparison_table, "Brainstem")["n pairs"] == "10"
+
+
+def test_rows_without_a_linkage_behave_exactly_as_before(tab):
+    """Sessions computed before the stamp existed must not change meaning."""
+    assert all(linkage == "" for (_o, _s, _m, _p, linkage) in tab._model.observations)
+    assert tab._model.multi_case_patients("Parotid (L)", REFERENCE, "dice") == set()
+    assert len(tab._model.values("Parotid (L)", REFERENCE, "dice")) == PATIENTS

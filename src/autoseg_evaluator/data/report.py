@@ -9,9 +9,21 @@ What happens here is the part that decides *which numbers go into them*, which
 is where the interpretive risk sits:
 
 **One observation per (patient, organ, source).** A patient contributing twice
-to the same organ — a repeated export, a second structure set — would inflate
-the sample without adding information, and the paired test would treat the
-duplicate as independent evidence. Duplicates are collapsed and counted.
+to the same organ would inflate the sample without adding information, and the
+paired test would treat the duplicate as independent evidence.
+
+Getting that right needs the *observation* identified properly, and a patient
+identifier does not identify one. A re-irradiation or a replan gives one patient
+two treatment contexts, each with its own planning image and structure sets, and
+both arrive carrying the same ``PatientID``. Rows therefore key on
+``(patient, linkage_id)`` — a **case** — using the linkage the ingestion layer
+computes from the explicit DICOM reference graph.
+
+Cases are not then treated as independent observations, because they are not:
+two courses of one patient share an anatomy. Where a patient contributes more
+than one case to an organ, that patient is **excluded from the comparison** and
+named. Choosing between their courses is a study-design decision, and picking
+whichever sorted first is not a decision the software should be making.
 
 **Ground truth is not a comparator.** Every metric already measures agreement
 *with* the reference, so the sources being compared are the test sources, and
@@ -155,8 +167,13 @@ class Observation:
 class ReportModel:
     """Everything the Report tab needs, derived once from the results rows."""
 
-    observations: dict[tuple[str, str, str, str], float] = field(default_factory=dict)
-    """``(organ, source, metric, patient) -> value``, deduplicated."""
+    observations: dict[tuple[str, str, str, str, str], float] = field(default_factory=dict)
+    """``(organ, source, metric, patient, linkage) -> value``, deduplicated.
+
+    The last two together are the **case**. Rows predating the linkage stamp
+    carry an empty linkage and so behave exactly as before: one case per
+    patient.
+    """
 
     reference_sources: set[str] = field(default_factory=set)
     """Labels that acted as ground truth. Never comparators."""
@@ -166,13 +183,13 @@ class ReportModel:
     the *same* value — a re-export, harmless beyond the count."""
 
     conflicting_observations: int = 0
-    """Repeats that carried a *different* value, so one of them was discarded.
+    """Repeats within *one case* that carried a different value.
 
-    The observation key is the patient identifier, which does not distinguish
-    two courses of the same patient (re-irradiation, a replan). When that
-    happens the second course is silently dropped by the first-wins rule, and
-    the count is the only sign of it. Surfaced rather than buried, because
-    unlike a duplicate export this changes which number is analysed."""
+    A second course no longer lands here — it is its own case. What remains is a
+    genuine collision: the same organ, source and metric measured twice inside
+    one treatment context with two different answers. Surfaced rather than
+    buried, because unlike a duplicated export it changes which number is
+    analysed."""
 
     _patients_by_source: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     _patients_by_organ: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
@@ -181,26 +198,51 @@ class ReportModel:
 
     def sources(self) -> list[str]:
         """Test sources available for comparison, ground truth excluded."""
-        found = {source for (_organ, source, _metric, _patient) in self.observations}
+        found = {source for (_organ, source, _metric, _patient, _link) in self.observations}
         return sorted(found - self.reference_sources)
 
     def organs(self) -> list[str]:
-        return sorted({organ for (organ, _s, _m, _p) in self.observations})
+        return sorted({organ for (organ, _s, _m, _p, _link) in self.observations})
 
     def metrics(self) -> list[str]:
-        return sorted({metric for (_o, _s, metric, _p) in self.observations})
+        return sorted({metric for (_o, _s, metric, _p, _link) in self.observations})
 
     def patients(self) -> list[str]:
-        return sorted({patient for (_o, _s, _m, patient) in self.observations})
+        return sorted({patient for (_o, _s, _m, patient, _link) in self.observations})
 
     # ---- Samples ----------------------------------------------------------
 
+    def cases(self, organ: str, source: str, metric: str) -> dict[tuple[str, str], float]:
+        """``{(patient, linkage): value}`` for one cell — every case, as stored."""
+        return {
+            (patient, linkage): value
+            for (o, s, m, patient, linkage), value in self.observations.items()
+            if o == organ and s == source and m == metric
+        }
+
+    def multi_case_patients(self, organ: str, source: str, metric: str) -> set[str]:
+        """Patients contributing more than one treatment context to this cell.
+
+        Two courses of one patient are two cases but not two independent
+        observations, so they cannot both be analysed; and choosing between them
+        is the user's call, not the software's.
+        """
+        seen: dict[str, int] = defaultdict(int)
+        for patient, _linkage in self.cases(organ, source, metric):
+            seen[patient] += 1
+        return {patient for patient, count in seen.items() if count > 1}
+
     def values(self, organ: str, source: str, metric: str) -> dict[str, float]:
-        """``{patient: value}`` for one cell."""
+        """``{patient: value}`` for one cell, one vote per patient.
+
+        Patients with more than one case are omitted entirely rather than
+        resolved arbitrarily — see :meth:`multi_case_patients`.
+        """
+        ambiguous = self.multi_case_patients(organ, source, metric)
         return {
             patient: value
-            for (o, s, m, patient), value in self.observations.items()
-            if o == organ and s == source and m == metric
+            for (patient, _linkage), value in self.cases(organ, source, metric).items()
+            if patient not in ambiguous
         }
 
     def describe_cell(
@@ -209,6 +251,12 @@ class ReportModel:
         return describe(list(self.values(organ, source, metric).values()), alpha)
 
     # ---- Coverage ---------------------------------------------------------
+
+    def excluded_patients(self, organ: str, metric: str, source_a: str, source_b: str) -> set[str]:
+        """Patients dropped from this comparison for contributing several cases."""
+        return self.multi_case_patients(organ, source_a, metric) | self.multi_case_patients(
+            organ, source_b, metric
+        )
 
     def coverage(self, organ: str, metric: str, source: str) -> CoverageCell:
         """How much of this organ the source actually produced.
@@ -363,6 +411,9 @@ def build_report_model(
         patient = str(row.get("patient_id") or "").strip()
         if not organ or not patient:
             continue
+        # Absent on rows computed before the linkage stamp existed, which then
+        # collapse to one case per patient — the previous behaviour exactly.
+        linkage = str(row.get("linkage_id") or "").strip()
 
         model._patients_by_source[source].add(patient)
         model._patients_by_organ[organ].add(patient)
@@ -371,13 +422,13 @@ def build_report_model(
         for metric, value in metrics.items():
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue
-            key = (organ, source, str(metric), patient)
+            key = (organ, source, str(metric), patient, linkage)
             if key in model.observations:
                 # A second row for the same contour adds no information, and
-                # letting it through would give one patient two votes in a
-                # paired test. A second row with a *different* value is not a
-                # duplicate at all — most likely a second course under one
-                # patient identifier — and is counted separately.
+                # letting it through would give one case two votes in a paired
+                # test. A second row with a *different* value inside one case is
+                # a genuine collision and is counted separately — a second
+                # course is not this, it is its own case.
                 if model.observations[key] == float(value):
                     model.duplicates_collapsed += 1
                 else:

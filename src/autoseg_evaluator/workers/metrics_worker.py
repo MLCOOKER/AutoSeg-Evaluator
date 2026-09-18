@@ -35,7 +35,7 @@ from autoseg_evaluator.core.staple import (
     compute_staple,
     sensitivity_specificity_vs_reference,
 )
-from autoseg_evaluator.data.linkage import resolve_dose
+from autoseg_evaluator.data.linkage import resolve_dose, resolve_image_series, series_uid_of
 
 # "Mode" value for the per-organ STAPLE summary row (sensitivity/specificity
 # live on the per-rater rows; this row carries the aggregate consensus metrics
@@ -836,10 +836,16 @@ class MetricsWorker(QObject):
             # GT RTSS is blank when the GT is a synthetic consensus (no file);
             # STAPLE branch rows blank it explicitly too.
             "gt_rtstruct_filename": "" if group.get("_gt_synthetic") else group["gt_filename"],
+            "gt_rtstruct_sop_uid": "" if group.get("_gt_synthetic") else group.get("gt_sop", ""),
             "gt_source_label": group["gt_source"],
             "gt_roi_name": group["gt_roi_name"],
             "gt_roi_number": group["gt_roi_number"],
+            # Which treatment context this row belongs to. A patient with two
+            # courses produces two groups with the same patient id, and without
+            # this the downstream analysis cannot tell them apart.
+            "linkage_id": self._linkage_id(group, test_sop),
             "test_rtstruct_filename": self._rtstruct_filename(group["patient_id"], test_sop),
+            "test_rtstruct_sop_uid": test_sop,
             "test_source_label": source_label,
             "test_organ": test_organ,
             "test_roi_number": test_roi_number,
@@ -1024,6 +1030,53 @@ class MetricsWorker(QObject):
         return rows
 
     # ---- Caches ----------------------------------------------------------
+
+    def _linkage_id(self, group: dict[str, Any], test_sop: str) -> str:
+        """The treatment context this comparison sits in.
+
+        **The planning image the contours are drawn on**, which is what actually
+        separates one course of treatment from another. A re-irradiation or a
+        replan has its own CT, so it gets its own case; everything contoured on
+        one CT belongs to one case however the structure sets were written.
+
+        That last point is the reason this resolves the series rather than
+        reading the ``linkage_id`` stamped at ingest. Linkage unions only on
+        strong reference tiers and otherwise falls back to Frame of Reference —
+        and vendors get Frame of Reference wrong. Measured on this project's own
+        cohort: of 60 patients, one (``Prostate4``) had a vendor emit a
+        structure set under a different FrameOfReferenceUID for the same CT.
+        Keyed on the linkage stamp that patient would have been split into two
+        cases and then dropped from every comparison involving that vendor.
+        Resolving the series reunites all seven structure sets on the one
+        planning CT, which is the truth of it.
+
+        Taken from the ground-truth structure set, which every source in a
+        drawer is compared against and which therefore fixes the context for the
+        whole row. A STAPLE consensus has no file of its own, so the rater's
+        structure set stands in — the consensus was built from those, so they
+        share a context by construction.
+
+        Empty when nothing resolves, which keeps rows behaving as one case per
+        patient exactly as they did before this existed.
+        """
+        patient_id = str(group.get("patient_id", "") or "")
+        sop_uid = str(group.get("gt_sop", "") or "")
+        if group.get("_gt_synthetic") or not sop_uid:
+            sop_uid = str(test_sop or "")
+        if not (patient_id and sop_uid):
+            return ""
+        try:
+            resolved = resolve_image_series(self._library, patient_id, sop_uid)
+        except Exception:  # noqa: BLE001 — an unresolvable link must not stop metrics
+            resolved = None
+        if resolved is not None and resolved.is_resolved:
+            series_uid = series_uid_of(resolved.target)
+            if series_uid:
+                return f"series:{series_uid}"
+        # No image series to key on: fall back to the ingest-time linkage, which
+        # at least separates components of the explicit reference graph.
+        entry = self._find_rtstruct_entry(patient_id, sop_uid)
+        return str(getattr(entry, "linkage_id", "") or "") if entry is not None else ""
 
     def _load_rtstruct(self, patient_id: str, sop_uid: str):
         # Synthetic STAPLE-consensus RTSSes have no DICOM file on disk;
