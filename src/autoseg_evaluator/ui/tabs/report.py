@@ -54,7 +54,12 @@ from PySide6.QtWidgets import (
 )
 
 from autoseg_evaluator.core.statistics import IntervalStatus, smallest_attainable_p
-from autoseg_evaluator.data.report import ReportModel, build_report_model, favours
+from autoseg_evaluator.data.report import (
+    ReportModel,
+    build_report_model,
+    favours,
+    interval_text,
+)
 from autoseg_evaluator.ui.widgets.stat_plots import DistributionCanvas, ForestCanvas
 
 _ALPHA = 0.05
@@ -589,25 +594,6 @@ class ReportTab(QWidget):
                 ):
                     table.setItem(row, column, QTableWidgetItem(text))
 
-    @staticmethod
-    def _interval_text(result) -> str:
-        """The confidence set in words, distinguishing four different absences.
-
-        An earlier version printed one em dash for all of them, which merged
-        "no shift is rejectable at this sample size" with "the accepted set is
-        a single point" — opposite situations.
-        """
-        found = result.ci
-        if found.status is IntervalStatus.INTERVAL:
-            return f"{found.low:+.4f}, {found.high:+.4f}"
-        if found.status is IntervalStatus.SINGLETON:
-            return f"{found.low:+.4f} only"
-        if found.status is IntervalStatus.DISCONNECTED:
-            return f"{found.low:+.4f}, {found.high:+.4f} (enclosing)"
-        if found.status is IntervalStatus.UNBOUNDED:
-            return "— unbounded at this n"
-        return "— not estimable"
-
     def _fill_comparison(self, metric: str, family: dict, reference: str, challenger: str) -> None:
         table = self._comparison_table
         table.setRowCount(0)
@@ -639,7 +625,7 @@ class ReportTab(QWidget):
                     table.setItem(row, column, item)
                 continue
             estimate = result.hl_estimate
-            ci = self._interval_text(result)
+            ci = interval_text(result.ci)
             sign = result.sign
             sign_text = f"{sign.n_positive}/{sign.n_nonzero} · p={sign.p_value:.3f}"
             for column, text in enumerate(

@@ -379,3 +379,53 @@ def test_coverage_counts_a_withheld_patient_as_not_produced():
     cell = model.coverage("Parotid (L)", "dice", "VendorA")
     assert cell.produced == 1
     assert cell.attempted == 2
+
+
+# ---- Reporting the confidence set -----------------------------------------
+
+
+def test_every_confidence_status_reads_differently():
+    """The four absences are distinct claims and must not merge back into one dash.
+
+    An earlier version printed "— not estimable" for all of them, so "no shift
+    is rejectable at this sample size" was indistinguishable from "the accepted
+    set is a single point" — opposite situations.
+    """
+    from autoseg_evaluator.core.statistics import ConfidenceSet, IntervalStatus
+    from autoseg_evaluator.data.report import interval_text
+
+    rendered = {
+        IntervalStatus.INTERVAL: interval_text(
+            ConfidenceSet(IntervalStatus.INTERVAL, -0.038, -0.034, 1)
+        ),
+        IntervalStatus.SINGLETON: interval_text(
+            ConfidenceSet(IntervalStatus.SINGLETON, 0.1, 0.1, 1)
+        ),
+        IntervalStatus.DISCONNECTED: interval_text(
+            ConfidenceSet(IntervalStatus.DISCONNECTED, -0.02, 0.03, 2)
+        ),
+        IntervalStatus.UNBOUNDED: interval_text(ConfidenceSet(IntervalStatus.UNBOUNDED)),
+        IntervalStatus.NO_DATA: interval_text(ConfidenceSet(IntervalStatus.NO_DATA)),
+    }
+    assert len(set(rendered.values())) == len(rendered)
+    assert rendered[IntervalStatus.INTERVAL] == "-0.0380, -0.0340"
+    assert rendered[IntervalStatus.SINGLETON] == "+0.1000 only"
+    assert "enclosing" in rendered[IntervalStatus.DISCONNECTED]
+    assert rendered[IntervalStatus.UNBOUNDED] == "— unbounded at this n"
+
+
+def test_the_register_prints_what_the_tab_prints():
+    """The document is published so an auditor can check the software.
+
+    That only works if both render a confidence set the same way, which is why
+    there is one formatter rather than a copy in the generator script.
+    """
+    from pathlib import Path
+
+    register = Path("docs/V3_REPORT_STATISTICS_REGISTER.md")
+    if not register.exists():  # pragma: no cover - docs absent in a sdist
+        pytest.skip("register not present")
+    text = register.read_text(encoding="utf-8")
+    # The n = 4 row of the worked example exercises the status that changed.
+    assert "— unbounded at this n" in text
+    assert "| Glnd Submand (R) | 4 | 4 / 10 |" in text

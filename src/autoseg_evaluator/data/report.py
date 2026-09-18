@@ -48,7 +48,9 @@ from enum import Enum
 from typing import Any
 
 from autoseg_evaluator.core.statistics import (
+    ConfidenceSet,
     Description,
+    IntervalStatus,
     PairedResult,
     describe,
     holm_detection_ceiling,
@@ -93,6 +95,31 @@ def favours(metric: str, difference: float) -> str:
     if direction == 0 or difference == 0:
         return ""
     return "a" if (difference > 0) == (direction > 0) else "b"
+
+
+# ---- Reporting a confidence set -------------------------------------------
+
+
+def interval_text(found: ConfidenceSet) -> str:
+    """One confidence set as a reader sees it, distinguishing four absences.
+
+    An earlier version printed one em dash for every case without two numbers,
+    which merged "no shift is rejectable at this sample size" with "the accepted
+    set is a single point" — opposite situations.
+
+    Lives here rather than in the tab so the Report tab and the register's
+    worked examples cannot drift apart: the register is published so an auditor
+    can check the tab, which only works if both render the same way.
+    """
+    if found.status is IntervalStatus.INTERVAL:
+        return f"{found.low:+.4f}, {found.high:+.4f}"
+    if found.status is IntervalStatus.SINGLETON:
+        return f"{found.low:+.4f} only"
+    if found.status is IntervalStatus.DISCONNECTED:
+        return f"{found.low:+.4f}, {found.high:+.4f} (enclosing)"
+    if found.status is IntervalStatus.UNBOUNDED:
+        return "— unbounded at this n"
+    return "— not estimable"
 
 
 # ---- Coverage -------------------------------------------------------------
@@ -440,6 +467,7 @@ def build_report_model(
 
 __all__ = [
     "HIGHER_IS_BETTER",
+    "interval_text",
     "LOWER_IS_BETTER",
     "Coverage",
     "CoverageCell",

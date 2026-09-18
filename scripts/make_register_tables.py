@@ -23,6 +23,7 @@ from autoseg_evaluator.core.statistics import (  # noqa: E402
     paired_comparison,
     with_holm,
 )
+from autoseg_evaluator.data.report import interval_text  # noqa: E402
 
 # Synthetic Dice, chosen to exercise each state the report must show:
 #   Parotid (L)        clear, consistent difference
@@ -79,7 +80,9 @@ print(
 )
 print("|---|---|---|---|---|---|---|---|---|---|---|")
 for organ, r in results.items():
-    ci = f"{r.ci_low:+.4f}, {r.ci_high:+.4f}" if r.ci_available else "**— not estimable**"
+    # Rendered by the same function the Report tab uses, so the published table
+    # cannot drift away from what the software actually prints.
+    ci = interval_text(r.ci) if r.ci.available else f"**{interval_text(r.ci)}**"
     reading = (
         "no detectable difference"
         if r.p_adjusted > 0.05

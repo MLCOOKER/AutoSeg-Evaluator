@@ -54,10 +54,37 @@ own replacement; a decision with a vague one is a decision that has not been tho
 
 ---
 
-## D1 — One observation per patient, per organ, per source
+## D1 — One observation per patient, per organ, per source — where a *case* identifies it
 
 Analysis runs separately within each canonical organ. Organs are never pooled into a single
 test, and left/right are separate by default.
+
+Making that hold needs the observation identified properly, and **a patient identifier does
+not identify one**. A re-irradiation or a replan gives one patient two planning images and two
+sets of structure sets, all carrying the same `PatientID`. The unit is therefore a **case** —
+a patient together with the planning CT the contours are drawn on.
+
+Cases are not then analysed as independent observations, because they are not: two courses of
+one patient share an anatomy. Where a patient contributes more than one case to an organ,
+**that patient is withheld from the comparison** and named in the tab. Choosing between their
+courses is a study-design decision, and picking whichever sorted first is not a decision the
+software should be making silently.
+
+The case key is the **resolved planning series**, not the `linkage_id` stamped at ingest. That
+distinction was settled by measurement, not argument. Linkage unions only on strong reference
+tiers and otherwise falls back to Frame of Reference — and vendors get Frame of Reference
+wrong. Across this project's own 60 patients in six sites:
+
+| Case key | Patients split into several cases |
+|---|---|
+| `linkage_id` stamped at ingest | **1** — `Pelvis Male / Prostate4`, wrongly |
+| Resolved planning CT series | **0** |
+
+`Prostate4` has one vendor exporting its structure set under a different
+`FrameOfReferenceUID` for the same CT. Keyed on the ingest stamp that patient would have been
+split in two and then dropped from every comparison involving that vendor — a silent data loss
+worse than the problem being fixed. Resolving the planning series reunites all seven structure
+sets on the one CT.
 
 - **Rationale** — Within one organ each patient contributes exactly one observation, so the
   independence assumption holds without modelling it. Pooling organs would also produce a
@@ -65,14 +92,20 @@ test, and left/right are separate by default.
 - **Rejected** — *Mixed-effects model with a random intercept per patient.* Correct, and it
   would allow pooling — but it imports distributional assumptions to answer a question that
   per-organ analysis answers assumption-free.
-- **Assumes** — Patients are independent of one another. Fails if the cohort contains repeat
-  scans of the same patient.
-- **Costs** — Statistical power. A mixed model borrows strength across organs; this does not,
-  so each organ is tested on ten observations alone.
-- **Revisit if** — A cohort arrives with repeat scans of the same patient, or organ-level
+- **Assumes** — Patients are independent of one another, and that one planning image means
+  one course. The first is not checkable from the data. The second is checkable and is
+  checked: a second planning image is detected rather than assumed away.
+- **Costs** — Statistical power, twice over. A mixed model borrows strength across organs;
+  this does not, so each organ is tested on ten observations alone. And a patient with two
+  courses contributes nothing at all to the organs they overlap on, where a declared rule
+  ("use the first course") would keep them.
+- **Revisit if** — Cohorts routinely contain re-irradiation, at which point withholding those
+  patients costs more than a stated rule for choosing a course would — or organ-level
   conclusions are shown to differ from a mixed model fitted to the same data.
-- **In code** — `ReportModel.observations` is keyed on `(organ, source, metric, patient)`;
-  duplicates are collapsed and counted rather than averaged.
+- **In code** — `ReportModel.observations` is keyed on
+  `(organ, source, metric, patient, linkage)`; `multi_case_patients()` finds patients with
+  several cases and `values()` omits them. Repeats *within* one case are collapsed, and
+  counted separately according to whether they carried the same value.
 
 ## D2 — Median [Q1, Q3] is primary; mean (SD) is supplementary
 
@@ -164,14 +197,46 @@ The point estimate is the median of all `n(n+1)/2` Walsh averages `(dᵢ + dⱼ)
 and its interval is derived from the same signed-rank distribution the test uses.
 
 The interval is obtained by **inverting the reported test**: the values of δ that would not
-be rejected at α. Two implementation details turned out to matter, both found by testing
-rather than by reading:
+be rejected at α. Three implementation details turned out to matter, all found by testing or
+by review rather than by reading:
 
 1. `p(δ)` is a step function that is constant **between** consecutive Walsh averages, not at
    them. Inverting at the grid points produced coverage violations in 4 of 400 randomised
-   samples. The implementation tests the `M+1` open regions instead.
-2. Under Pratt's zero handling (D5), `p(δ)` is not monotone across exact ties, so the
-   acceptance region need not be an interval and the equivalence below can genuinely fail.
+   samples, because zero can sit in an accepted gap between two rejected grid points.
+2. The breakpoints are **not** interchangeable with the gaps beside them. At a Walsh average
+   some residuals become exactly zero, which under Pratt (D5) changes the ranks and so the
+   null distribution; a breakpoint can be accepted while both neighbouring gaps are rejected.
+   Both are probed.
+3. Under Pratt, `p(δ)` is not monotone across exact ties, so the acceptance region need not be
+   an interval at all.
+
+Because of (3) the set is **enumerated, not bracketed**, wherever that is affordable — up to
+200 distinct Walsh averages, about 12 ms at ten pairs, so every sample size this tool sees.
+An earlier version bisected on the premise that `p` is unimodal in δ, which holds without
+exact ties and is unproved with them. Bisection survives above the threshold and is flagged
+where used.
+
+Removing that assumption changed no answer. Measured across **8,357 randomised samples**
+spanning six difference distributions, from continuous to heavily quantised, the full scan and
+the bisection agreed everywhere and **no acceptance set was ever disconnected**. This is
+insurance against a case not yet seen, not the repair of a wrong number.
+
+**What the set can be.** A bare "not estimable" merged four situations, of which three are
+well defined and should be explained instead of hidden:
+
+| Status | Meaning | Shown as |
+|---|---|---|
+| `interval` | Bounded and connected — the ordinary case | `-0.0380, -0.0340` |
+| `singleton` | Exactly one accepted shift | `+0.1000 only` |
+| `unbounded` | No shift is rejectable at this n | `— unbounded at this n` |
+| `disconnected` | Accepted region has gaps; the enclosing interval is reported and is conservative | `-0.02, +0.03 (enclosing)` |
+| `no data` | Nothing to invert | `— not estimable` |
+
+The singleton is **sample-size dependent**, which an earlier draft of this entry got wrong by
+stating it unconditionally. With every difference identical, shifting by any amount makes all
+residuals non-zero and unanimous, so `p` away from the common value is `2¹⁻ⁿ`. From six
+observations that is 0.03125 and rejects, leaving one accepted point; at five it is 0.0625 and
+rejects nothing, so the same data give an unbounded set.
 
 - **Rationale** — This is the location estimate the Wilcoxon test is built around, so the
   interval and the p-value agree by construction wherever no paired difference is exactly
@@ -183,14 +248,17 @@ rather than by reading:
 - **Assumes** — Same symmetry assumption as D4 — they are the same procedure.
 - **Costs** — The agreement is not unconditional, and saying it were would be the easy
   overclaim. With exact ties present it can break, so every row carries a
-  `ci_agrees_with_test` flag and the tab warns when any row in the family has one.
-  At small n the acceptance region can also be unbounded — at n = 4 no finite interval exists
-  at all, and the row reads `— not estimable` rather than showing the estimate alone.
+  `ci_agrees_with_test` flag and the tab warns when any row in the family has one. The full
+  scan also costs a p-value per breakpoint and per gap, which is why it has a ceiling.
 - **Revisit if** — Exact ties prove common enough in real cohorts that the flag fires
-  routinely, at which point the zero-handling choice in D5 is what should be reconsidered.
-- **In code** — `statistics.hodges_lehmann_ci()`. Verified by a property test over randomised
-  samples: **0 violations in 770 samples with no exact ties**. Samples containing exact ties
-  reproduce the Pratt exception, which is why it is reported rather than suppressed.
+  routinely, at which point the zero-handling choice in D5 is what should be reconsidered; or
+  cohorts grow past the scan ceiling often enough that bisection becomes the normal path.
+- **In code** — `statistics.confidence_set()` returning a `ConfidenceSet`;
+  `hodges_lehmann_ci()` is now a thin wrapper for callers wanting only two numbers.
+  `data/report.interval_text()` renders it, and is shared with the worked examples below so
+  the published table cannot drift from what the tab prints. Verified by a property test over
+  randomised samples: **0 violations in 770 samples with no exact ties**, and scan-versus-
+  bisection agreement over the 8,357 described above.
 
 ## D7 — Rank-biserial correlation as the standardised effect size
 
@@ -230,6 +298,16 @@ declared beforehand. What the software does is make the family an explicit, visi
 rather than a silent consequence of a filter, so the distinction is at least recordable.
 Narrowing the family from four organs to two moved a Holm-adjusted p from 0.0078 to 0.0039
 in testing; that sensitivity is exactly why the choice cannot be left implicit.
+
+**The divisor is the declared family, not the estimable part of it.** An organ selected into
+the family but with no patient contoured by both sources is a hypothesis that was posed and
+could not be answered. It stays in the denominator, is shown as
+`not estimable: no matched patients`, and the methods paragraph records how many there were.
+
+Letting the divisor shrink to whatever the data supported would be anti-conservative in the
+worst available direction: a source that produced fewer organs would earn a **gentler**
+correction on the organs it did produce. That is the same perverse incentive the coverage
+columns exist to expose (D10), arriving through the back door of the multiplicity adjustment.
 
 - **Rationale** — That family is the set read as one question: *"across these organs, where
   does vendor X differ from vendor Y on Dice?"*. Extending it across metrics would be badly
@@ -366,7 +444,7 @@ sign test on the same pairs.
 # What the report looks like
 
 > Figures below use **synthetic data**, not measured results. Every number is produced by
-> the shipped implementation by `scripts/make_register_tables.py` — the tables are internally
+> the shipped implementation, via `scripts/make_register_tables.py` — the tables are internally
 > consistent and an auditor can recompute any cell. An earlier draft hand-wrote plausible
 > rows and drifted into combinations that cannot occur: an interval at n = 4, and r = 0.80
 > beside p = 0.125 when p = 0.125 at n = 4 forces r = ±1.00 exactly.
@@ -382,11 +460,12 @@ sign test on the same pairs.
 | Glnd Submand (R) | Limbus | 10 | 0.818 [0.804, 0.831] | 0.796 – 0.840 | 0.816 (0.021) | 0.779 / 0.844 |
 | Glnd Submand (R) | MVision | 4 | 0.768 [0.759, 0.781] | **— not estimable** | 0.772 (0.022) | 0.751 / 0.802 |
 
-
 The `Glnd Submand (R)` rows show **D3** and **D6** together. The challenger produced this
 organ for four of ten patients; at n = 4 neither the median's interval nor the
-Hodges–Lehmann interval attains 95%, so both read `— not estimable`. Quartiles are still
-shown, because they are descriptive rather than inferential.
+Hodges–Lehmann interval attains 95%, so neither is drawn. The comparison names *which*
+absence it is — `— unbounded at this n`, meaning no shift is rejectable rather than that
+the data were missing. Quartiles are still shown, because they are descriptive rather
+than inferential.
 
 ## Paired comparison · Dice · MVision vs Limbus  (family = 5 organs)
 
@@ -396,7 +475,7 @@ shown, because they are descriptive rather than inferential.
 | Parotid (R) | 10 | 10 / 10 | -0.0105 | -0.0175, -0.0010 | -0.71 | 0 | 0.0488 | 0.1953 | 2/10 · p=0.109 | no detectable difference |
 | Brainstem | 9 | 9 / 9 | -0.0025 | -0.0080, +0.0000 | -0.60 | 0 | 0.1172 | 0.3516 | 3/9 · p=0.508 | no detectable difference |
 | SpinalCord | 10 | 10 / 10 | +0.0025 | -0.0040, +0.0090 | +0.56 | 0 | 0.1289 | 0.3516 | 6/10 · p=0.754 | no detectable difference |
-| Glnd Submand (R) | 4 | 4 / 10 | -0.0453 | **— not estimable** | -1.00 | 0 | 0.1250 | 0.3516 | 0/4 · p=0.125 | no detectable difference |
+| Glnd Submand (R) | 4 | 4 / 10 | -0.0453 | **— unbounded at this n** | -1.00 | 0 | 0.1250 | 0.3516 | 0/4 · p=0.125 | no detectable difference |
 
 Four things in that table are worth reading carefully.
 
