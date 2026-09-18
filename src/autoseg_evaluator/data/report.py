@@ -47,6 +47,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from autoseg_evaluator.core.acquisition import (
+    IMAGE_FIELDS,
+    RTSS_FIELDS,
+    FieldSummary,
+    summarise,
+)
 from autoseg_evaluator.core.statistics import (
     ConfidenceSet,
     Description,
@@ -468,6 +474,81 @@ class ReportModel:
         return holm_detection_ceiling(largest_n, len(list(results)), alpha)
 
 
+# ---- Acquisition ----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AcquisitionReport:
+    """What the cohort was acquired and contoured with."""
+
+    images: list[FieldSummary] = field(default_factory=list)
+    structure_sets: list[FieldSummary] = field(default_factory=list)
+    n_series: int = 0
+    n_structure_sets: int = 0
+    n_patients: int = 0
+
+    @property
+    def available(self) -> bool:
+        return bool(self.n_series or self.n_structure_sets)
+
+
+@dataclass
+class _StructureSetRecord:
+    """The allowlisted structure-set fields, shaped for :func:`summarise`."""
+
+    manufacturer: str = ""
+    model: str = ""
+    software_versions: str = ""
+    roi_count: int = 0
+
+
+def collect_acquisition(library: Any) -> AcquisitionReport:
+    """Summarise scanner and structure-set parameters across a scanned library.
+
+    Reads only what the ingest already captured through the allowlist in
+    :mod:`autoseg_evaluator.core.acquisition`; nothing here reaches back into
+    the DICOM files, so no tag outside that allowlist can arrive by this route.
+
+    Counts are per *series* and per *structure set*, not per patient. A cohort
+    scanned on two scanners should say so, and per-patient counting would hide
+    a patient with two series.
+    """
+    if library is None:
+        return AcquisitionReport()
+
+    images = []
+    structure_sets = []
+    patients = getattr(library, "patients", {}) or {}
+    for patient in patients.values():
+        for context in getattr(patient, "contexts", []) or []:
+            for series in getattr(context, "image_series", []) or []:
+                found = getattr(series, "acquisition", None)
+                if found is None:
+                    continue
+                # ``slices`` lives on the series, not on the acquisition read.
+                found.slices = len(getattr(series, "files", []) or [])
+                images.append(found)
+            for rtss in getattr(context, "rtstructs", []) or []:
+                if getattr(rtss, "is_synthetic_consensus", False):
+                    continue  # no DICOM header of its own
+                structure_sets.append(
+                    _StructureSetRecord(
+                        manufacturer=str(getattr(rtss, "manufacturer", "") or ""),
+                        model=str(getattr(rtss, "manufacturer_model_name", "") or ""),
+                        software_versions=str(getattr(rtss, "software_versions", "") or ""),
+                        roi_count=len(getattr(rtss, "organs", []) or []),
+                    )
+                )
+
+    return AcquisitionReport(
+        images=summarise(images, IMAGE_FIELDS),
+        structure_sets=summarise(structure_sets, RTSS_FIELDS),
+        n_series=len(images),
+        n_structure_sets=len(structure_sets),
+        n_patients=len(patients),
+    )
+
+
 # ---- Building from results rows -------------------------------------------
 
 #: Row fields that mark a row as something other than a vendor-vs-GT comparison.
@@ -532,6 +613,8 @@ def build_report_model(
 
 __all__ = [
     "HIGHER_IS_BETTER",
+    "AcquisitionReport",
+    "collect_acquisition",
     "FamilyAxis",
     "interval_text",
     "LOWER_IS_BETTER",

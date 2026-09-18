@@ -55,9 +55,11 @@ from PySide6.QtWidgets import (
 
 from autoseg_evaluator.core.statistics import IntervalStatus, smallest_attainable_p
 from autoseg_evaluator.data.report import (
+    AcquisitionReport,
     FamilyAxis,
     ReportModel,
     build_report_model,
+    collect_acquisition,
     favours,
     interval_text,
 )
@@ -172,6 +174,34 @@ DESCRIPTIVE_COLUMNS: list[tuple[str, str]] = [
     ),
 ]
 
+ACQUISITION_COLUMNS: list[tuple[str, str]] = [
+    (
+        "Parameter",
+        _tip(
+            "Acquisition and equipment parameters, for the methods section of a "
+            "write-up. A Dice difference means something different at 1 mm slices "
+            "than at 5 mm, and a reviewer will ask.",
+            "Only equipment and geometry tags are read — never a name, an "
+            "identifier, a date, an institution, a UID, or any free-text "
+            "description. That is enforced by an allowlist in "
+            "<i>core/acquisition.py</i>, so a tag nobody thought about cannot "
+            "arrive here by accident.",
+        ),
+    ),
+    (
+        "Value across the cohort",
+        _tip(
+            "A single value means the whole cohort shares it. Several values are "
+            "listed with how many series or structure sets carried each.",
+            "Numbers are never averaged. A cohort scanned half at 2 mm and half at "
+            "3 mm has no meaningful average slice thickness, and printing 2.5 mm "
+            "would describe a scan nobody performed.",
+            "<b>— not recorded</b> means the writer omitted the tag, which is "
+            "common for reconstruction kernel and scanner software version.",
+        ),
+    ),
+]
+
 COMPARISON_COLUMNS: list[tuple[str, str]] = [
     (
         "Organ",
@@ -265,6 +295,8 @@ class ReportTab(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._results: Any = None
+        self._library: Any = None
+        self._acquisition = AcquisitionReport()
         self._model: ReportModel = ReportModel()
         self._family: dict = {}
         self._build_ui()
@@ -275,10 +307,20 @@ class ReportTab(QWidget):
     def set_results_manager(self, manager: Any) -> None:
         self._results = manager
 
+    def set_library(self, library: Any) -> None:
+        """The scanned DICOM library, for the acquisition section only."""
+        self._library = library
+        self._acquisition = collect_acquisition(library)
+        self._fill_acquisition()
+
     def refresh(self) -> None:
         """Rebuild from the current results. Cheap — no metric is recomputed."""
         rows = self._results.rows() if self._results is not None else []
         self._model = build_report_model(rows)
+        # Independent of the metric rows: a cohort has acquisition parameters
+        # whether or not anything has been computed on it yet.
+        self._acquisition = collect_acquisition(self._library)
+        self._fill_acquisition()
         self._repopulate_controls()
         self._recompute()
 
@@ -413,6 +455,22 @@ class ReportTab(QWidget):
 
         body.setSizes([220, 260, 380])
         outer.addWidget(body, stretch=1)
+
+        acquisition_row = QSplitter(Qt.Orientation.Horizontal, self)
+        self._image_table = self._make_table(ACQUISITION_COLUMNS)
+        acquisition_row.addWidget(self._wrap("Imaging", self._image_table))
+        self._rtss_table = self._make_table(ACQUISITION_COLUMNS)
+        acquisition_row.addWidget(self._wrap("Structure sets", self._rtss_table))
+        acquisition_row.setSizes([560, 560])
+        self._acquisition_box = QGroupBox("Acquisition parameters", self)
+        acquisition_layout = QVBoxLayout(self._acquisition_box)
+        acquisition_layout.setContentsMargins(6, 6, 6, 6)
+        self._acquisition_note = QLabel("", self)
+        self._acquisition_note.setWordWrap(True)
+        self._acquisition_note.setStyleSheet("color:#777; font-size:11px;")
+        acquisition_layout.addWidget(self._acquisition_note)
+        acquisition_layout.addWidget(acquisition_row)
+        outer.addWidget(self._acquisition_box)
 
         self._methods = QLabel("", self)
         self._methods.setWordWrap(True)
@@ -603,6 +661,60 @@ class ReportTab(QWidget):
             alpha=_ALPHA,
         )
         self._write_methods(metric, family, reference, challenger, axis)
+
+    def _fill_acquisition(self) -> None:
+        """Scanner and structure-set parameters, summarised over the cohort."""
+        report = self._acquisition
+        for table, summaries in (
+            (self._image_table, report.images),
+            (self._rtss_table, report.structure_sets),
+        ):
+            table.setRowCount(0)
+            if not report.available:
+                # A dozen rows of "— not recorded" is worse than nothing: it
+                # reads as a cohort whose scanner is unknown rather than as a
+                # cohort that has not been loaded.
+                continue
+            for summary in summaries:
+                row = table.rowCount()
+                table.insertRow(row)
+                label_item = QTableWidgetItem(summary.label)
+                value_item = QTableWidgetItem(summary.summary())
+                if not summary.uniform and summary.values:
+                    # Worth the reader's eye: a parameter that varies across the
+                    # cohort cannot be stated as a single number in a paper.
+                    tip = _tip(
+                        f"<b>{summary.label}</b> is not uniform across the cohort.",
+                        "Report the spread rather than a single figure — and "
+                        "consider whether it confounds the comparison, since "
+                        "contouring accuracy depends on voxel size.",
+                    )
+                    label_item.setToolTip(tip)
+                    value_item.setToolTip(tip)
+                table.setItem(row, 0, label_item)
+                table.setItem(row, 1, value_item)
+
+        if not report.available:
+            self._acquisition_note.setText(
+                "Load a folder on Tab 1 to read the cohort's acquisition parameters."
+            )
+        else:
+            varying = sum(
+                1
+                for summary in list(report.images) + list(report.structure_sets)
+                if summary.values and not summary.uniform
+            )
+            self._acquisition_note.setText(
+                f"{report.n_series} image series and {report.n_structure_sets} structure "
+                f"sets across {report.n_patients} patients."
+                + (
+                    f"  {varying} parameter(s) vary across the cohort — hover those rows."
+                    if varying
+                    else "  Every parameter is uniform across the cohort."
+                )
+                + "  Equipment and geometry only: no identifiers, dates, institutions or "
+                "free-text descriptions are read."
+            )
 
     def _fill_coverage(self, metric: str, organs: list[str]) -> None:
         table = self._coverage_table

@@ -834,3 +834,109 @@ def test_switching_back_restores_the_organ_family(tab):
     _select(tab, ORGANS)
     assert tab._comparison_table.horizontalHeaderItem(0).text() == "Organ"
     assert _find(tab._comparison_table, "Parotid (L)")["n pairs"] == "10"
+
+
+# ---- Acquisition section --------------------------------------------------
+
+
+class _Acq:
+    def __init__(self, **kwargs):
+        from autoseg_evaluator.core.acquisition import ImageAcquisition
+
+        self.acquisition = ImageAcquisition(**kwargs)
+        self.files = ["s.dcm"] * 208
+
+
+class _Struct:
+    def __init__(self, manufacturer, rois):
+        self.manufacturer = manufacturer
+        self.manufacturer_model_name = ""
+        self.software_versions = "1.0"
+        self.organs = list(range(rois))
+        self.is_synthetic_consensus = False
+
+
+def _fake_library(spacings=(1.074, 1.074)):
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "image_series": [
+                _Acq(
+                    modality="CT",
+                    manufacturer="TOSHIBA",
+                    slice_thickness=2.0,
+                    pixel_spacing_row=s,
+                    pixel_spacing_col=s,
+                )
+                for s in spacings
+            ],
+            "rtstructs": [_Struct("Limbus AI", 48), _Struct("MVision", 52)],
+        },
+    )()
+    patient = type("P", (), {"contexts": [ctx]})()
+    return type("Lib", (), {"patients": {"P1": patient}})()
+
+
+def test_the_acquisition_section_is_empty_until_a_folder_is_loaded(tab):
+    assert tab._image_table.rowCount() == 0
+    assert "Load a folder on Tab 1" in tab._acquisition_note.text()
+
+
+def test_the_acquisition_section_reports_scanner_and_geometry(tab):
+    tab.set_library(_fake_library())
+    rows = {
+        tab._image_table.item(r, 0).text(): tab._image_table.item(r, 1).text()
+        for r in range(tab._image_table.rowCount())
+    }
+    assert rows["Scanner manufacturer"] == "TOSHIBA"
+    assert rows["Slice thickness (mm)"] == "2"
+    assert rows["In-plane pixel spacing (mm)"] == "1.074 × 1.074"
+    assert rows["Reconstruction kernel"] == "— not recorded"
+
+    structures = {
+        tab._rtss_table.item(r, 0).text(): tab._rtss_table.item(r, 1).text()
+        for r in range(tab._rtss_table.rowCount())
+    }
+    assert structures["Manufacturer"] == "Limbus AI (1), MVision (1)"
+
+
+def test_a_parameter_that_varies_is_flagged_for_the_reader(tab):
+    """Found on the real cohort: in-plane spacing differs between patients."""
+    tab.set_library(_fake_library(spacings=(1.074, 1.367)))
+    for r in range(tab._image_table.rowCount()):
+        if tab._image_table.item(r, 0).text().startswith("In-plane"):
+            assert "(1)" in tab._image_table.item(r, 1).text()
+            assert "not uniform across the cohort" in tab._image_table.item(r, 1).toolTip()
+            break
+    else:
+        pytest.fail("no in-plane spacing row")
+    assert "parameter(s) vary across the cohort" in tab._acquisition_note.text()
+
+
+def test_a_uniform_cohort_says_so(tab):
+    """One scanner, one contouring source, one of everything."""
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "image_series": [_Acq(modality="CT", manufacturer="TOSHIBA", slice_thickness=2.0)],
+            "rtstructs": [_Struct("Limbus AI", 48)],
+        },
+    )()
+    patient = type("P", (), {"contexts": [ctx]})()
+    tab.set_library(type("Lib", (), {"patients": {"P1": patient}})())
+    assert "Every parameter is uniform" in tab._acquisition_note.text()
+
+
+def test_the_note_states_the_privacy_boundary(tab):
+    """The section is written to be pasted into a paper; say what it cannot leak."""
+    tab.set_library(_fake_library())
+    note = tab._acquisition_note.text()
+    assert "no identifiers, dates, institutions or free-text descriptions" in note
+
+
+def test_the_acquisition_section_survives_a_library_with_nothing_in_it(tab):
+    tab.set_library(type("Lib", (), {"patients": {}})())
+    assert tab._image_table.rowCount() == 0
+    assert "Load a folder on Tab 1" in tab._acquisition_note.text()

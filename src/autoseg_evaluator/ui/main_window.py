@@ -195,6 +195,7 @@ class MainWindow(QMainWindow):
         self._library = library
         self._consensus_tab.set_library(library)
         self._match_tab.set_library(library)
+        self._report_tab.set_library(library)
         self._qualitative_tab.set_library(library)
         self._compute_tab.set_library(library)
         self._rebuild_organ_index()

@@ -17,6 +17,7 @@ from typing import Any
 import pydicom
 from pydicom.errors import InvalidDicomError
 
+from autoseg_evaluator.core.acquisition import ImageAcquisition, read_image_acquisition
 from autoseg_evaluator.core.source_labels import (
     ORIGIN_FILENAME,
     SourceLabel,
@@ -58,6 +59,15 @@ class ImageSeriesEntry:
     study_instance_uid: str = ""
     sop_instance_uids: set[str] = field(default_factory=set)
     linkage_id: str = ""
+    #: Scanner and geometry, for the report's methods section. Read once per
+    #: series from the first slice, through the allowlist in
+    #: :mod:`autoseg_evaluator.core.acquisition` — equipment and voxel geometry
+    #: only, never anything that identifies a person.
+    acquisition: ImageAcquisition = field(default_factory=ImageAcquisition)
+
+    @property
+    def slices(self) -> int:
+        return len(self.files)
 
     @property
     def folder(self) -> str:
@@ -385,6 +395,10 @@ class MetadataLibrary:
                 files=[file_path],
                 study_instance_uid=study_uid,
                 sop_instance_uids={sop_uid} if sop_uid else set(),
+                # One read per series, from a slice already parsed. Later
+                # slices of the same series are assumed to share acquisition
+                # parameters, which is what a series means.
+                acquisition=read_image_acquisition(ds),
             )
         )
 
