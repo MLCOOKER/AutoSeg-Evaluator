@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -61,17 +62,16 @@ from autoseg_evaluator.data.report import (
     collect_acquisition,
     favours,
     interval_text,
+    metric_direction,
 )
 from autoseg_evaluator.ui.widgets.stat_plots import DistributionCanvas, ForestCanvas
 
 _ALPHA = 0.05
 
-#: Minimum height for a full-width section, in pixels. Roughly eight rows plus
-#: the header — enough that a table is usable without the page becoming a
-#: sequence of postage stamps. The tab scrolls, so this costs only scroll
-#: distance.
-SECTION_HEIGHT = 210
-SHORT_SECTION_HEIGHT = 150
+#: Rows a section shows before it starts scrolling. Below this a table sizes to
+#: its contents, so a four-row table costs four rows of page rather than a fixed
+#: block of empty grid.
+MAX_VISIBLE_ROWS = 24
 
 # ---- Column help ----------------------------------------------------------
 #
@@ -462,15 +462,12 @@ class ReportTab(QWidget):
         # each, which is where the "bunched up" reading came from; the tab is
         # inside a scroll area, so height is free and width is not.
         self._coverage_table = self._make_table(COVERAGE_COLUMNS)
-        self._coverage_table.setMinimumHeight(SECTION_HEIGHT)
         outer.addWidget(self._wrap("Coverage", self._coverage_table))
 
         self._descriptive_table = self._make_table(DESCRIPTIVE_COLUMNS)
-        self._descriptive_table.setMinimumHeight(SECTION_HEIGHT)
         outer.addWidget(self._wrap("Descriptive statistics", self._descriptive_table))
 
         self._comparison_table = self._make_table(COMPARISON_COLUMNS)
-        self._comparison_table.setMinimumHeight(SECTION_HEIGHT)
         outer.addWidget(self._wrap("Paired comparison", self._comparison_table))
 
         self._distribution = DistributionCanvas()
@@ -486,13 +483,7 @@ class ReportTab(QWidget):
         self._acquisition_note.setStyleSheet("color:#777; font-size:11px;")
         acquisition_layout.addWidget(self._acquisition_note)
         self._image_table = self._make_table(ACQUISITION_COLUMNS)
-        self._image_table.setMinimumHeight(SECTION_HEIGHT)
-        acquisition_layout.addWidget(QLabel("<b>Imaging</b>", self))
         acquisition_layout.addWidget(self._image_table)
-        self._rtss_table = self._make_table(ACQUISITION_COLUMNS)
-        self._rtss_table.setMinimumHeight(SHORT_SECTION_HEIGHT)
-        acquisition_layout.addWidget(QLabel("<b>Structure sets</b>", self))
-        acquisition_layout.addWidget(self._rtss_table)
         outer.addWidget(self._acquisition_box)
 
         self._methods = QLabel("", self)
@@ -512,11 +503,32 @@ class ReportTab(QWidget):
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        # Let the final column absorb the width a full-width row now has,
-        # instead of leaving a band of empty grey down the right-hand side.
-        table.horizontalHeader().setStretchLastSection(True)
+        # Equal widths across the row. Content-sized columns gave a ragged left
+        # edge that changed every time the data did, which made two tables
+        # stacked above each other impossible to read across.
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         return table
+
+    @staticmethod
+    def _fit_table(table: QTableWidget, max_rows: int = MAX_VISIBLE_ROWS) -> None:
+        """Size a table to its contents, up to a ceiling, then let it scroll.
+
+        A fixed height wastes the page on a four-row table and hides rows on a
+        forty-row one. Both minimum and maximum are set to the fitted value so
+        the surrounding layout cannot stretch it back out.
+        """
+        header = table.horizontalHeader().height()
+        rows = table.rowCount()
+        row_height = table.rowHeight(0) if rows else table.verticalHeader().defaultSectionSize()
+        visible = min(rows, max_rows) if rows else 0
+        # Two pixels of frame, and half a row of headroom when scrolling so the
+        # cut-off row reads as "there is more" rather than as the end.
+        height = header + visible * row_height + 4
+        if rows > max_rows:
+            height += row_height // 2
+        height = max(height, header + row_height + 4)
+        table.setMinimumHeight(height)
+        table.setMaximumHeight(height)
 
     @staticmethod
     def _wrap(title: str, widget: QWidget) -> QWidget:
@@ -757,19 +769,14 @@ class ReportTab(QWidget):
         self._write_methods(metric, family, reference, challenger, axis)
 
     def _fill_acquisition(self) -> None:
-        """Scanner and structure-set parameters, summarised over the cohort."""
+        """Scanner parameters, summarised over the cohort."""
         report = self._acquisition
-        for table, summaries in (
-            (self._image_table, report.images),
-            (self._rtss_table, report.structure_sets),
-        ):
-            table.setRowCount(0)
-            if not report.available:
-                # A dozen rows of "— not recorded" is worse than nothing: it
-                # reads as a cohort whose scanner is unknown rather than as a
-                # cohort that has not been loaded.
-                continue
-            for summary in summaries:
+        table = self._image_table
+        table.setRowCount(0)
+        # A dozen rows of "— not recorded" is worse than nothing: it reads as a
+        # cohort whose scanner is unknown rather than one not yet loaded.
+        if report.available:
+            for summary in report.images:
                 row = table.rowCount()
                 table.insertRow(row)
                 label_item = QTableWidgetItem(summary.label)
@@ -787,17 +794,16 @@ class ReportTab(QWidget):
                     value_item.setToolTip(tip)
                 table.setItem(row, 0, label_item)
                 table.setItem(row, 1, value_item)
+        # Always fitted, so an empty table collapses to its header rather
+        # than keeping an unbounded maximum height.
+        self._fit_table(table)
 
         if not report.available:
             self._acquisition_note.setText(
                 "Load a folder on Tab 1 to read the cohort's acquisition parameters."
             )
         else:
-            varying = sum(
-                1
-                for summary in list(report.images) + list(report.structure_sets)
-                if summary.values and not summary.uniform
-            )
+            varying = sum(1 for summary in report.images if summary.values and not summary.uniform)
             self._acquisition_note.setText(
                 f"{report.n_series} image series and {report.n_structure_sets} structure "
                 f"sets across {report.n_patients} patients."
@@ -856,15 +862,39 @@ class ReportTab(QWidget):
                     item = QTableWidgetItem(text)
                     item.setToolTip(explanation)
                     table.setItem(row, column, item)
+        self._fit_table(table)
+
+    @staticmethod
+    def _heat_colour(fraction: float) -> QColor:
+        """Worst to best, as a pale wash a reader can still read black text on.
+
+        Deliberately not red-to-green: roughly one man in twelve cannot
+        separate those, and the ranking here is the whole message. Amber to
+        teal keeps its ordering under the common forms of colour blindness and
+        in greyscale, which is how half of these end up printed.
+        """
+        low = (0xF2, 0xC2, 0x8B)  # amber
+        high = (0xA8, 0xD8, 0xCE)  # teal
+        blend = [round(a + (b - a) * fraction) for a, b in zip(low, high, strict=True)]
+        return QColor(*blend)
 
     def _fill_descriptive(self, metric: str, organs: list[str]) -> None:
         table = self._descriptive_table
         table.setRowCount(0)
+        direction = metric_direction(metric)
+        median_column = 3
         for organ in organs:
-            for source in self._model.sources():
-                summary = self._model.describe_cell(organ, source, metric)
-                if summary is None:
-                    continue
+            summaries = {
+                source: self._model.describe_cell(organ, source, metric)
+                for source in self._model.sources()
+            }
+            present = {s: d for s, d in summaries.items() if d is not None}
+            # Shaded within the organ, never across organs. A Dice of 0.6 can be
+            # excellent for a cochlea and poor for a parotid, so a scale spanning
+            # the whole table would rank organs rather than sources.
+            medians = [d.median for d in present.values()]
+            span = (min(medians), max(medians)) if medians else (0.0, 0.0)
+            for source, summary in present.items():
                 row = table.rowCount()
                 table.insertRow(row)
                 ci = (
@@ -872,6 +902,11 @@ class ReportTab(QWidget):
                     if summary.ci_available
                     else "— not estimable"
                 )
+                shade: QColor | None = None
+                if direction and span[1] > span[0] and len(present) > 1:
+                    fraction = (summary.median - span[0]) / (span[1] - span[0])
+                    # Lower is better for distances, so the scale flips.
+                    shade = self._heat_colour(fraction if direction > 0 else 1.0 - fraction)
                 for column, text in enumerate(
                     [
                         organ,
@@ -883,7 +918,33 @@ class ReportTab(QWidget):
                         f"{summary.minimum:.3f} / {summary.maximum:.3f}",
                     ]
                 ):
-                    table.setItem(row, column, QTableWidgetItem(text))
+                    item = QTableWidgetItem(text)
+                    item.setToolTip(self._descriptive_tooltip(organ, source, metric, direction))
+                    if shade is not None and column == median_column:
+                        item.setBackground(shade)
+                    table.setItem(row, column, item)
+        self._fit_table(table)
+
+    @staticmethod
+    def _descriptive_tooltip(organ: str, source: str, metric: str, direction: int) -> str:
+        if not direction:
+            reading = (
+                f"<b>{metric}</b> has no better or worse direction — it is best at a "
+                "target rather than at an extreme — so these rows are not shaded."
+            )
+        else:
+            better = "higher" if direction > 0 else "lower"
+            reading = (
+                f"Shading ranks the sources on <b>{organ}</b> alone, where {better} is "
+                "better. Teal is the best median for this organ, amber the worst."
+            )
+        return _tip(
+            f"<b>{source}</b> on <b>{organ}</b>.",
+            reading,
+            "Shading never spans organs: a Dice that is excellent for a cochlea "
+            "would be poor for a parotid, so a single scale across the table "
+            "would rank organs instead of sources.",
+        )
 
     def _fill_comparison(
         self,
@@ -952,6 +1013,7 @@ class ReportTab(QWidget):
                 item = QTableWidgetItem(text)
                 item.setToolTip(self._row_tooltip(result))
                 table.setItem(row, column, item)
+        self._fit_table(table)
 
     @staticmethod
     def _row_tooltip(result) -> str:

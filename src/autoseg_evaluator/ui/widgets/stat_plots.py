@@ -163,7 +163,16 @@ class DistributionCanvas(_Canvas):
         axes.set_axisbelow(True)
         for source in sources:
             axes.scatter([], [], color=colours[source], label=source, s=22)
-        axes.legend(fontsize=8, frameon=False, ncols=min(len(sources), 4))
+        # Outside the axes, to the right. Inside, it sits over the data — and
+        # with several sources and rotated organ labels there is no corner it
+        # can occupy without covering points.
+        axes.legend(
+            fontsize=8,
+            frameon=False,
+            loc="upper left",
+            bbox_to_anchor=(1.01, 1.0),
+            borderaxespad=0.0,
+        )
         self.draw_idle()
 
 

@@ -894,11 +894,7 @@ def test_the_acquisition_section_reports_scanner_and_geometry(tab):
     assert rows["In-plane pixel spacing (mm)"] == "1.074 × 1.074"
     assert rows["Reconstruction kernel"] == "— not recorded"
 
-    structures = {
-        tab._rtss_table.item(r, 0).text(): tab._rtss_table.item(r, 1).text()
-        for r in range(tab._rtss_table.rowCount())
-    }
-    assert structures["Manufacturer"] == "Limbus AI (1), MVision (1)"
+    assert not hasattr(tab, "_rtss_table")  # structure-set parameters removed
 
 
 def test_a_parameter_that_varies_is_flagged_for_the_reader(tab):
@@ -956,22 +952,57 @@ def test_every_section_spans_the_full_width(tab):
     assert tab.findChildren(QSplitter) == []
 
 
-def test_tables_claim_the_width_rather_than_leaving_it_grey(tab):
+def test_columns_are_evenly_spaced(tab):
+    """Content-sized columns shifted every time the data did.
+
+    Two tables stacked above one another could not be read across, because
+    neither agreed with the other on where a column started.
+    """
+    from PySide6.QtWidgets import QHeaderView
+
     for table in (
         tab._coverage_table,
         tab._descriptive_table,
         tab._comparison_table,
         tab._image_table,
-        tab._rtss_table,
     ):
-        assert table.horizontalHeader().stretchLastSection()
+        header = table.horizontalHeader()
+        assert header.sectionResizeMode(0) is QHeaderView.ResizeMode.Stretch
 
 
-def test_sections_are_tall_enough_to_read(tab):
-    from autoseg_evaluator.ui.tabs.report import SECTION_HEIGHT
+def test_a_short_table_does_not_reserve_a_tall_block(tab):
+    """A four-row table should cost four rows of page, not a fixed slab."""
+    _select(tab, ["Parotid (L)"])
+    comparison = tab._comparison_table
+    assert comparison.rowCount() == 1
+    row_height = comparison.rowHeight(0)
+    header = comparison.horizontalHeader().height()
+    assert comparison.maximumHeight() <= header + 2 * row_height + 8
 
-    for table in (tab._coverage_table, tab._descriptive_table, tab._comparison_table):
-        assert table.minimumHeight() >= SECTION_HEIGHT
+
+def test_a_long_table_stops_growing_and_scrolls(qapp):
+    """Past the cap the section scrolls rather than pushing the page down."""
+    from autoseg_evaluator.ui.tabs.report import MAX_VISIBLE_ROWS
+
+    rows = []
+    for organ_index in range(40):
+        for patient in range(3):
+            for source in (REFERENCE, CHALLENGER):
+                rows.append(_row_for(f"P{patient}", f"Organ {organ_index:02d}", source, 0.8))
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+
+    table = widget._coverage_table
+    assert table.rowCount() == 80  # forty organs, two sources
+    row_height = table.rowHeight(0)
+    header = table.horizontalHeader().height()
+    ceiling = header + MAX_VISIBLE_ROWS * row_height + row_height
+    assert table.maximumHeight() <= ceiling
+    assert table.maximumHeight() == table.minimumHeight()
+    widget.deleteLater()
 
 
 def _dose_rows():
@@ -1146,3 +1177,110 @@ def test_a_metric_shared_by_both_references_survives_the_switch(consensus_tab):
     consensus_tab._metric_combo.setCurrentText("dice")
     consensus_tab._ground_truth_combo.setCurrentText("Manual")
     assert consensus_tab._selected_metric() == "dice"
+
+
+# ---- Descriptive heatmap --------------------------------------------------
+
+
+def _shades(tab, column=3):
+    """``{(organ, source): rgb}`` for the shaded median column."""
+    table = tab._descriptive_table
+    found = {}
+    for row in range(table.rowCount()):
+        item = table.item(row, column)
+        colour = item.background().color()
+        found[(table.item(row, 0).text(), table.item(row, 1).text())] = (
+            colour.red(),
+            colour.green(),
+            colour.blue(),
+        )
+    return found
+
+
+def test_the_best_source_and_the_worst_shade_differently(tab):
+    """Higher Dice is better, so the top median gets the best shade."""
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ["Parotid (L)"])
+    shades = _shades(tab)
+    # Limbus has the highest Dice in the fixture, MVision the lowest.
+    assert shades[("Parotid (L)", REFERENCE)] != shades[("Parotid (L)", CHALLENGER)]
+
+
+def test_the_scale_flips_for_a_lower_is_better_metric(tab):
+    """A source cannot be best on Dice and best on Hausdorff with the same shade."""
+    _select(tab, ["Parotid (L)"])
+    tab._metric_combo.setCurrentText("dice")
+    on_dice = _shades(tab)
+    tab._metric_combo.setCurrentText("hausdorff95")
+    on_hd = _shades(tab)
+    # In the fixture the same source wins on both metrics, so the shade of the
+    # winner must be the same colour despite the raw values moving opposite ways.
+    assert on_dice[("Parotid (L)", REFERENCE)] == on_hd[("Parotid (L)", REFERENCE)]
+
+
+def test_an_undirected_metric_is_not_shaded(qapp):
+    """Signed volume difference is best at a target, not at an extreme."""
+    rows = []
+    for patient in range(4):
+        for source, value in ((REFERENCE, 2.0), (CHALLENGER, -3.0)):
+            row = _row_for(f"P{patient}", "Parotid (L)", source, 0.8)
+            row["metrics"] = {"volume_diff_cc": value}
+            rows.append(row)
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+
+    from PySide6.QtCore import Qt as _Qt
+
+    table = widget._descriptive_table
+    assert table.rowCount() == 2
+    for row in range(table.rowCount()):
+        # An unset background is a NoBrush brush; its colour is opaque black,
+        # so the brush style is what says "nothing was painted here".
+        assert table.item(row, 3).background().style() == _Qt.BrushStyle.NoBrush
+    widget.deleteLater()
+
+
+def test_shading_is_per_organ_not_across_the_table(tab):
+    """A Dice excellent for one organ can be poor for another.
+
+    A scale spanning the whole table would rank organs rather than sources,
+    which is not the comparison anyone is making here.
+    """
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    shades = _shades(tab)
+    # The best source in each organ gets the identical "best" shade, even
+    # though the organs sit at different absolute Dice levels.
+    best = {shades[(organ, REFERENCE)] for organ in ORGANS if (organ, REFERENCE) in shades}
+    assert len(best) == 1
+
+
+def test_the_shading_is_explained_where_it_is_applied(tab):
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ["Parotid (L)"])
+    tip = tab._descriptive_table.item(0, 3).toolTip()
+    assert "higher is better" in tip
+    assert "never spans organs" in tip
+
+
+# ---- Distribution legend --------------------------------------------------
+
+
+def test_the_distribution_legend_sits_outside_the_axes(tab):
+    """Inside, it covers the points — there is no free corner with rotated labels."""
+    _select(tab, ORGANS)
+    axes = tab._distribution.figure.axes[0]
+    legend = axes.get_legend()
+    assert legend is not None
+    # Anchored past the right-hand edge of the axes.
+    assert legend.get_bbox_to_anchor().x0 > axes.get_window_extent().x1 - 1
+
+
+def test_an_empty_acquisition_table_collapses_to_its_header(tab):
+    """It is skipped when unloaded, so the fit has to run outside that branch."""
+    assert tab._image_table.rowCount() == 0
+    assert tab._image_table.maximumHeight() == tab._image_table.minimumHeight()
+    assert tab._image_table.maximumHeight() < 200
