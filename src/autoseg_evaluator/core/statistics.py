@@ -42,7 +42,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 
 import numpy as np
 from scipy.stats import binom
@@ -246,44 +247,169 @@ def hodges_lehmann(diffs: Sequence[float]) -> float | None:
     return float(np.median(walsh)) if walsh.size else None
 
 
-def hodges_lehmann_ci(diffs: Sequence[float], alpha: float = 0.05) -> tuple[float, float] | None:
-    """CI for the pseudomedian, by **inverting the reported test**.
+class IntervalStatus(Enum):
+    """What the inverted acceptance set turned out to be.
 
-    The interval is the set of shifts δ that :func:`signed_rank_exact_p` does not
-    reject at ``alpha``, so it agrees with that p-value by construction — the
-    textbook Walsh-average formula assumes no zeros or ties and would not.
+    A bare ``None`` conflated four different situations, three of which are
+    mathematically well defined and should be explained rather than hidden.
+    """
 
-    The signed-rank statistic only changes at Walsh averages, so evaluating
-    there is exhaustive. ``None`` means the acceptance region is unbounded: at
-    n = 4 no shift is rejectable at 0.05, so no finite 95% interval exists and
-    none is invented.
+    INTERVAL = "interval"
+    """A bounded, connected set — the ordinary case."""
+
+    SINGLETON = "singleton"
+    """One point. Arises when every difference is identical: shifting by any
+    amount makes all residuals non-zero and unanimous, which is rejectable once
+    there are at least six of them. Below six it is not, so the same data give
+    an unbounded set instead — the distinction is sample-size dependent."""
+
+    UNBOUNDED = "unbounded"
+    """No shift is rejectable at this sample size, so no finite interval
+    exists. At four pairs the smallest attainable p is 0.125."""
+
+    DISCONNECTED = "disconnected"
+    """The accepted set has gaps. Possible under Pratt at exact ties, because p
+    is then not monotone in the shift. The enclosing interval is reported and is
+    conservative."""
+
+    NO_DATA = "no data"
+    """Nothing to invert."""
+
+
+@dataclass(frozen=True)
+class ConfidenceSet:
+    """The result of inverting the signed-rank test over all shifts."""
+
+    status: IntervalStatus
+    low: float | None = None
+    high: float | None = None
+    components: int = 0
+    exhaustive: bool = True
+    """False when the set was bracketed by bisection rather than scanned in
+    full, which happens only above :data:`MAX_BREAKPOINTS_FOR_FULL_SCAN`."""
+
+    @property
+    def available(self) -> bool:
+        return self.low is not None and self.high is not None
+
+    @property
+    def excludes_zero(self) -> bool:
+        return self.available and (self.low > 0 or self.high < 0)
+
+
+#: Above this many distinct Walsh averages the full scan gives way to
+#: bisection. The scan costs one exact p-value per breakpoint and per gap; at
+#: ten pairs there are 55 breakpoints and it takes about 12 ms, so the sample
+#: sizes this tool actually sees are always scanned in full. The limit exists so
+#: that a large cohort degrades in speed rather than hanging.
+MAX_BREAKPOINTS_FOR_FULL_SCAN = 200
+
+
+def _probe_points(walsh: np.ndarray) -> list[tuple[float, bool]]:
+    """Shifts at which p must be evaluated, as ``(delta, is_breakpoint)``.
+
+    ``p(delta)`` is piecewise constant, changing only where delta crosses a
+    Walsh average — but the breakpoints themselves are **not** interchangeable
+    with the gaps beside them. At a breakpoint one or more residuals become
+    exactly zero, which under Pratt changes the ranks and therefore the null
+    distribution. A breakpoint can be accepted while both neighbouring gaps are
+    rejected, so both have to be probed.
+
+    Duplicate Walsh averages define no gap between them and are collapsed.
+    """
+    distinct = np.unique(walsh)
+    if distinct.size == 0:
+        return []
+    spread = float(distinct[-1] - distinct[0])
+    # A relative step is meaningless when every Walsh average is identical, and
+    # can round away to nothing when the spread is denormal. Fall back to an
+    # absolute step, then widen until the probe really is outside.
+    step = spread * 0.01 if spread > 0 else 1.0
+    while step > 0 and float(distinct[0]) - step >= float(distinct[0]):
+        step *= 2.0
+    if step <= 0:
+        step = 1.0
+
+    probes: list[tuple[float, bool]] = [(float(distinct[0]) - step, False)]
+    for index, value in enumerate(distinct):
+        probes.append((float(value), True))
+        if index + 1 < distinct.size:
+            probes.append((float((value + distinct[index + 1]) / 2.0), False))
+    probes.append((float(distinct[-1]) + step, False))
+    return probes
+
+
+def confidence_set(diffs: Sequence[float], alpha: float = 0.05) -> ConfidenceSet:
+    """Invert the reported test over every shift: the set of accepted shifts.
+
+    Uses the same p-value function, and therefore the same zero convention, as
+    the test printed beside it — the textbook Walsh-average formula assumes no
+    zeros and no ties and would not agree with it.
+
+    Where affordable the whole acceptance set is enumerated rather than
+    bracketed, so nothing is assumed about its shape. An earlier version
+    bisected on the premise that p is unimodal in the shift, which is true
+    without exact ties and unproved with them. Measured across 8,357 randomised
+    samples spanning six difference distributions the two agreed everywhere and
+    no disconnected set was ever produced — but "never observed" is not "cannot
+    happen", and the scan costs 12 ms at ten pairs.
+
+    The interval reported is the **closure** of the accepted set. Where a gap is
+    accepted but the breakpoint bounding it is not, the true set is open there;
+    reporting the breakpoint is conservative, and is the convention the Wilcoxon
+    interval is normally stated in.
     """
     d = np.asarray([float(x) for x in diffs], dtype=float)
     d = d[~np.isnan(d)]
     if d.size == 0:
-        return None
-    if np.all(d == 0):
-        # Inverting the test here legitimately yields the single point {0}:
-        # every non-zero shift makes all differences non-zero and unanimous, so
-        # every one is rejected. But printing [0.000, 0.000] next to p = 1.000
-        # would be read as "the difference is exactly zero", an equivalence
-        # claim identical contours cannot support. Not estimable is the honest
-        # answer; n_zero tells the reader what actually happened.
-        return None
+        return ConfidenceSet(IntervalStatus.NO_DATA)
+
     walsh = walsh_averages(d)
+    probes = _probe_points(walsh)
+    if not probes:
+        return ConfidenceSet(IntervalStatus.NO_DATA)
+
+    breakpoints = sum(1 for _delta, is_break in probes if is_break)
+    if breakpoints > MAX_BREAKPOINTS_FOR_FULL_SCAN:
+        return _bisected_confidence_set(d, walsh, alpha)
+
+    accepted = [signed_rank_exact_p(d - delta) > alpha for delta, _is_break in probes]
+    if not any(accepted):
+        # p peaks at the Hodges-Lehmann estimate, so something is always
+        # accepted unless alpha is degenerate.
+        return ConfidenceSet(IntervalStatus.NO_DATA)
+    if accepted[0] or accepted[-1]:
+        return ConfidenceSet(IntervalStatus.UNBOUNDED)
+
+    components = sum(1 for i, ok in enumerate(accepted) if ok and (i == 0 or not accepted[i - 1]))
+    indices = [i for i, ok in enumerate(accepted) if ok]
+
+    # Close the set onto the bounding breakpoints.
+    low_index = indices[0]
+    while not probes[low_index][1] and low_index > 0:
+        low_index -= 1
+    high_index = indices[-1]
+    while not probes[high_index][1] and high_index < len(probes) - 1:
+        high_index += 1
+    low, high = probes[low_index][0], probes[high_index][0]
+
+    if components > 1:
+        return ConfidenceSet(IntervalStatus.DISCONNECTED, low, high, components)
+    if low == high:
+        return ConfidenceSet(IntervalStatus.SINGLETON, low, high, 1)
+    return ConfidenceSet(IntervalStatus.INTERVAL, low, high, 1)
+
+
+def _bisected_confidence_set(d: np.ndarray, walsh: np.ndarray, alpha: float) -> ConfidenceSet:
+    """Bracket the accepted block by bisection, for samples too large to scan.
+
+    Exploits unimodality of p in the shift, which holds without exact ties.
+    Flagged ``exhaustive=False`` so the caller knows the shape was assumed
+    rather than established.
+    """
     m = walsh.size
     if m == 0:
-        return None
-
-    # p(δ) is a step function that changes only where δ crosses a Walsh average,
-    # so the M Walsh averages cut the line into M+1 open regions on which p is
-    # constant. Testing the *regions* rather than the grid points is what makes
-    # the agreement property exact: zero lies in exactly one region, and it is
-    # in the interval precisely when that region is accepted.
-    #
-    # Testing the grid points instead truncates the interval to the accepted
-    # points, which can exclude a zero sitting in an accepted gap between them —
-    # producing an interval that excludes zero while the test fails to reject.
+        return ConfidenceSet(IntervalStatus.NO_DATA)
     spread = float(walsh[-1] - walsh[0])
     step = spread * 0.01 if spread > 0 else 1.0
 
@@ -297,15 +423,11 @@ def hodges_lehmann_ci(diffs: Sequence[float], alpha: float = 0.05) -> tuple[floa
     def accepts(index: int) -> bool:
         return signed_rank_exact_p(d - representative(index)) > alpha
 
-    # The accepted regions form one contiguous block because p is unimodal in δ,
-    # peaking at the Hodges-Lehmann estimate. So the block can be bracketed by
-    # bisection instead of scanning every region, which matters at larger n
-    # where there are n(n+1)/2 of them.
     start = int(np.searchsorted(walsh, float(np.median(walsh)), side="left"))
     if not accepts(start):
         start = next((i for i in range(m + 1) if accepts(i)), -1)
         if start < 0:
-            return None
+            return ConfidenceSet(IntervalStatus.NO_DATA, exhaustive=False)
 
     low, high = 0, start
     while low < high:
@@ -325,12 +447,26 @@ def hodges_lehmann_ci(diffs: Sequence[float], alpha: float = 0.05) -> tuple[floa
             high = middle - 1
     last = low
 
-    # Reaching either outermost region means the acceptance set runs off to
-    # infinity: nothing is rejectable at this sample size, so there is no
-    # finite 95% interval to report.
     if first == 0 or last == m:
-        return None
-    return float(walsh[first - 1]), float(walsh[last])
+        return ConfidenceSet(IntervalStatus.UNBOUNDED, exhaustive=False)
+    return ConfidenceSet(
+        IntervalStatus.INTERVAL,
+        float(walsh[first - 1]),
+        float(walsh[last]),
+        1,
+        exhaustive=False,
+    )
+
+
+def hodges_lehmann_ci(diffs: Sequence[float], alpha: float = 0.05) -> tuple[float, float] | None:
+    """Bounded CI for the pseudomedian, or ``None`` when none exists.
+
+    Thin wrapper over :func:`confidence_set` for callers that only want the two
+    numbers. Prefer the full set where the distinction between unbounded, a
+    single point and a disconnected region matters to the reader.
+    """
+    found = confidence_set(diffs, alpha)
+    return (found.low, found.high) if found.available else None
 
 
 # ---- Sign test ------------------------------------------------------------
@@ -376,19 +512,30 @@ def sign_test(diffs: Sequence[float]) -> SignResult:
 # ---- Multiplicity ---------------------------------------------------------
 
 
-def holm(p_values: Sequence[float]) -> list[float]:
+def holm(p_values: Sequence[float], family_size: int | None = None) -> list[float]:
     """Holm–Bonferroni adjusted p-values, in the input order.
 
     Uniformly more powerful than plain Bonferroni with the same familywise
     guarantee, and valid under arbitrary dependence between the tests. The
     running maximum enforces monotonicity, which a naive implementation omits.
+
+    ``family_size`` allows the family to contain hypotheses with no p-value —
+    comparisons that could not be evaluated. Those sit at the end of the
+    step-down ordering and are never rejected, so their only effect is on the
+    divisor, which is exactly the point: a family must not silently shrink to
+    whatever the data happened to support.
     """
     values = [float(p) for p in p_values]
-    m = len(values)
-    if m == 0:
+    if not values:
         return []
-    order = sorted(range(m), key=lambda i: values[i])
-    adjusted = [0.0] * m
+    supplied = len(values)
+    # The unevaluable hypotheses have no p-value to place, but they still count
+    # toward the divisor. They sort to the end of the step-down ordering — an
+    # unevaluable comparison is never rejected — so the supplied p-values occupy
+    # ranks 0..supplied-1 and only the multiplier changes.
+    m = max(supplied, int(family_size or 0))
+    order = sorted(range(supplied), key=lambda i: values[i])
+    adjusted = [0.0] * supplied
     running = 0.0
     for rank, index in enumerate(order):
         candidate = (m - rank) * values[index]
@@ -431,8 +578,7 @@ class PairedResult:
     n_b: int
     n_zero: int
     hl_estimate: float | None
-    ci_low: float | None
-    ci_high: float | None
+    ci: ConfidenceSet
     p_value: float
     effect_r: float | None
     sign: SignResult
@@ -446,8 +592,20 @@ class PairedResult:
     p_adjusted: float | None = None
 
     @property
+    def ci_low(self) -> float | None:
+        return self.ci.low
+
+    @property
+    def ci_high(self) -> float | None:
+        return self.ci.high
+
+    @property
     def ci_available(self) -> bool:
-        return self.ci_low is not None and self.ci_high is not None
+        return self.ci.available
+
+    @property
+    def ci_status(self) -> IntervalStatus:
+        return self.ci.status
 
     @property
     def coverage_fraction(self) -> float | None:
@@ -486,20 +644,21 @@ def paired_comparison(
         return None
 
     diffs = a - b
-    ci = hodges_lehmann_ci(diffs, alpha)
+    found = confidence_set(diffs, alpha)
     p_value = signed_rank_exact_p(diffs)
-    if ci is None:
-        agrees = p_value > alpha
+    if found.available:
+        agrees = found.excludes_zero == (p_value <= alpha)
     else:
-        agrees = (ci[0] > 0 or ci[1] < 0) == (p_value <= alpha)
+        # An unbounded set excludes nothing, so it is consistent with the test
+        # only when the test also fails to reject.
+        agrees = p_value > alpha
     return PairedResult(
         n_pairs=int(a.size),
         n_a=int(n_a if n_a is not None else a.size),
         n_b=int(n_b if n_b is not None else b.size),
         n_zero=int(np.sum(diffs == 0)),
         hl_estimate=hodges_lehmann(diffs),
-        ci_low=ci[0] if ci else None,
-        ci_high=ci[1] if ci else None,
+        ci=found,
         p_value=p_value,
         effect_r=rank_biserial(diffs),
         sign=sign_test(diffs),
@@ -507,35 +666,31 @@ def paired_comparison(
     )
 
 
-def with_holm(results: Sequence[PairedResult]) -> list[PairedResult]:
+def with_holm(
+    results: Sequence[PairedResult], family_size: int | None = None
+) -> list[PairedResult]:
     """Attach Holm-adjusted p-values across one declared family.
 
-    The family is whatever the caller passes — the correction controls the
-    familywise error rate **within that set only**, and says nothing about
-    selecting a finding from across several such sets.
+    ``family_size`` is the number of hypotheses the family was **declared** to
+    hold, which can exceed the number passed in: an organ selected for the
+    family but with no patients both sources contoured is still a hypothesis
+    that was posed, and it cannot be rejected. Letting the divisor shrink to the
+    number that happened to be estimable would make the correction gentler
+    exactly when a source produced less — the same perverse incentive the
+    coverage columns exist to expose.
+
+    Omit it and the family is taken to be the results given.
     """
-    adjusted = holm([r.p_value for r in results])
-    return [
-        PairedResult(
-            n_pairs=r.n_pairs,
-            n_a=r.n_a,
-            n_b=r.n_b,
-            n_zero=r.n_zero,
-            hl_estimate=r.hl_estimate,
-            ci_low=r.ci_low,
-            ci_high=r.ci_high,
-            p_value=r.p_value,
-            effect_r=r.effect_r,
-            sign=r.sign,
-            ci_agrees_with_test=r.ci_agrees_with_test,
-            p_adjusted=p,
-        )
-        for r, p in zip(results, adjusted, strict=True)
-    ]
+    adjusted = holm([r.p_value for r in results], family_size)
+    return [replace(r, p_adjusted=p) for r, p in zip(results, adjusted, strict=True)]
 
 
 __all__ = [
     "MIN_N_FOR_MEDIAN_CI",
+    "MAX_BREAKPOINTS_FOR_FULL_SCAN",
+    "confidence_set",
+    "IntervalStatus",
+    "ConfidenceSet",
     "Description",
     "PairedResult",
     "SignResult",

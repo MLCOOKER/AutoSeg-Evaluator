@@ -18,6 +18,12 @@ from scipy.stats import wilcoxon
 
 from autoseg_evaluator.core.statistics import (
     MIN_N_FOR_MEDIAN_CI,
+    IntervalStatus,
+    _bisected_confidence_set,
+    _null_distribution,
+    _pratt_ranks,
+    _probe_points,
+    confidence_set,
     describe,
     hodges_lehmann,
     hodges_lehmann_ci,
@@ -377,13 +383,50 @@ def test_with_holm_adjusts_across_the_declared_family():
 
 
 def test_identical_sources_are_not_called_equivalent():
-    """Every difference zero gives p = 1, no effect size, and no interval."""
+    """Every difference zero gives p = 1 and no effect size.
+
+    The interval is a separate question, and a sample-size dependent one — see
+    the two tests below. What must never happen is a p-value of 1 being read as
+    evidence that the sources agree.
+    """
     values = [0.81, 0.83, 0.79, 0.85, 0.80, 0.82, 0.84, 0.78]
     result = paired_comparison(values, values)
     assert result.p_value == 1.0
     assert result.effect_r is None
     assert result.n_zero == len(values)
-    assert not result.ci_available
+
+
+def test_identical_differences_give_a_singleton_from_six_observations():
+    """Raised in external review: the acceptance set here is not empty.
+
+    With every difference equal, shifting by any amount makes all residuals
+    non-zero and unanimous, so p away from the common value is 2^(1-n). From
+    six observations that is 0.03125 and rejectable, leaving exactly one
+    accepted point. Reporting nothing would hide a defined result; the earlier
+    version did, on the grounds that a reader might misread it.
+    """
+    for n in (6, 8, 10):
+        found = confidence_set([0.0] * n)
+        assert found.status is IntervalStatus.SINGLETON, n
+        assert found.low == found.high == 0.0
+
+    # A non-zero common difference puts the singleton at that value.
+    found = confidence_set([0.1] * 6)
+    assert found.status is IntervalStatus.SINGLETON
+    assert found.low == pytest.approx(0.1)
+
+
+def test_the_same_data_give_an_unbounded_set_below_six_observations():
+    """The companion case, and why the claim had to be made sample-size aware.
+
+    At five identical differences p away from the common value is 0.0625, which
+    does not reject at 0.05 — so nothing is rejectable and the acceptance set is
+    the whole line, not a point.
+    """
+    for n in (2, 3, 4, 5):
+        found = confidence_set([0.1] * n)
+        assert found.status is IntervalStatus.UNBOUNDED, n
+        assert not found.available
 
 
 def test_a_clean_sweep_is_detectable_at_ten_pairs():
@@ -395,3 +438,154 @@ def test_a_clean_sweep_is_detectable_at_ten_pairs():
     assert result.ci_available
     assert result.ci_low > 0
     assert result.sign.win_fraction == 1.0
+
+
+# ---- Claims raised in external statistical review -------------------------
+
+
+def test_the_null_distribution_keeps_tied_multiplicities():
+    """Raised in review: 2^k assignments are not 2^k distinct statistic values.
+
+    Different sign assignments can produce the same rank sum, and the counts of
+    each must be preserved or the tail probabilities are wrong. The reviewer
+    supplied this fixture and computed it independently.
+    """
+    diffs = [0.0, 0.0, 1.0, 1.0, -2.0, 3.0]
+    ranks, signs = _pratt_ranks(np.asarray(diffs))
+    weights = ranks[signs != 0]
+
+    assert [int(round(w * 2)) for w in weights] == [7, 7, 10, 12]
+
+    counts, total = _null_distribution(weights)
+    assert total == 16  # sign assignments
+    assert len(counts) == 12  # distinct sums
+    assert sum(counts.values()) == 16  # multiplicities preserved
+
+    # Independently enumerated, rather than trusting the DP.
+    brute: dict[int, int] = {}
+    for mask in product([0, 1], repeat=4):
+        key = sum(v for v, take in zip([7, 7, 10, 12], mask) if take)
+        brute[key] = brute.get(key, 0) + 1
+    assert counts == brute
+
+    assert signed_rank_exact_p(diffs) == pytest.approx(0.5)
+
+
+def test_the_null_distribution_counts_are_arbitrary_precision():
+    """Raised in review: counts overflow fixed-width integers at ~100 pairs.
+
+    They do — the largest count here exceeds 2^63. Python integers are unbounded
+    so the arithmetic is exact, but a well-meant rewrite onto a numpy integer
+    array would silently wrap. The invariant that catches it is that the
+    multiplicities sum to exactly 2^k.
+    """
+    rng = np.random.default_rng(0)
+    diffs = rng.normal(0, 1, 100)
+    ranks, signs = _pratt_ranks(diffs)
+    counts, total = _null_distribution(ranks[signs != 0])
+
+    assert total == 2**100
+    assert sum(counts.values()) == 2**100
+    assert max(counts.values()) > 2**63 - 1  # would have wrapped in int64
+    assert all(isinstance(v, int) for v in counts.values())
+
+
+def test_breakpoints_are_probed_as_well_as_the_gaps_between_them():
+    """Raised in review: a breakpoint can accept while both neighbours reject.
+
+    At a Walsh average some residuals become exactly zero, which under Pratt
+    changes the ranks and so the null distribution. Its status cannot be
+    inferred from the gaps on either side, so both are probed.
+    """
+    probes = _probe_points(np.asarray([1.0, 2.0, 3.0]))
+    kinds = [is_break for _delta, is_break in probes]
+    # exterior, bp, gap, bp, gap, bp, exterior
+    assert kinds == [False, True, False, True, False, True, False]
+    assert [d for d, is_break in probes if is_break] == [1.0, 2.0, 3.0]
+    assert [d for d, is_break in probes if not is_break] == [0.98, 1.5, 2.5, 3.02]
+
+
+def test_duplicate_walsh_averages_define_no_gap():
+    """Repeated breakpoints do not create extra non-empty regions."""
+    probes = _probe_points(np.asarray([1.0, 1.0, 1.0]))
+    assert [d for d, is_break in probes if is_break] == [1.0]
+    # Only the two exterior probes remain, and both must be strictly outside.
+    outside = [d for d, is_break in probes if not is_break]
+    assert len(outside) == 2
+    assert outside[0] < 1.0 < outside[1]
+
+
+def test_the_exterior_probe_survives_a_zero_spread():
+    """A step of '1% of the spread' is zero when every Walsh average is equal."""
+    for value in (0.0, 0.1, -5.0, 1e-300):
+        probes = _probe_points(np.asarray([value] * 4))
+        outside = [d for d, is_break in probes if not is_break]
+        assert outside[0] < value < outside[1], value
+
+
+def test_the_full_scan_and_the_bisection_agree():
+    """The scan removes an unproved unimodality assumption; it should not move
+    any answer at the sample sizes that reach it.
+
+    Measured over randomised samples spanning tie structures from continuous to
+    heavily quantised. Also asserts no acceptance set was disconnected, which is
+    the failure mode bisection could not have detected.
+    """
+    rng = np.random.default_rng(20260918)
+    shapes = (
+        lambda n: rng.normal(0, 1, n),
+        lambda n: np.round(rng.normal(0, 1, n) * 2) / 2,
+        lambda n: np.round(rng.normal(0, 0.6, n)),
+        lambda n: np.round(rng.normal(-0.03, 0.02, n), 3),
+    )
+    checked = 0
+    for shape in shapes:
+        for _ in range(60):
+            n = int(rng.integers(4, 13))
+            d = shape(n)
+            if np.all(d == 0):
+                continue
+            checked += 1
+            found = confidence_set(d)
+            assert found.exhaustive
+            assert found.status is not IntervalStatus.DISCONNECTED
+            bisected = _bisected_confidence_set(d, walsh_averages(d), 0.05)
+            if found.available and bisected.available:
+                assert found.low == pytest.approx(bisected.low)
+                assert found.high == pytest.approx(bisected.high)
+            else:
+                assert found.available == bisected.available
+    assert checked > 200
+
+
+def test_holm_does_not_shrink_to_the_estimable_hypotheses():
+    """Raised in review: silent family reduction is anti-conservative.
+
+    A family of five organs where only three could be compared must still
+    divide by five. Otherwise a source that produced fewer organs is rewarded
+    with a gentler correction.
+    """
+    p_values = [0.004, 0.02, 0.30]
+
+    shrunk = holm(p_values)
+    declared = holm(p_values, family_size=5)
+
+    assert shrunk[0] == pytest.approx(0.012)  # 3 x 0.004
+    assert declared[0] == pytest.approx(0.020)  # 5 x 0.004
+    assert all(d >= s for d, s in zip(declared, shrunk))
+
+    # A declared size below the number supplied cannot weaken the correction.
+    assert holm(p_values, family_size=1) == shrunk
+
+
+def test_a_declared_family_size_changes_whether_a_result_survives():
+    """The reduction is not cosmetic — it moves results across 0.05."""
+    a = [0.80, 0.81, 0.82, 0.83, 0.84, 0.85, 0.86, 0.87, 0.88, 0.89]
+    b = [v - 0.03 - 0.001 * i for i, v in enumerate(a)]
+    result = paired_comparison(a, b)
+
+    as_estimated = with_holm([result])[0]
+    as_declared = with_holm([result], family_size=30)[0]
+
+    assert as_estimated.p_adjusted <= 0.05
+    assert as_declared.p_adjusted > 0.05

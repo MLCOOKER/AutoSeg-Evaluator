@@ -162,7 +162,17 @@ class ReportModel:
     """Labels that acted as ground truth. Never comparators."""
 
     duplicates_collapsed: int = 0
-    """Repeat observations of one (patient, organ, source, metric)."""
+    """Repeat observations of one (patient, organ, source, metric) that carried
+    the *same* value — a re-export, harmless beyond the count."""
+
+    conflicting_observations: int = 0
+    """Repeats that carried a *different* value, so one of them was discarded.
+
+    The observation key is the patient identifier, which does not distinguish
+    two courses of the same patient (re-irradiation, a replan). When that
+    happens the second course is silently dropped by the first-wins rule, and
+    the count is the only sign of it. Surfaced rather than buried, because
+    unlike a duplicate export this changes which number is analysed."""
 
     _patients_by_source: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     _patients_by_organ: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
@@ -265,34 +275,47 @@ class ReportModel:
         challenger: str,
         organs: Sequence[str] | None = None,
         alpha: float = 0.05,
-    ) -> dict[str, PairedResult]:
+    ) -> dict[str, PairedResult | None]:
         """One Holm family: this metric, this pair of sources, these organs.
 
         Holm controls the familywise error rate **within this set only**. A
         finding selected from across several such families does not carry that
         control, which is why the family is passed in explicitly rather than
         inferred from whatever happens to be on screen.
+
+        **Every declared organ is returned**, including those with no patients
+        both sources contoured, which map to ``None``. They are hypotheses that
+        were posed and could not be answered, and they still count toward the
+        Holm divisor. Dropping them would make the correction gentler precisely
+        when a source produced less — rewarding the coverage gap that the
+        coverage table exists to expose.
         """
         chosen = list(organs) if organs is not None else self.organs()
-        results: dict[str, PairedResult] = {}
-        for organ in chosen:
-            result = self.compare(organ, metric, challenger, reference, alpha)
-            if result is not None:
-                results[organ] = result
-        if not results:
-            return {}
-        adjusted = with_holm(list(results.values()))
-        return dict(zip(results.keys(), adjusted, strict=True))
+        results: dict[str, PairedResult | None] = {
+            organ: self.compare(organ, metric, challenger, reference, alpha) for organ in chosen
+        }
+        estimable = {organ: r for organ, r in results.items() if r is not None}
+        if not estimable:
+            return results
+        adjusted = with_holm(list(estimable.values()), family_size=len(chosen))
+        for organ, result in zip(estimable.keys(), adjusted, strict=True):
+            results[organ] = result
+        return results
 
-    def family_can_detect(self, results: Iterable[PairedResult], alpha: float = 0.05) -> bool:
+    def family_can_detect(
+        self, results: Iterable[PairedResult | None], alpha: float = 0.05
+    ) -> bool:
         """Could *any* member of this family reach significance after Holm?
 
         False means the design cannot produce a significant result however the
         data fall, because the smallest attainable p at the available sample
         sizes exceeds the corrected threshold. Worth saying out loud: a column
         of adjusted p = 1.000 otherwise reads as evidence the sources agree.
+
+        The family size counted is the number **declared**, unevaluable members
+        included, matching the divisor Holm actually applies.
         """
-        collected = list(results)
+        collected = [r for r in results if r is not None]
         if not collected:
             return False
         # The most favourable member decides, not the least. Holm's strictest
@@ -302,7 +325,7 @@ class ReportModel:
         # would warn that nothing is detectable while a well-populated organ in
         # the same family is significant on screen.
         largest_n = max(r.n_pairs for r in collected)
-        return holm_detection_ceiling(largest_n, len(collected), alpha)
+        return holm_detection_ceiling(largest_n, len(list(results)), alpha)
 
 
 # ---- Building from results rows -------------------------------------------
@@ -352,8 +375,13 @@ def build_report_model(
             if key in model.observations:
                 # A second row for the same contour adds no information, and
                 # letting it through would give one patient two votes in a
-                # paired test.
-                model.duplicates_collapsed += 1
+                # paired test. A second row with a *different* value is not a
+                # duplicate at all — most likely a second course under one
+                # patient identifier — and is counted separately.
+                if model.observations[key] == float(value):
+                    model.duplicates_collapsed += 1
+                else:
+                    model.conflicting_observations += 1
                 continue
             model.observations[key] = float(value)
     return model

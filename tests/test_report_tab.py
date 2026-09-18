@@ -183,16 +183,20 @@ def test_a_comparison_reports_how_much_the_pairing_discarded(tab):
 
 
 def test_an_interval_that_does_not_exist_is_not_drawn_anyway(tab):
-    """At four pairs no finite distribution-free interval exists.
+    """At four pairs no shift is rejectable, so the accepted set is unbounded.
 
-    Printing one would be a fabrication, and printing the estimate alone would
-    read as a precise result. Both tables say so instead.
+    Printing an interval would be a fabrication, and printing the estimate
+    alone would read as a precise result. Both tables say so instead — and the
+    comparison table names *which* absence it is, because "unbounded" and "a
+    single accepted point" are opposite situations that a bare dash merged.
     """
     _select(tab, ORGANS)
-    assert _find(tab._comparison_table, THIN_ORGAN)["95% CI (unadjusted)"] == "— not estimable"
+    assert (
+        _find(tab._comparison_table, THIN_ORGAN)["95% CI (unadjusted)"] == "— unbounded at this n"
+    )
     assert _find(tab._descriptive_table, THIN_ORGAN, CHALLENGER)["95% CI"] == "— not estimable"
     # A well-populated organ does get one.
-    assert "not estimable" not in _find(tab._comparison_table, "Parotid (L)")["95% CI (unadjusted)"]
+    assert "—" not in _find(tab._comparison_table, "Parotid (L)")["95% CI (unadjusted)"]
 
 
 def test_a_large_p_is_reported_as_a_failure_to_detect(tab):
@@ -488,3 +492,116 @@ def test_a_thin_row_states_the_p_value_it_cannot_beat(tab):
             assert "No finite 95% interval" in tip
             return
     pytest.fail(f"no {THIN_ORGAN} comparison row")
+
+
+# ---- Family integrity (external review) -----------------------------------
+
+
+def _unmatched_rows():
+    """An organ both sources produce, but never for the same patient."""
+    rows = _rows()
+    for patient in range(5):
+        rows.append(_row_for(f"P{patient:02d}", "Cochlea (L)", REFERENCE, 0.62 + patient * 0.01))
+    for patient in range(5, 10):
+        rows.append(_row_for(f"P{patient:02d}", "Cochlea (L)", CHALLENGER, 0.58 + patient * 0.01))
+    return rows
+
+
+def _row_for(patient, organ, source, dice):
+    return {
+        "patient_id": patient,
+        "drawer": organ,
+        "canonical_organ": organ,
+        "comparison_mode": "vs GT",
+        "gt_source_label": "Manual",
+        "test_source_label": source,
+        "gt_roi_name": organ,
+        "metrics": {"dice": dice},
+    }
+
+
+@pytest.fixture
+def unmatched_tab(qapp):
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(_unmatched_rows())
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._metric_combo.setCurrentText("dice")
+    widget._reference_combo.setCurrentText(REFERENCE)
+    widget._challenger_combo.setCurrentText(CHALLENGER)
+    yield widget
+    widget.deleteLater()
+
+
+def test_an_unestimable_organ_still_appears_in_the_table(unmatched_tab):
+    """Raised in external review: silent family reduction.
+
+    Both sources produced Cochlea (L), but never for the same patient, so no
+    pairing exists. Dropping the row would make the family look smaller than
+    the correction actually applied.
+    """
+    _select(unmatched_tab, ["Parotid (L)", "Parotid (R)", "Cochlea (L)"])
+    row = _find(unmatched_tab._comparison_table, "Cochlea (L)")
+    assert row["n pairs"] == "0"
+    assert row["Reading"] == "not estimable: no matched patients"
+    assert unmatched_tab._comparison_table.rowCount() == 3
+
+
+def test_the_holm_divisor_keeps_the_unestimable_member(unmatched_tab):
+    """The reduction is not cosmetic: it changes the adjusted p-values."""
+    _select(unmatched_tab, ["Parotid (L)", "Parotid (R)"])
+    without = float(_find(unmatched_tab._comparison_table, "Parotid (L)")["p (Holm)"])
+
+    _select(unmatched_tab, ["Parotid (L)", "Parotid (R)", "Cochlea (L)"])
+    with_unestimable = float(_find(unmatched_tab._comparison_table, "Parotid (L)")["p (Holm)"])
+
+    assert with_unestimable > without  # a family of three, not two
+    assert "Not estimable" in unmatched_tab._warning.text()
+    assert "Holm divisor is 3, not 2" in unmatched_tab._warning.text()
+
+
+def test_the_methods_paragraph_admits_the_unestimable_member(unmatched_tab):
+    _select(unmatched_tab, ["Parotid (L)", "Parotid (R)", "Cochlea (L)"])
+    methods = unmatched_tab._methods.text()
+    assert "across the 3 organs" in methods
+    assert "1 could not be estimated and were retained in the divisor" in methods
+
+
+def test_an_unestimable_organ_exports_as_a_row_not_a_gap(unmatched_tab, tmp_path, monkeypatch):
+    _select(unmatched_tab, ["Parotid (L)", "Cochlea (L)"])
+    target = tmp_path / "comparison.csv"
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "CSV"))
+    )
+    unmatched_tab._export_btn.click()
+
+    with open(target, encoding="utf-8", newline="") as handle:
+        rows = {r["organ"]: r for r in csv.DictReader(handle)}
+    assert set(rows) == {"Parotid (L)", "Cochlea (L)"}
+    assert rows["Cochlea (L)"]["n_pairs"] == "0"
+    assert rows["Cochlea (L)"]["ci_status"] == "not estimable"
+    assert rows["Cochlea (L)"]["p_holm"] == ""
+
+
+def test_a_conflicting_repeat_is_reported_not_silently_dropped(qapp):
+    """Raised in external review: the observation key is unsafe.
+
+    Two courses under one patient identifier collapse to one observation. That
+    is a different event from a duplicated export and has to be visible.
+    """
+    widget = ReportTab()
+    manager = ResultsManager()
+    rows = _rows()
+    rows.append(_row_for("P00", "Parotid (L)", REFERENCE, 0.5))  # a second course
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._metric_combo.setCurrentText("dice")
+    widget._reference_combo.setCurrentText(REFERENCE)
+    widget._challenger_combo.setCurrentText(CHALLENGER)
+
+    assert widget._model.conflicting_observations == 1
+    assert "conflicting observation(s) discarded" in widget._summary_label.text()
+    assert "keyed on patient identifier" in widget._warning.text()
+    widget.deleteLater()

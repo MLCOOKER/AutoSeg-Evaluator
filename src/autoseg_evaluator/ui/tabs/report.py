@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from autoseg_evaluator.core.statistics import smallest_attainable_p
+from autoseg_evaluator.core.statistics import IntervalStatus, smallest_attainable_p
 from autoseg_evaluator.data.report import ReportModel, build_report_model, favours
 from autoseg_evaluator.ui.widgets.stat_plots import DistributionCanvas, ForestCanvas
 
@@ -484,6 +484,11 @@ class ReportTab(QWidget):
                 if self._model.duplicates_collapsed
                 else ""
             )
+            + (
+                f" · {self._model.conflicting_observations} conflicting observation(s) discarded"
+                if self._model.conflicting_observations
+                else ""
+            )
         )
 
         self._fill_coverage(metric, organs)
@@ -584,18 +589,57 @@ class ReportTab(QWidget):
                 ):
                     table.setItem(row, column, QTableWidgetItem(text))
 
+    @staticmethod
+    def _interval_text(result) -> str:
+        """The confidence set in words, distinguishing four different absences.
+
+        An earlier version printed one em dash for all of them, which merged
+        "no shift is rejectable at this sample size" with "the accepted set is
+        a single point" — opposite situations.
+        """
+        found = result.ci
+        if found.status is IntervalStatus.INTERVAL:
+            return f"{found.low:+.4f}, {found.high:+.4f}"
+        if found.status is IntervalStatus.SINGLETON:
+            return f"{found.low:+.4f} only"
+        if found.status is IntervalStatus.DISCONNECTED:
+            return f"{found.low:+.4f}, {found.high:+.4f} (enclosing)"
+        if found.status is IntervalStatus.UNBOUNDED:
+            return "— unbounded at this n"
+        return "— not estimable"
+
     def _fill_comparison(self, metric: str, family: dict, reference: str, challenger: str) -> None:
         table = self._comparison_table
         table.setRowCount(0)
         for organ, result in family.items():
             row = table.rowCount()
             table.insertRow(row)
+            if result is None:
+                # Declared in the family, but no patient had both sources. It
+                # still counts toward the Holm divisor, so it is shown rather
+                # than dropped — otherwise the family appears to be smaller
+                # than the correction actually applied.
+                blank = ["—"] * table.columnCount()
+                blank[0] = organ
+                blank[1] = "0"
+                blank[-1] = "not estimable: no matched patients"
+                for column, cell_text in enumerate(blank):
+                    item = QTableWidgetItem(cell_text)
+                    item.setToolTip(
+                        _tip(
+                            f"<b>{organ}</b> was included in the correction family but "
+                            "no patient had a contour from both sources, so no "
+                            "comparison could be made.",
+                            "It is still counted in the Holm divisor. A family that "
+                            "quietly shrank to whatever the data supported would "
+                            "correct less harshly exactly when a source produced "
+                            "fewer organs.",
+                        )
+                    )
+                    table.setItem(row, column, item)
+                continue
             estimate = result.hl_estimate
-            ci = (
-                f"{result.ci_low:+.4f}, {result.ci_high:+.4f}"
-                if result.ci_available
-                else "— not estimable"
-            )
+            ci = self._interval_text(result)
             sign = result.sign
             sign_text = f"{sign.n_positive}/{sign.n_nonzero} · p={sign.p_value:.3f}"
             for column, text in enumerate(
@@ -664,8 +708,27 @@ class ReportTab(QWidget):
 
     def _fill_warning(self, metric: str, family: dict, reference: str, challenger: str) -> None:
         notes: list[str] = []
-        if family and not self._model.family_can_detect(family.values(), _ALPHA):
-            smallest = min(r.n_pairs for r in family.values())
+        estimable = {organ: r for organ, r in family.items() if r is not None}
+        missing = [organ for organ, r in family.items() if r is None]
+        if self._model.conflicting_observations:
+            notes.append(
+                f"<b>{self._model.conflicting_observations} observation(s) discarded:</b> "
+                "the same patient, organ and source produced more than one differing "
+                "value. Observations are keyed on patient identifier, which does not "
+                "separate two courses of one patient, so the first was kept and the "
+                "rest dropped. Check the Results tab if this cohort contains "
+                "re-irradiation or replans."
+            )
+        if missing:
+            notes.append(
+                f"<b>Not estimable:</b> {', '.join(missing[:4])}"
+                + (f" and {len(missing) - 4} more" if len(missing) > 4 else "")
+                + " had no patient contoured by both sources. They remain in the "
+                "correction family, so the Holm divisor is "
+                f"{len(family)}, not {len(estimable)}."
+            )
+        if estimable and not self._model.family_can_detect(family.values(), _ALPHA):
+            smallest = min(r.n_pairs for r in estimable.values())
             notes.append(
                 f"<b>This comparison cannot reach significance.</b> With {smallest} paired "
                 f"observations the smallest attainable p-value is larger than the Holm "
@@ -675,7 +738,7 @@ class ReportTab(QWidget):
             )
         thin = [
             organ
-            for organ, r in family.items()
+            for organ, r in estimable.items()
             if r.coverage_fraction is not None and r.coverage_fraction < 0.8
         ]
         if thin:
@@ -686,7 +749,24 @@ class ReportTab(QWidget):
                 "produce them for everyone. Models tend to fail on hard cases, so that "
                 "subset is unlikely to be representative."
             )
-        disagreeing = [organ for organ, r in family.items() if not r.ci_agrees_with_test]
+        disconnected = [
+            organ for organ, r in estimable.items() if r.ci.status is IntervalStatus.DISCONNECTED
+        ]
+        if disconnected:
+            notes.append(
+                f"<b>Disconnected confidence set</b> in {', '.join(disconnected[:4])}: "
+                "exact ties make the accepted region fall into separate pieces, so the "
+                "interval shown encloses them and is wider than the true set."
+            )
+        approximate = [organ for organ, r in estimable.items() if not r.ci.exhaustive]
+        if approximate:
+            notes.append(
+                f"<b>Interval bracketed, not enumerated</b> in "
+                f"{', '.join(approximate[:4])}: the sample was large enough that the "
+                "confidence set was located by bisection, which assumes it is "
+                "connected rather than establishing it."
+            )
+        disagreeing = [organ for organ, r in estimable.items() if not r.ci_agrees_with_test]
         if disagreeing:
             notes.append(
                 f"<b>Exact ties present</b> in {', '.join(disagreeing[:4])}: some paired "
@@ -697,10 +777,11 @@ class ReportTab(QWidget):
         self._warning.setVisible(bool(notes))
 
     def _write_methods(self, metric: str, family: dict, reference: str, challenger: str) -> None:
-        if not family:
+        estimable = {organ: r for organ, r in family.items() if r is not None}
+        if not estimable:
             self._methods.setText("")
             return
-        sizes = sorted({r.n_pairs for r in family.values()})
+        sizes = sorted({r.n_pairs for r in estimable.values()})
         span = f"{sizes[0]}" if len(sizes) == 1 else f"{sizes[0]}–{sizes[-1]}"
         self._methods.setText(
             f"<b>Methods.</b> {challenger} was compared with {reference} on {metric} for each "
@@ -710,10 +791,17 @@ class ReportTab(QWidget):
             f"Differences are summarised by the Hodges–Lehmann estimator with a 95% confidence "
             f"interval obtained by inverting the same test; these intervals are unadjusted. "
             f"An exact sign test is reported alongside. Holm–Bonferroni correction was applied "
-            f"across the {len(family)} organs of this metric and source pair, and controls the "
-            f"familywise error rate within that family only. Descriptive values are median "
-            f"[Q1, Q3] with a distribution-free 95% interval for the median, which is not "
-            f"estimable below six observations."
+            f"across the {len(family)} organs of this metric and source pair"
+            + (
+                f", of which {len(family) - len(estimable)} could not be estimated and were "
+                "retained in the divisor"
+                if len(estimable) != len(family)
+                else ""
+            )
+            + ", and controls the "
+            "familywise error rate within that family only. Descriptive values are median "
+            "[Q1, Q3] with a distribution-free 95% interval for the median, which is not "
+            "estimable below six observations."
         )
 
     # ---- Export -----------------------------------------------------------
@@ -736,16 +824,24 @@ class ReportTab(QWidget):
             with open(path, "w", encoding="utf-8", newline="") as handle:
                 handle.write(
                     "organ,metric,challenger,reference,n_pairs,n_challenger,n_reference,"
-                    "n_zero,hl_difference,ci_low,ci_high,rank_biserial,p_raw,p_holm,"
+                    "n_zero,hl_difference,ci_low,ci_high,ci_status,ci_exhaustive,"
+                    "rank_biserial,p_raw,p_holm,"
                     "sign_positive,sign_nonzero,sign_p,ci_agrees_with_test\n"
                 )
                 for organ, r in self._family.items():
+                    if r is None:
+                        handle.write(
+                            f"{organ},{metric},{challenger},{reference},0,,,,,,,"
+                            "not estimable,,,,,,\n"
+                        )
+                        continue
                     handle.write(
                         f"{organ},{metric},{challenger},{reference},{r.n_pairs},{r.n_a},"
                         f"{r.n_b},{r.n_zero},"
                         f"{'' if r.hl_estimate is None else f'{r.hl_estimate:.6f}'},"
                         f"{'' if r.ci_low is None else f'{r.ci_low:.6f}'},"
                         f"{'' if r.ci_high is None else f'{r.ci_high:.6f}'},"
+                        f"{r.ci.status.value},{r.ci.exhaustive},"
                         f"{'' if r.effect_r is None else f'{r.effect_r:.4f}'},"
                         f"{r.p_value:.6f},"
                         f"{'' if r.p_adjusted is None else f'{r.p_adjusted:.6f}'},"

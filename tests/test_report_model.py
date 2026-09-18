@@ -90,11 +90,31 @@ def test_a_patient_cannot_contribute_twice_to_the_same_cell():
     """A repeat export would otherwise give one patient two votes in a paired test."""
     rows = [
         _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
-        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.84}),
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
     ]
     model = build_report_model(rows)
     assert len(model.values("Parotid (L)", "VendorA", "dice")) == 1
     assert model.duplicates_collapsed == 1
+    assert model.conflicting_observations == 0
+
+
+def test_a_repeat_carrying_a_different_value_is_not_a_duplicate():
+    """Raised in external review: the observation key is unsafe.
+
+    Observations are keyed on the patient identifier, which does not separate
+    two courses of one patient — a re-irradiation, a replan. When that happens
+    the second value is silently discarded by the first-wins rule, and unlike a
+    duplicated export it changes which number is analysed. Counting the two
+    together would hide it.
+    """
+    rows = [
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.84}),
+    ]
+    model = build_report_model(rows)
+    assert len(model.values("Parotid (L)", "VendorA", "dice")) == 1
+    assert model.duplicates_collapsed == 0
+    assert model.conflicting_observations == 1
 
 
 def test_the_same_patient_may_appear_for_different_organs():

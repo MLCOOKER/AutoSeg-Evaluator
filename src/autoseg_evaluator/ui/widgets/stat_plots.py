@@ -160,7 +160,9 @@ class ForestCanvas(_Canvas):
         self.clear()
         axes = self.figure.add_subplot(111)
         usable = [
-            (organ, result) for organ, result in results.items() if result.hl_estimate is not None
+            (organ, result)
+            for organ, result in results.items()
+            if result is not None and result.hl_estimate is not None
         ]
         if not usable:
             axes.text(0.5, 0.5, "Nothing to compare", ha="center", va="center")
