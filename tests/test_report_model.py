@@ -668,3 +668,98 @@ def test_coverage_does_not_borrow_patients_from_another_reference():
     cell = model.coverage("Parotid (L)", "dice", "VendorA")
     assert cell.produced == 1
     assert cell.eligible == 1  # P2 and P3 belong to the other reference
+
+
+# ---- The two consensus references are different analyses -------------------
+
+
+def test_the_two_consensus_labels_differ_by_more_than_capitalisation():
+    """They lived as "STAPLE Consensus" and "STAPLE consensus".
+
+    Telling a multi-observer consensus from a drawer-pool one rested on nobody
+    tidying the capitalisation, and the reference selector showed two entries a
+    reader could not distinguish.
+    """
+    from autoseg_evaluator.core.staple import DRAWER_POOL_LABEL, MULTI_OBSERVER_LABEL
+
+    assert DRAWER_POOL_LABEL.lower() != MULTI_OBSERVER_LABEL.lower()
+    assert "drawer pool" in DRAWER_POOL_LABEL.lower()
+
+
+def test_both_consensus_kinds_are_recognised_as_consensus():
+    from autoseg_evaluator.core.staple import DRAWER_POOL_LABEL, MULTI_OBSERVER_LABEL
+    from autoseg_evaluator.data.report import is_consensus_reference
+
+    assert is_consensus_reference(MULTI_OBSERVER_LABEL)
+    assert is_consensus_reference(DRAWER_POOL_LABEL)
+    assert not is_consensus_reference("Manual")
+
+
+def test_a_legacy_drawer_pool_label_is_mapped_forward():
+    """Sessions saved before the rename must not become a third reference."""
+    from autoseg_evaluator.core.staple import DRAWER_POOL_LABEL, LEGACY_DRAWER_POOL_LABEL
+
+    old = _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}, gt=LEGACY_DRAWER_POOL_LABEL)
+    old["comparison_mode"] = "Generic STAPLE with GT"
+    new = _row("P2", "Parotid (L)", "VendorA", {"dice": 0.82}, gt=DRAWER_POOL_LABEL)
+    new["comparison_mode"] = "Generic STAPLE with GT"
+
+    model = build_report_model([old, new])
+    assert model.ground_truths() == [DRAWER_POOL_LABEL]
+    assert len(model.values("Parotid (L)", "VendorA", "dice")) == 2
+
+
+def test_the_two_consensus_kinds_stay_separate_references():
+    """Different pools, different caveats — they must not merge."""
+    from autoseg_evaluator.core.staple import DRAWER_POOL_LABEL, MULTI_OBSERVER_LABEL
+
+    observers = _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}, gt=MULTI_OBSERVER_LABEL)
+    observers["comparison_mode"] = "Multi-observer STAPLE"
+    drawer = _row("P1", "Parotid (L)", "VendorA", {"dice": 0.91}, gt=DRAWER_POOL_LABEL)
+    drawer["comparison_mode"] = "Generic STAPLE with GT"
+
+    model = build_report_model([observers, drawer])
+    assert set(model.ground_truths()) == {MULTI_OBSERVER_LABEL, DRAWER_POOL_LABEL}
+    assert model.conflicting_observations == 0
+    assert model.for_ground_truth(MULTI_OBSERVER_LABEL).values(
+        "Parotid (L)", "VendorA", "dice"
+    ) == {"P1": 0.80}
+    assert model.for_ground_truth(DRAWER_POOL_LABEL).values("Parotid (L)", "VendorA", "dice") == {
+        "P1": 0.91
+    }
+
+
+def test_the_multi_observer_consensus_is_preferred_over_the_drawer_pool():
+    """The vendors are not in the multi-observer pool, so it is the cleaner reference."""
+    from autoseg_evaluator.core.staple import DRAWER_POOL_LABEL, MULTI_OBSERVER_LABEL
+
+    observers = _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}, gt=MULTI_OBSERVER_LABEL)
+    observers["comparison_mode"] = "Multi-observer STAPLE"
+    drawer = _row("P1", "Parotid (L)", "VendorA", {"dice": 0.91}, gt=DRAWER_POOL_LABEL)
+    drawer["comparison_mode"] = "Generic STAPLE with GT"
+    manual = _row("P1", "Parotid (L)", "VendorA", {"dice": 0.75})
+
+    model = build_report_model([drawer, manual, observers])
+    assert model.preferred_ground_truth() == MULTI_OBSERVER_LABEL
+
+
+def test_the_drawer_pool_ranks_below_the_manual_contours():
+    """Its pool contains the very sources being scored against it.
+
+    Every other consensus outranks the manual ground truth; this one does not,
+    because a vendor is partly measured against itself. It stays available as a
+    supplementary analysis but must never be the default.
+    """
+    from autoseg_evaluator.core.staple import DRAWER_POOL_LABEL, MULTI_OBSERVER_LABEL
+    from autoseg_evaluator.data.report import reference_rank
+
+    assert reference_rank(MULTI_OBSERVER_LABEL) == 0
+    assert reference_rank("Manual") == 1
+    assert reference_rank(DRAWER_POOL_LABEL) == 2
+
+    drawer = _row("P1", "Parotid (L)", "VendorA", {"dice": 0.91}, gt=DRAWER_POOL_LABEL)
+    drawer["comparison_mode"] = "Generic STAPLE with GT"
+    manual = _row("P1", "Parotid (L)", "VendorA", {"dice": 0.75})
+    model = build_report_model([drawer, manual])
+    assert model.preferred_ground_truth() == "manual"
+    assert model.ground_truths() == ["manual", DRAWER_POOL_LABEL]

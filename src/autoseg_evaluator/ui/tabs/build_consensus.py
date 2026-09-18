@@ -81,6 +81,7 @@ from autoseg_evaluator.core.masks import (
 )
 from autoseg_evaluator.core.matching import ReplacementRule, similarity
 from autoseg_evaluator.core.metrics import compute_geometric_metrics
+from autoseg_evaluator.core.staple import MULTI_OBSERVER_LABEL
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
     OrganEntry,
@@ -91,7 +92,9 @@ from autoseg_evaluator.data.synonyms import flatten_synonyms, load_synonyms
 from autoseg_evaluator.utils.paths import synonyms_path
 
 # Source label assigned to every synthetic consensus RTSS we generate.
-CONSENSUS_SOURCE_LABEL = "STAPLE Consensus"
+#: Re-exported so existing call sites keep working; the definition lives
+#: beside its drawer-pool counterpart so the two cannot drift apart again.
+CONSENSUS_SOURCE_LABEL = MULTI_OBSERVER_LABEL
 
 # Default per-patient organ-matching similarity threshold.
 _DEFAULT_THRESHOLD = 0.60

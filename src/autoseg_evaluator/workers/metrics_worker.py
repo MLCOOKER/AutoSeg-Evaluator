@@ -31,6 +31,7 @@ from autoseg_evaluator.core.masks import (
 )
 from autoseg_evaluator.core.metrics import compute_geometric_metrics
 from autoseg_evaluator.core.staple import (
+    DRAWER_POOL_LABEL,
     StapleConfig,
     compute_staple,
     sensitivity_specificity_vs_reference,
@@ -678,7 +679,7 @@ class MetricsWorker(QObject):
             # Override GT metadata: the reference is the STAPLE consensus,
             # not the manual GT — no file, no ROI number, but keep the
             # organ name so the row still reads naturally.
-            row["gt_source_label"] = "STAPLE consensus"
+            row["gt_source_label"] = DRAWER_POOL_LABEL
             row["gt_rtstruct_filename"] = ""
             row["gt_roi_name"] = group["organ_name"]
             row["gt_roi_number"] = 0
@@ -898,7 +899,7 @@ class MetricsWorker(QObject):
             comparison_mode=mode_label,
             was_designated_gt=bool(rater["was_designated_gt"]),
         )
-        row["gt_source_label"] = "STAPLE consensus"
+        row["gt_source_label"] = DRAWER_POOL_LABEL
         row["gt_rtstruct_filename"] = ""
         row["gt_roi_name"] = group["organ_name"]
         row["gt_roi_number"] = 0
@@ -941,15 +942,15 @@ class MetricsWorker(QObject):
         """
         row = self._make_row_skeleton(
             group,
-            source_label="STAPLE consensus",
-            test_organ="STAPLE consensus",
+            source_label=DRAWER_POOL_LABEL,
+            test_organ=DRAWER_POOL_LABEL,
             test_roi_number=0,
             test_sop="",
             similarity=0.0,
             comparison_mode=_STAPLE_DETAILS_MODE,
             was_designated_gt=False,
         )
-        row["gt_source_label"] = "STAPLE consensus"
+        row["gt_source_label"] = DRAWER_POOL_LABEL
         row["gt_rtstruct_filename"] = ""
         row["gt_roi_name"] = group["organ_name"]
         row["gt_roi_number"] = 0
@@ -974,7 +975,7 @@ class MetricsWorker(QObject):
         """
         row = self._make_row_skeleton(
             group,
-            source_label="STAPLE consensus",
+            source_label=DRAWER_POOL_LABEL,
             test_organ=group["organ_name"],
             test_roi_number=0,
             test_sop="",
@@ -982,7 +983,7 @@ class MetricsWorker(QObject):
             comparison_mode="gt_dose",
             was_designated_gt=True,
         )
-        row["gt_source_label"] = "STAPLE consensus"
+        row["gt_source_label"] = DRAWER_POOL_LABEL
         row["gt_rtstruct_filename"] = ""
         row["gt_roi_name"] = group["organ_name"]
         row["gt_roi_number"] = 0

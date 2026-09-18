@@ -54,6 +54,7 @@ from autoseg_evaluator.core.acquisition import (
     FieldSummary,
     summarise,
 )
+from autoseg_evaluator.core.staple import DRAWER_POOL_LABEL, LEGACY_DRAWER_POOL_LABEL
 from autoseg_evaluator.core.statistics import (
     ConfidenceSet,
     Description,
@@ -134,6 +135,33 @@ CONSENSUS_REFERENCE_MARKERS: tuple[str, ...] = ("staple", "consensus")
 def is_consensus_reference(label: str) -> bool:
     lowered = str(label).lower()
     return any(marker in lowered for marker in CONSENSUS_REFERENCE_MARKERS)
+
+
+def reference_rank(label: str) -> int:
+    """Which reference the report should open on, lower being better.
+
+    0. **A multi-observer consensus** (Tab 2), or any other consensus that is
+       not the drawer pool. Pooled from several observers' contours, with the
+       sources being evaluated absent from that pool — so it is the cleanest
+       reference available, and the standing instruction is to prefer it over
+       the manual contours whenever one exists.
+
+    1. **A drawn reference** — the manual ground truth, or a second reader.
+
+    2. **A drawer-pool consensus** (Tab 3's "vs STAPLE"). Ranked *below* the
+       manual contours despite being a consensus, because its pool contains the
+       very test contours being scored against it: every source is partly
+       measured against itself. That makes it a supplementary analysis rather
+       than one a report should default to.
+
+    Ordering these by name happened to work only while the two consensus labels
+    differed by the case of a single letter. Once they were given names that
+    say what they are, the circular one sorted first.
+    """
+    text = str(label)
+    if text in (DRAWER_POOL_LABEL, LEGACY_DRAWER_POOL_LABEL):
+        return 2
+    return 0 if is_consensus_reference(text) else 1
 
 
 def metric_family(metric: str) -> str:
@@ -370,28 +398,27 @@ class ReportModel:
     # ---- Inventory --------------------------------------------------------
 
     def ground_truths(self) -> list[str]:
-        """References present in the data, consensus first.
+        """References present in the data, best first.
 
-        Ordered by preference rather than alphabetically, because the first
-        entry is what the report opens on and a consensus, where one exists, is
-        the reference the cohort was built to be measured against.
+        Ordered by :func:`reference_rank`, because the first entry is what the
+        report opens on.
         """
         found = {reference for (*_rest, reference) in self.observations if reference}
-        return sorted(found, key=lambda label: (not is_consensus_reference(label), label))
+        return sorted(found, key=lambda label: (reference_rank(label), label))
 
     def preferred_ground_truth(self) -> str:
-        """The reference to open on: a consensus if one exists, else the
-        most-populated manual reference."""
+        """The reference the report opens on.
+
+        Rank decides; ties break on how many observations a reference carries,
+        so with two manual readers the one covering the cohort wins.
+        """
         available = self.ground_truths()
         if not available:
             return ""
-        consensus = [label for label in available if is_consensus_reference(label)]
-        if consensus:
-            return consensus[0]
         counts: dict[str, int] = defaultdict(int)
         for *_rest, reference in self.observations:
             counts[reference] += 1
-        return max(available, key=lambda label: (counts[label], label))
+        return min(available, key=lambda label: (reference_rank(label), -counts[label], label))
 
     def for_ground_truth(self, reference: str) -> ReportModel:
         """A view restricted to one reference.
@@ -748,6 +775,12 @@ def build_report_model(
             continue
 
         reference = str(row.get("gt_source_label") or "").strip()
+        if reference == LEGACY_DRAWER_POOL_LABEL:
+            # Sessions saved before the drawer-pool consensus had a name of its
+            # own. Mapped forward so old and new results of the same analysis
+            # pool, rather than appearing as two references that differ only in
+            # capitalisation.
+            reference = DRAWER_POOL_LABEL
         if reference:
             model.reference_sources.add(reference)
 
@@ -802,6 +835,7 @@ __all__ = [
     "HIGHER_IS_BETTER",
     "STAPLE_METRICS",
     "is_consensus_reference",
+    "reference_rank",
     "metric_family",
     "AcquisitionReport",
     "collect_acquisition",

@@ -35,6 +35,31 @@ import SimpleITK as sitk
 # ---- Configuration -------------------------------------------------------
 
 
+# ---- Reference labels ------------------------------------------------------
+#
+# Two different things get called a STAPLE consensus, and they answer different
+# questions. They lived as bare literals in two modules differing only in the
+# case of one letter — "STAPLE Consensus" against "STAPLE consensus" — so
+# telling them apart rested on nobody tidying the capitalisation, and the
+# Report tab's reference selector showed two entries a reader could not
+# distinguish.
+
+#: Tab 2's multi-observer consensus, pooled from several *observers'* structure
+#: sets and then designated as the ground truth. The sources being evaluated
+#: are not in the pool.
+MULTI_OBSERVER_LABEL = "STAPLE Consensus"
+
+#: Tab 3's per-drawer consensus, pooled from the contours in one drawer — which
+#: always includes the test contours being scored against it. A different
+#: analysis with a different caveat, so it gets a name that says so.
+DRAWER_POOL_LABEL = "STAPLE (drawer pool)"
+
+#: What :data:`DRAWER_POOL_LABEL` was called before it had a distinguishing
+#: name. Sessions saved earlier carry it, and the report maps it forward so
+#: those results do not appear as a third, phantom reference.
+LEGACY_DRAWER_POOL_LABEL = "STAPLE consensus"
+
+
 @dataclass(frozen=True)
 class StapleConfig:
     """User-facing STAPLE knobs surfaced in the Compute tab.
