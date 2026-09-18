@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -66,6 +65,13 @@ from autoseg_evaluator.data.report import (
 from autoseg_evaluator.ui.widgets.stat_plots import DistributionCanvas, ForestCanvas
 
 _ALPHA = 0.05
+
+#: Minimum height for a full-width section, in pixels. Roughly eight rows plus
+#: the header — enough that a table is usable without the page becoming a
+#: sequence of postage stamps. The tab scrolls, so this costs only scroll
+#: distance.
+SECTION_HEIGHT = 210
+SHORT_SECTION_HEIGHT = 150
 
 # ---- Column help ----------------------------------------------------------
 #
@@ -433,35 +439,27 @@ class ReportTab(QWidget):
         self._warning.setVisible(False)
         outer.addWidget(self._warning)
 
-        body = QSplitter(Qt.Orientation.Vertical, self)
-
-        tables = QSplitter(Qt.Orientation.Horizontal, body)
+        # One section per row, each spanning the window. Side-by-side panes
+        # squeezed eleven-column tables and two figures into half the width
+        # each, which is where the "bunched up" reading came from; the tab is
+        # inside a scroll area, so height is free and width is not.
         self._coverage_table = self._make_table(COVERAGE_COLUMNS)
-        tables.addWidget(self._wrap("Coverage", self._coverage_table))
+        self._coverage_table.setMinimumHeight(SECTION_HEIGHT)
+        outer.addWidget(self._wrap("Coverage", self._coverage_table))
+
         self._descriptive_table = self._make_table(DESCRIPTIVE_COLUMNS)
-        tables.addWidget(self._wrap("Descriptive statistics", self._descriptive_table))
-        tables.setSizes([420, 700])
-        body.addWidget(tables)
+        self._descriptive_table.setMinimumHeight(SECTION_HEIGHT)
+        outer.addWidget(self._wrap("Descriptive statistics", self._descriptive_table))
 
         self._comparison_table = self._make_table(COMPARISON_COLUMNS)
-        body.addWidget(self._wrap("Paired comparison", self._comparison_table))
+        self._comparison_table.setMinimumHeight(SECTION_HEIGHT)
+        outer.addWidget(self._wrap("Paired comparison", self._comparison_table))
 
-        figures = QSplitter(Qt.Orientation.Horizontal, body)
         self._distribution = DistributionCanvas()
-        figures.addWidget(self._wrap("Distributions", self._distribution))
+        outer.addWidget(self._wrap("Distributions", self._distribution))
         self._forest = ForestCanvas()
-        figures.addWidget(self._wrap("Difference from reference", self._forest))
-        body.addWidget(figures)
+        outer.addWidget(self._wrap("Difference from reference", self._forest))
 
-        body.setSizes([220, 260, 380])
-        outer.addWidget(body, stretch=1)
-
-        acquisition_row = QSplitter(Qt.Orientation.Horizontal, self)
-        self._image_table = self._make_table(ACQUISITION_COLUMNS)
-        acquisition_row.addWidget(self._wrap("Imaging", self._image_table))
-        self._rtss_table = self._make_table(ACQUISITION_COLUMNS)
-        acquisition_row.addWidget(self._wrap("Structure sets", self._rtss_table))
-        acquisition_row.setSizes([560, 560])
         self._acquisition_box = QGroupBox("Acquisition parameters", self)
         acquisition_layout = QVBoxLayout(self._acquisition_box)
         acquisition_layout.setContentsMargins(6, 6, 6, 6)
@@ -469,7 +467,14 @@ class ReportTab(QWidget):
         self._acquisition_note.setWordWrap(True)
         self._acquisition_note.setStyleSheet("color:#777; font-size:11px;")
         acquisition_layout.addWidget(self._acquisition_note)
-        acquisition_layout.addWidget(acquisition_row)
+        self._image_table = self._make_table(ACQUISITION_COLUMNS)
+        self._image_table.setMinimumHeight(SECTION_HEIGHT)
+        acquisition_layout.addWidget(QLabel("<b>Imaging</b>", self))
+        acquisition_layout.addWidget(self._image_table)
+        self._rtss_table = self._make_table(ACQUISITION_COLUMNS)
+        self._rtss_table.setMinimumHeight(SHORT_SECTION_HEIGHT)
+        acquisition_layout.addWidget(QLabel("<b>Structure sets</b>", self))
+        acquisition_layout.addWidget(self._rtss_table)
         outer.addWidget(self._acquisition_box)
 
         self._methods = QLabel("", self)
@@ -490,6 +495,9 @@ class ReportTab(QWidget):
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # Let the final column absorb the width a full-width row now has,
+        # instead of leaving a band of empty grey down the right-hand side.
+        table.horizontalHeader().setStretchLastSection(True)
         return table
 
     @staticmethod
@@ -503,8 +511,8 @@ class ReportTab(QWidget):
     # ---- Controls ---------------------------------------------------------
 
     def _repopulate_controls(self) -> None:
+        self._repopulate_metrics()
         for combo, values in (
-            (self._metric_combo, self._model.metrics()),
             (self._reference_combo, self._model.sources()),
             (self._challenger_combo, self._model.sources()),
         ):
@@ -532,6 +540,41 @@ class ReportTab(QWidget):
             self._organ_list.addItem(item)
             item.setSelected(organ in selected if selected else True)
         self._organ_list.blockSignals(False)
+
+    def _repopulate_metrics(self) -> None:
+        """Fill the metric selector, grouped and with unselectable headings.
+
+        Geometric and dosimetric metrics answer different questions on
+        different scales. In one flat list a reader scrolls from Dice to D95
+        without the change of subject registering, and the tab gives no other
+        signal that it happened.
+        """
+        combo = self._metric_combo
+        previous = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        selectable: list[str] = []
+        for family, metrics in self._model.metrics_by_family():
+            combo.addItem(f"— {family} —")
+            heading = combo.model().item(combo.count() - 1)
+            if heading is not None:
+                heading.setEnabled(False)
+                font = heading.font()
+                font.setBold(True)
+                heading.setFont(font)
+            for metric in metrics:
+                combo.addItem(metric)
+                selectable.append(metric)
+        if previous in selectable:
+            combo.setCurrentText(previous)
+        elif selectable:
+            combo.setCurrentText(selectable[0])
+        combo.blockSignals(False)
+
+    def _selected_metric(self) -> str:
+        """The chosen metric, or empty when a heading somehow ends up current."""
+        text = self._metric_combo.currentText()
+        return "" if text.startswith("— ") else text
 
     def _axis(self) -> FamilyAxis:
         data = self._axis_combo.currentData()
@@ -591,7 +634,7 @@ class ReportTab(QWidget):
 
     def _recompute(self) -> None:
         axis = self._axis()
-        metric = self._metric_combo.currentText()
+        metric = self._selected_metric()
         reference = self._reference_combo.currentText()
         challenger = self._challenger_combo.currentText()
         # Across sources the coverage and descriptive tables narrow to the one
@@ -1073,7 +1116,7 @@ class ReportTab(QWidget):
         )
         if not path:
             return
-        metric = self._metric_combo.currentText()
+        metric = self._selected_metric()
         reference = self._reference_combo.currentText()
         challenger = self._challenger_combo.currentText()
         try:

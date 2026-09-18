@@ -41,6 +41,7 @@ or a failure — so those distinctions are not invented.
 from __future__ import annotations
 
 import math
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -63,6 +64,84 @@ from autoseg_evaluator.core.statistics import (
     paired_comparison,
     with_holm,
 )
+
+# ---- Metric families ------------------------------------------------------
+
+FAMILY_GEOMETRIC = "Geometric"
+FAMILY_DOSIMETRIC = "Dosimetric"
+FAMILY_OTHER = "Other"
+FAMILY_STAPLE = "Consensus"
+
+#: Produced by the STAPLE machinery rather than by comparing two contours.
+#: Excluded from the report entirely — see :data:`_SKIP_MODES`.
+STAPLE_METRICS = frozenset(
+    {
+        "staple_sensitivity",
+        "staple_specificity",
+        "consensus_volume_cc",
+        "rater_disagreement_cc",
+        "rater_volume_range_cc",
+        "uncertain_band_cc",
+        "mean_entropy",
+        "n_raters",
+        "staple_iterations",
+        "staple_converged",
+        "staple_bbox_padding",
+        "staple_bbox_fg_ratio",
+    }
+)
+
+#: Computed from contour geometry alone.
+GEOMETRIC_METRICS = frozenset(
+    {
+        "dice",
+        "surface_dice",
+        "hausdorff100",
+        "hausdorff95",
+        "mean_surface_distance",
+        "apl_mean",
+        "apl_total",
+        "volume_gt_cc",
+        "volume_test_cc",
+        "volume_diff_cc",
+        "volume_ratio",
+        "com_offset_mm",
+        "com_dx_mm",
+        "com_dy_mm",
+        "com_dz_mm",
+        "precision",
+        "recall",
+        "sensitivity",
+        "specificity",
+    }
+)
+
+#: ``D95_gy``, ``V20gy_cc`` and friends. Static ``dmin_gy`` / ``dmean_gy`` /
+#: ``dmax_gy`` are caught by the ``_gy`` suffix.
+_DOSE_PREFIX = re.compile(r"^[dv]\d", re.IGNORECASE)
+
+
+def metric_family(metric: str) -> str:
+    """Which group a metric belongs to in the selector.
+
+    Geometric and dosimetric metrics answer different questions and are not
+    comparable, so grouping them is not decoration: a reader scanning one list
+    can otherwise slide from Dice to D95 without noticing the change of subject.
+    """
+    name = str(metric).strip()
+    lower = name.lower()
+    if lower in STAPLE_METRICS or lower.startswith("staple_"):
+        return FAMILY_STAPLE
+    if lower in GEOMETRIC_METRICS:
+        return FAMILY_GEOMETRIC
+    if lower.endswith("_gy") or "gy_cc" in lower or "gy_pct" in lower or _DOSE_PREFIX.match(lower):
+        return FAMILY_DOSIMETRIC
+    return FAMILY_OTHER
+
+
+#: Selector order. Consensus is absent because it never reaches the report.
+FAMILY_ORDER: tuple[str, ...] = (FAMILY_GEOMETRIC, FAMILY_DOSIMETRIC, FAMILY_OTHER)
+
 
 # ---- Metric direction -----------------------------------------------------
 
@@ -268,6 +347,13 @@ class ReportModel:
 
     def metrics(self) -> list[str]:
         return sorted({metric for (_o, _s, metric, _p, _link) in self.observations})
+
+    def metrics_by_family(self) -> list[tuple[str, list[str]]]:
+        """``[(family, metrics)]`` in selector order, empty families dropped."""
+        grouped: dict[str, list[str]] = defaultdict(list)
+        for metric in self.metrics():
+            grouped[metric_family(metric)].append(metric)
+        return [(family, grouped[family]) for family in FAMILY_ORDER if grouped[family]]
 
     def patients(self) -> list[str]:
         return sorted({patient for (_o, _s, _m, patient, _link) in self.observations})
@@ -551,8 +637,25 @@ def collect_acquisition(library: Any) -> AcquisitionReport:
 
 # ---- Building from results rows -------------------------------------------
 
-#: Row fields that mark a row as something other than a vendor-vs-GT comparison.
-_SKIP_MODES = {"staple details", "qualitative"}
+#: Comparison modes the report does not read.
+#:
+#: The STAPLE modes are excluded for a reason stronger than tidiness. A
+#: consensus row carries the *same* test source, organ, patient and metric keys
+#: as that contour's vs-ground-truth row, changing only ``gt_source_label`` — so
+#: its observation key collides, and one of the two was being dropped as a
+#: conflicting observation, with the winner decided by row order. Beyond that
+#: they are not on the same footing: a consensus row measures agreement with a
+#: synthetic reference built partly from the source being judged.
+_SKIP_MODES = {
+    "staple details",
+    "qualitative",
+    "multi-observer staple",
+    "generic staple with gt",
+    "generic staple no gt",
+}
+
+#: Reference labels that are not a real contour set.
+_SKIP_REFERENCES = {"staple consensus"}
 
 
 def build_report_model(
@@ -577,6 +680,10 @@ def build_report_model(
             continue
 
         reference = str(row.get("gt_source_label") or "").strip()
+        if reference.lower() in _SKIP_REFERENCES:
+            # Belt and braces: a consensus comparison under an unrecognised
+            # mode label would otherwise collide with the vs-GT row.
+            continue
         if reference:
             model.reference_sources.add(reference)
 
@@ -595,6 +702,10 @@ def build_report_model(
         for metric, value in metrics.items():
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue
+            if metric_family(metric) is FAMILY_STAPLE:
+                # Describes the consensus construction, not a contour
+                # comparison, so it has no place among the paired tests.
+                continue
             key = (organ, source, str(metric), patient, linkage)
             if key in model.observations:
                 # A second row for the same contour adds no information, and
@@ -612,7 +723,15 @@ def build_report_model(
 
 
 __all__ = [
+    "FAMILY_DOSIMETRIC",
+    "FAMILY_GEOMETRIC",
+    "FAMILY_ORDER",
+    "FAMILY_OTHER",
+    "FAMILY_STAPLE",
+    "GEOMETRIC_METRICS",
     "HIGHER_IS_BETTER",
+    "STAPLE_METRICS",
+    "metric_family",
     "AcquisitionReport",
     "collect_acquisition",
     "FamilyAxis",

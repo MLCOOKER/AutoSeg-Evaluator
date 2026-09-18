@@ -493,3 +493,119 @@ def test_the_axis_nouns_are_usable_for_prose():
     assert FamilyAxis.ORGANS.plural == "organs"
     assert FamilyAxis.SOURCES.noun == "source"
     assert FamilyAxis.SOURCES.plural == "sources"
+
+
+# ---- Metric families ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("metric", "expected"),
+    [
+        ("dice", "Geometric"),
+        ("surface_dice", "Geometric"),
+        ("hausdorff95", "Geometric"),
+        ("volume_diff_cc", "Geometric"),
+        ("com_offset_mm", "Geometric"),
+        ("precision", "Geometric"),
+        ("dmin_gy", "Dosimetric"),
+        ("dmean_gy", "Dosimetric"),
+        ("D95_gy", "Dosimetric"),
+        ("V20gy_cc", "Dosimetric"),
+        ("V40Gy_pct", "Dosimetric"),
+        ("staple_sensitivity", "Consensus"),
+        ("mean_entropy", "Consensus"),
+        ("n_raters", "Consensus"),
+        ("something_else", "Other"),
+    ],
+)
+def test_metric_family(metric, expected):
+    from autoseg_evaluator.data.report import metric_family
+
+    assert metric_family(metric) == expected
+
+
+def test_metrics_are_grouped_for_the_selector():
+    """Geometric before dosimetric, and no empty group offered."""
+    rows = [
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.8, "hausdorff95": 3.0, "dmean_gy": 30.0}),
+    ]
+    model = build_report_model(rows)
+    assert model.metrics_by_family() == [
+        ("Geometric", ["dice", "hausdorff95"]),
+        ("Dosimetric", ["dmean_gy"]),
+    ]
+
+
+def test_a_cohort_with_no_dose_offers_no_dose_group():
+    model = build_report_model([_row("P1", "Parotid (L)", "VendorA", {"dice": 0.8})])
+    assert model.metrics_by_family() == [("Geometric", ["dice"])]
+
+
+# ---- Consensus rows are not comparisons -----------------------------------
+
+
+def _staple_row(patient, organ, source, metrics, mode="Multi-observer STAPLE"):
+    row = _row(patient, organ, source, metrics)
+    row["comparison_mode"] = mode
+    row["gt_source_label"] = "STAPLE consensus"
+    return row
+
+
+def test_a_consensus_row_does_not_displace_the_ground_truth_row():
+    """The collision this exclusion exists to prevent.
+
+    A consensus row carries the same source, organ, patient and metric keys as
+    that contour's vs-ground-truth row — only the reference label differs — so
+    the observation keys were identical and one was dropped as a conflict, with
+    the winner decided by whichever row happened to arrive first.
+    """
+    rows = [
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
+        _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.99}),
+    ]
+    model = build_report_model(rows)
+    assert model.values("Parotid (L)", "VendorA", "dice") == {"P1": 0.80}
+    assert model.conflicting_observations == 0
+
+    # And in the other order, which is what made it order-dependent.
+    model = build_report_model(list(reversed(rows)))
+    assert model.values("Parotid (L)", "VendorA", "dice") == {"P1": 0.80}
+    assert model.conflicting_observations == 0
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["Multi-observer STAPLE", "Generic STAPLE with GT", "Generic STAPLE no GT", "STAPLE Details"],
+)
+def test_every_consensus_mode_is_excluded(mode):
+    rows = [
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
+        _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.99}, mode=mode),
+    ]
+    model = build_report_model(rows)
+    assert model.values("Parotid (L)", "VendorA", "dice") == {"P1": 0.80}
+
+
+def test_a_consensus_reference_is_excluded_under_any_mode_label():
+    """Belt and braces: a new mode name must not reopen the collision."""
+    rows = [
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
+        _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.99}, mode="Some Future Mode"),
+    ]
+    model = build_report_model(rows)
+    assert model.values("Parotid (L)", "VendorA", "dice") == {"P1": 0.80}
+    assert "STAPLE consensus" not in model.reference_sources
+
+
+def test_consensus_metrics_are_dropped_even_from_an_ordinary_row():
+    """They describe how the consensus was built, not a contour comparison."""
+    rows = [
+        _row(
+            "P1",
+            "Parotid (L)",
+            "VendorA",
+            {"dice": 0.80, "staple_sensitivity": 0.9, "mean_entropy": 0.2, "n_raters": 4},
+        )
+    ]
+    model = build_report_model(rows)
+    assert model.metrics() == ["dice"]

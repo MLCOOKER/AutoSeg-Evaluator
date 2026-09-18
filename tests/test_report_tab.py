@@ -940,3 +940,113 @@ def test_the_acquisition_section_survives_a_library_with_nothing_in_it(tab):
     tab.set_library(type("Lib", (), {"patients": {}})())
     assert tab._image_table.rowCount() == 0
     assert "Load a folder on Tab 1" in tab._acquisition_note.text()
+
+
+# ---- Layout and the metric selector ---------------------------------------
+
+
+def test_every_section_spans_the_full_width(tab):
+    """Side-by-side panes squeezed eleven-column tables into half the window.
+
+    The tab lives in a scroll area, so vertical space is free and horizontal
+    space is not; nothing is laid out beside anything else any more.
+    """
+    from PySide6.QtWidgets import QSplitter
+
+    assert tab.findChildren(QSplitter) == []
+
+
+def test_tables_claim_the_width_rather_than_leaving_it_grey(tab):
+    for table in (
+        tab._coverage_table,
+        tab._descriptive_table,
+        tab._comparison_table,
+        tab._image_table,
+        tab._rtss_table,
+    ):
+        assert table.horizontalHeader().stretchLastSection()
+
+
+def test_sections_are_tall_enough_to_read(tab):
+    from autoseg_evaluator.ui.tabs.report import SECTION_HEIGHT
+
+    for table in (tab._coverage_table, tab._descriptive_table, tab._comparison_table):
+        assert table.minimumHeight() >= SECTION_HEIGHT
+
+
+def _dose_rows():
+    rows = _rows()
+    for row in rows:
+        row["metrics"]["dmean_gy"] = 30.0
+        row["metrics"]["D95_gy"] = 28.0
+    return rows
+
+
+@pytest.fixture
+def dose_tab(qapp):
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(_dose_rows())
+    widget.set_results_manager(manager)
+    widget.refresh()
+    yield widget
+    widget.deleteLater()
+
+
+def test_the_metric_selector_groups_geometric_and_dosimetric(dose_tab):
+    """In one flat list a reader slides from Dice to D95 without noticing."""
+    combo = dose_tab._metric_combo
+    entries = [(combo.itemText(i), combo.model().item(i).isEnabled()) for i in range(combo.count())]
+    assert entries == [
+        ("— Geometric —", False),
+        ("dice", True),
+        ("hausdorff95", True),
+        ("— Dosimetric —", False),
+        ("D95_gy", True),
+        ("dmean_gy", True),
+    ]
+
+
+def test_a_group_heading_cannot_be_chosen(dose_tab):
+    """Disabled in the popup, and guarded in case it is current anyway."""
+    dose_tab._metric_combo.setCurrentIndex(0)  # the heading
+    assert dose_tab._selected_metric() == ""
+    dose_tab._metric_combo.setCurrentText("dmean_gy")
+    assert dose_tab._selected_metric() == "dmean_gy"
+
+
+def test_the_selector_opens_on_a_real_metric(dose_tab):
+    assert dose_tab._selected_metric() == "dice"
+
+
+def test_switching_to_a_dose_metric_recomputes(dose_tab):
+    dose_tab._reference_combo.setCurrentText(REFERENCE)
+    dose_tab._challenger_combo.setCurrentText(CHALLENGER)
+    dose_tab._metric_combo.setCurrentText("dmean_gy")
+    _select(dose_tab, ["Parotid (L)"])
+    row = _find(dose_tab._comparison_table, "Parotid (L)")
+    # Both sources were given the same dose, so there is nothing to detect.
+    assert row["Reading"] == "no detectable difference"
+    assert "dmean_gy" in dose_tab._methods.text()
+
+
+def test_consensus_metrics_never_reach_the_selector(qapp):
+    rows = _rows()
+    for row in list(rows):
+        staple = dict(row)
+        staple["comparison_mode"] = "Multi-observer STAPLE"
+        staple["gt_source_label"] = "STAPLE consensus"
+        staple["metrics"] = {"dice": 0.99, "staple_sensitivity": 0.9, "mean_entropy": 0.2}
+        rows.append(staple)
+
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+
+    offered = [widget._metric_combo.itemText(i) for i in range(widget._metric_combo.count())]
+    assert not any("staple" in text or "entropy" in text for text in offered)
+    assert "STAPLE consensus" not in widget._model.sources()
+    assert widget._model.conflicting_observations == 0
+    widget.deleteLater()
