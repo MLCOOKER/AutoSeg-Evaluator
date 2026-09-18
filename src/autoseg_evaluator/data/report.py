@@ -76,8 +76,6 @@ FAMILY_STAPLE = "Consensus"
 #: Excluded from the report entirely — see :data:`_SKIP_MODES`.
 STAPLE_METRICS = frozenset(
     {
-        "staple_sensitivity",
-        "staple_specificity",
         "consensus_volume_cc",
         "rater_disagreement_cc",
         "rater_volume_range_cc",
@@ -109,6 +107,12 @@ GEOMETRIC_METRICS = frozenset(
         "com_dx_mm",
         "com_dy_mm",
         "com_dz_mm",
+        # Per-vendor agreement with the consensus, computed alongside the
+        # geometric metrics when a STAPLE consensus is the ground truth. These
+        # describe one source's contour, not how the consensus was built, so
+        # they are comparable across vendors like any other paired metric.
+        "staple_sensitivity",
+        "staple_specificity",
         "precision",
         "recall",
         "sensitivity",
@@ -121,6 +125,17 @@ GEOMETRIC_METRICS = frozenset(
 _DOSE_PREFIX = re.compile(r"^[dv]\d", re.IGNORECASE)
 
 
+#: A reference label containing any of these is taken to be a built consensus
+#: rather than a drawn contour set. Matched on the label because that is all a
+#: results row carries; the synthetic entry is labelled "STAPLE Consensus".
+CONSENSUS_REFERENCE_MARKERS: tuple[str, ...] = ("staple", "consensus")
+
+
+def is_consensus_reference(label: str) -> bool:
+    lowered = str(label).lower()
+    return any(marker in lowered for marker in CONSENSUS_REFERENCE_MARKERS)
+
+
 def metric_family(metric: str) -> str:
     """Which group a metric belongs to in the selector.
 
@@ -130,10 +145,10 @@ def metric_family(metric: str) -> str:
     """
     name = str(metric).strip()
     lower = name.lower()
-    if lower in STAPLE_METRICS or lower.startswith("staple_"):
-        return FAMILY_STAPLE
     if lower in GEOMETRIC_METRICS:
         return FAMILY_GEOMETRIC
+    if lower in STAPLE_METRICS or lower.startswith("staple_"):
+        return FAMILY_STAPLE
     if lower.endswith("_gy") or "gy_cc" in lower or "gy_pct" in lower or _DOSE_PREFIX.match(lower):
         return FAMILY_DOSIMETRIC
     return FAMILY_OTHER
@@ -308,13 +323,21 @@ class Observation:
 class ReportModel:
     """Everything the Report tab needs, derived once from the results rows."""
 
-    observations: dict[tuple[str, str, str, str, str], float] = field(default_factory=dict)
-    """``(organ, source, metric, patient, linkage) -> value``, deduplicated.
+    observations: dict[tuple[str, str, str, str, str, str], float] = field(default_factory=dict)
+    """``(organ, source, metric, patient, linkage, reference) -> value``.
 
-    The last two together are the **case**. Rows predating the linkage stamp
-    carry an empty linkage and so behave exactly as before: one case per
-    patient.
+    ``patient`` and ``linkage`` together are the **case**. Rows predating the
+    linkage stamp carry an empty linkage and so behave exactly as before: one
+    case per patient.
+
+    ``reference`` is what the metric was measured against — a manual ground
+    truth, or a STAPLE consensus. It belongs in the key because the same
+    contour compared against two references is two different measurements; with
+    it absent they collided and one was silently discarded.
     """
+
+    active_ground_truth: str = ""
+    """Which reference this view is restricted to. Empty means unrestricted."""
 
     reference_sources: set[str] = field(default_factory=set)
     """Labels that acted as ground truth. Never comparators."""
@@ -334,19 +357,74 @@ class ReportModel:
 
     _patients_by_source: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     _patients_by_organ: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
+    _by_reference: dict[str, tuple[dict[str, set[str]], dict[str, set[str]]]] = field(
+        default_factory=dict
+    )
+    """``reference -> (patients by source, patients by organ)`` for that reference.
+
+    Kept so a restricted view can rebuild its coverage denominators. Counting a
+    patient as eligible because they appear under a *different* ground truth
+    would overstate what the shown comparison could have used.
+    """
 
     # ---- Inventory --------------------------------------------------------
 
+    def ground_truths(self) -> list[str]:
+        """References present in the data, consensus first.
+
+        Ordered by preference rather than alphabetically, because the first
+        entry is what the report opens on and a consensus, where one exists, is
+        the reference the cohort was built to be measured against.
+        """
+        found = {reference for (*_rest, reference) in self.observations if reference}
+        return sorted(found, key=lambda label: (not is_consensus_reference(label), label))
+
+    def preferred_ground_truth(self) -> str:
+        """The reference to open on: a consensus if one exists, else the
+        most-populated manual reference."""
+        available = self.ground_truths()
+        if not available:
+            return ""
+        consensus = [label for label in available if is_consensus_reference(label)]
+        if consensus:
+            return consensus[0]
+        counts: dict[str, int] = defaultdict(int)
+        for *_rest, reference in self.observations:
+            counts[reference] += 1
+        return max(available, key=lambda label: (counts[label], label))
+
+    def for_ground_truth(self, reference: str) -> ReportModel:
+        """A view restricted to one reference.
+
+        Returns self unchanged when the reference is empty or the data holds
+        only that one, so the single-ground-truth case costs nothing.
+        """
+        if not reference or self.ground_truths() == [reference]:
+            return self
+        by_source, by_organ = self._by_reference.get(reference, ({}, {}))
+        return ReportModel(
+            observations={
+                key: value for key, value in self.observations.items() if key[5] == reference
+            },
+            reference_sources=set(self.reference_sources),
+            duplicates_collapsed=self.duplicates_collapsed,
+            conflicting_observations=self.conflicting_observations,
+            active_ground_truth=reference,
+            _patients_by_source=defaultdict(set, {k: set(v) for k, v in by_source.items()}),
+            _patients_by_organ=defaultdict(set, {k: set(v) for k, v in by_organ.items()}),
+            _by_reference=self._by_reference,
+        )
+
     def sources(self) -> list[str]:
         """Test sources available for comparison, ground truth excluded."""
-        found = {source for (_organ, source, _metric, _patient, _link) in self.observations}
+        found = {source for (_organ, source, _metric, _patient, _link, _ref) in self.observations}
         return sorted(found - self.reference_sources)
 
     def organs(self) -> list[str]:
-        return sorted({organ for (organ, _s, _m, _p, _link) in self.observations})
+        return sorted({organ for (organ, _s, _m, _p, _link, _ref) in self.observations})
 
     def metrics(self) -> list[str]:
-        return sorted({metric for (_o, _s, metric, _p, _link) in self.observations})
+        return sorted({metric for (_o, _s, metric, _p, _link, _ref) in self.observations})
 
     def metrics_by_family(self) -> list[tuple[str, list[str]]]:
         """``[(family, metrics)]`` in selector order, empty families dropped."""
@@ -356,7 +434,7 @@ class ReportModel:
         return [(family, grouped[family]) for family in FAMILY_ORDER if grouped[family]]
 
     def patients(self) -> list[str]:
-        return sorted({patient for (_o, _s, _m, patient, _link) in self.observations})
+        return sorted({patient for (_o, _s, _m, patient, _link, _ref) in self.observations})
 
     # ---- Samples ----------------------------------------------------------
 
@@ -364,7 +442,7 @@ class ReportModel:
         """``{(patient, linkage): value}`` for one cell — every case, as stored."""
         return {
             (patient, linkage): value
-            for (o, s, m, patient, linkage), value in self.observations.items()
+            for (o, s, m, patient, linkage, _ref), value in self.observations.items()
             if o == organ and s == source and m == metric
         }
 
@@ -637,25 +715,15 @@ def collect_acquisition(library: Any) -> AcquisitionReport:
 
 # ---- Building from results rows -------------------------------------------
 
-#: Comparison modes the report does not read.
+#: Comparison modes that are not a contour-versus-contour comparison at all.
+#: ``STAPLE Details`` rows describe how a consensus was built — one row per
+#: organ, not per source — and qualitative rows carry Likert scores.
 #:
-#: The STAPLE modes are excluded for a reason stronger than tidiness. A
-#: consensus row carries the *same* test source, organ, patient and metric keys
-#: as that contour's vs-ground-truth row, changing only ``gt_source_label`` — so
-#: its observation key collides, and one of the two was being dropped as a
-#: conflicting observation, with the winner decided by row order. Beyond that
-#: they are not on the same footing: a consensus row measures agreement with a
-#: synthetic reference built partly from the source being judged.
-_SKIP_MODES = {
-    "staple details",
-    "qualitative",
-    "multi-observer staple",
-    "generic staple with gt",
-    "generic staple no gt",
-}
-
-#: Reference labels that are not a real contour set.
-_SKIP_REFERENCES = {"staple consensus"}
+#: Consensus *comparisons* are deliberately not here. Measuring every source
+#: against a multi-observer consensus is a real analysis, and the reason it
+#: once collided with the manual-ground-truth rows was that the reference was
+#: missing from the observation key, not that the rows were unwanted.
+_SKIP_MODES = {"staple details", "qualitative"}
 
 
 def build_report_model(
@@ -680,10 +748,6 @@ def build_report_model(
             continue
 
         reference = str(row.get("gt_source_label") or "").strip()
-        if reference.lower() in _SKIP_REFERENCES:
-            # Belt and braces: a consensus comparison under an unrecognised
-            # mode label would otherwise collide with the vs-GT row.
-            continue
         if reference:
             model.reference_sources.add(reference)
 
@@ -697,6 +761,11 @@ def build_report_model(
 
         model._patients_by_source[source].add(patient)
         model._patients_by_organ[organ].add(patient)
+        per_source, per_organ = model._by_reference.setdefault(
+            reference, (defaultdict(set), defaultdict(set))
+        )
+        per_source[source].add(patient)
+        per_organ[organ].add(patient)
 
         metrics = row.get("metrics") or {}
         for metric, value in metrics.items():
@@ -706,7 +775,7 @@ def build_report_model(
                 # Describes the consensus construction, not a contour
                 # comparison, so it has no place among the paired tests.
                 continue
-            key = (organ, source, str(metric), patient, linkage)
+            key = (organ, source, str(metric), patient, linkage, reference)
             if key in model.observations:
                 # A second row for the same contour adds no information, and
                 # letting it through would give one case two votes in a paired
@@ -723,6 +792,7 @@ def build_report_model(
 
 
 __all__ = [
+    "CONSENSUS_REFERENCE_MARKERS",
     "FAMILY_DOSIMETRIC",
     "FAMILY_GEOMETRIC",
     "FAMILY_ORDER",
@@ -731,6 +801,7 @@ __all__ = [
     "GEOMETRIC_METRICS",
     "HIGHER_IS_BETTER",
     "STAPLE_METRICS",
+    "is_consensus_reference",
     "metric_family",
     "AcquisitionReport",
     "collect_acquisition",

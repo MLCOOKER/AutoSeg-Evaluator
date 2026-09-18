@@ -668,7 +668,7 @@ def test_an_organ_untouched_by_the_second_course_keeps_every_patient(reirradiati
 
 def test_rows_without_a_linkage_behave_exactly_as_before(tab):
     """Sessions computed before the stamp existed must not change meaning."""
-    assert all(linkage == "" for (_o, _s, _m, _p, linkage) in tab._model.observations)
+    assert all(linkage == "" for (_o, _s, _m, _p, linkage, _ref) in tab._model.observations)
     assert tab._model.multi_case_patients("Parotid (L)", REFERENCE, "dice") == set()
     assert len(tab._model.values("Parotid (L)", REFERENCE, "dice")) == PATIENTS
 
@@ -1030,23 +1030,119 @@ def test_switching_to_a_dose_metric_recomputes(dose_tab):
     assert "dmean_gy" in dose_tab._methods.text()
 
 
-def test_consensus_metrics_never_reach_the_selector(qapp):
+def _with_consensus():
+    """The same cohort, also compared against a Tab 2 consensus.
+
+    Each vendor agrees with the consensus differently than it does with the
+    manual contours — which is the whole reason the choice of reference is a
+    choice. A constant shift applied to every vendor would leave the paired
+    differences identical and the switch would look inert.
+    """
+    shift = {REFERENCE: 0.06, CHALLENGER: 0.02, THIRD: 0.04}
     rows = _rows()
     for row in list(rows):
-        staple = dict(row)
-        staple["comparison_mode"] = "Multi-observer STAPLE"
-        staple["gt_source_label"] = "STAPLE consensus"
-        staple["metrics"] = {"dice": 0.99, "staple_sensitivity": 0.9, "mean_entropy": 0.2}
-        rows.append(staple)
+        consensus = dict(row)
+        consensus["comparison_mode"] = "Multi-observer STAPLE"
+        consensus["gt_source_label"] = "STAPLE Consensus"
+        consensus["metrics"] = {
+            "dice": min(1.0, row["metrics"]["dice"] + shift[row["test_source_label"]]),
+            "staple_sensitivity": 0.9,
+            "mean_entropy": 0.2,
+        }
+        rows.append(consensus)
+    return rows
 
+
+@pytest.fixture
+def consensus_tab(qapp):
     widget = ReportTab()
     manager = ResultsManager()
-    manager.add_rows(rows)
+    manager.add_rows(_with_consensus())
     widget.set_results_manager(manager)
     widget.refresh()
-
-    offered = [widget._metric_combo.itemText(i) for i in range(widget._metric_combo.count())]
-    assert not any("staple" in text or "entropy" in text for text in offered)
-    assert "STAPLE consensus" not in widget._model.sources()
-    assert widget._model.conflicting_observations == 0
+    yield widget
     widget.deleteLater()
+
+
+def test_the_tab_opens_on_the_consensus_when_one_exists(consensus_tab):
+    """User ruling: a consensus built on Tab 2 outranks the manual contours."""
+    assert consensus_tab._ground_truth_combo.currentText() == "STAPLE Consensus"
+    assert consensus_tab._ground_truth_combo.isEnabled()
+    assert "vs STAPLE Consensus" in consensus_tab._summary_label.text()
+
+
+def test_both_references_are_offered(consensus_tab):
+    offered = [
+        consensus_tab._ground_truth_combo.itemText(i)
+        for i in range(consensus_tab._ground_truth_combo.count())
+    ]
+    assert offered == ["STAPLE Consensus", "Manual"]
+
+
+def test_switching_reference_changes_the_numbers(consensus_tab):
+    consensus_tab._metric_combo.setCurrentText("dice")
+    consensus_tab._reference_combo.setCurrentText(REFERENCE)
+    consensus_tab._challenger_combo.setCurrentText(CHALLENGER)
+    _select(consensus_tab, ["Parotid (L)"])
+    against_consensus = _find(consensus_tab._comparison_table, "Parotid (L)")["HL difference"]
+
+    consensus_tab._ground_truth_combo.setCurrentText("Manual")
+    _select(consensus_tab, ["Parotid (L)"])
+    against_manual = _find(consensus_tab._comparison_table, "Parotid (L)")["HL difference"]
+
+    assert "vs Manual" in consensus_tab._summary_label.text()
+    # Same contours, different reference — the comparison is a different one.
+    assert against_consensus != against_manual
+
+
+def test_the_consensus_is_never_offered_as_a_comparator(consensus_tab):
+    """It is the reference, so it cannot also be one of the things compared."""
+    offered = [
+        consensus_tab._reference_combo.itemText(i)
+        for i in range(consensus_tab._reference_combo.count())
+    ]
+    assert "STAPLE Consensus" not in offered
+    assert offered == [REFERENCE, CHALLENGER, THIRD]
+
+
+def test_per_vendor_consensus_metrics_are_offered(consensus_tab):
+    """Sensitivity against the consensus describes a vendor, so it is comparable."""
+    offered = [
+        consensus_tab._metric_combo.itemText(i) for i in range(consensus_tab._metric_combo.count())
+    ]
+    assert "staple_sensitivity" in offered
+    assert "mean_entropy" not in offered  # describes the build, not a vendor
+
+
+def test_a_single_reference_cohort_gets_no_pointless_choice(tab):
+    assert tab._ground_truth_combo.currentText() == "Manual"
+    assert not tab._ground_truth_combo.isEnabled()
+
+
+def test_the_metric_list_follows_the_ground_truth(consensus_tab):
+    """The two references need not carry the same metrics.
+
+    A consensus comparison adds per-vendor agreement metrics and, in this
+    cohort, carries no Hausdorff. A selector built once for the opening
+    reference offers metrics the other does not have, and hides metrics it does.
+    """
+    consensus_tab._ground_truth_combo.setCurrentText("STAPLE Consensus")
+    offered = [
+        consensus_tab._metric_combo.itemText(i) for i in range(consensus_tab._metric_combo.count())
+    ]
+    assert "staple_sensitivity" in offered
+    assert "hausdorff95" not in offered
+
+    consensus_tab._ground_truth_combo.setCurrentText("Manual")
+    offered = [
+        consensus_tab._metric_combo.itemText(i) for i in range(consensus_tab._metric_combo.count())
+    ]
+    assert "hausdorff95" in offered
+    assert "staple_sensitivity" not in offered
+
+
+def test_a_metric_shared_by_both_references_survives_the_switch(consensus_tab):
+    """Switching reference should not silently reset what is being analysed."""
+    consensus_tab._metric_combo.setCurrentText("dice")
+    consensus_tab._ground_truth_combo.setCurrentText("Manual")
+    assert consensus_tab._selected_metric() == "dice"

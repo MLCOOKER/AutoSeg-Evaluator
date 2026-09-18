@@ -512,7 +512,10 @@ def test_the_axis_nouns_are_usable_for_prose():
         ("D95_gy", "Dosimetric"),
         ("V20gy_cc", "Dosimetric"),
         ("V40Gy_pct", "Dosimetric"),
-        ("staple_sensitivity", "Consensus"),
+        # Per-vendor agreement with the consensus, so comparable like Dice.
+        ("staple_sensitivity", "Geometric"),
+        ("staple_specificity", "Geometric"),
+        # Properties of how the consensus was built, one per organ.
         ("mean_entropy", "Consensus"),
         ("n_raters", "Consensus"),
         ("something_else", "Other"),
@@ -541,71 +544,127 @@ def test_a_cohort_with_no_dose_offers_no_dose_group():
     assert model.metrics_by_family() == [("Geometric", ["dice"])]
 
 
-# ---- Consensus rows are not comparisons -----------------------------------
+# ---- A consensus is a ground truth, not a contaminant ----------------------
 
 
 def _staple_row(patient, organ, source, metrics, mode="Multi-observer STAPLE"):
     row = _row(patient, organ, source, metrics)
     row["comparison_mode"] = mode
-    row["gt_source_label"] = "STAPLE consensus"
+    row["gt_source_label"] = "STAPLE Consensus"
     return row
 
 
-def test_a_consensus_row_does_not_displace_the_ground_truth_row():
-    """The collision this exclusion exists to prevent.
+def test_the_reference_is_part_of_the_observation():
+    """The same contour measured against two references is two measurements.
 
-    A consensus row carries the same source, organ, patient and metric keys as
-    that contour's vs-ground-truth row — only the reference label differs — so
-    the observation keys were identical and one was dropped as a conflict, with
-    the winner decided by whichever row happened to arrive first.
+    With the reference missing from the key they collided, and one was dropped
+    as a conflicting observation with the winner decided by row order. Both are
+    now kept, and the report shows one reference at a time.
     """
     rows = [
         _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
         _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.99}),
     ]
     model = build_report_model(rows)
-    assert model.values("Parotid (L)", "VendorA", "dice") == {"P1": 0.80}
     assert model.conflicting_observations == 0
+    assert len(model.observations) == 2
+    assert set(model.ground_truths()) == {"manual", "STAPLE Consensus"}
 
-    # And in the other order, which is what made it order-dependent.
-    model = build_report_model(list(reversed(rows)))
-    assert model.values("Parotid (L)", "VendorA", "dice") == {"P1": 0.80}
-    assert model.conflicting_observations == 0
+    # And the order they arrive in changes nothing.
+    reversed_model = build_report_model(list(reversed(rows)))
+    assert len(reversed_model.observations) == 2
+    assert reversed_model.conflicting_observations == 0
+
+
+def test_a_view_shows_one_reference_at_a_time():
+    rows = [
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
+        _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.99}),
+    ]
+    model = build_report_model(rows)
+    assert model.for_ground_truth("manual").values("Parotid (L)", "VendorA", "dice") == {"P1": 0.80}
+    assert model.for_ground_truth("STAPLE Consensus").values("Parotid (L)", "VendorA", "dice") == {
+        "P1": 0.99
+    }
+
+
+def test_a_consensus_is_preferred_when_one_exists():
+    """User ruling: a consensus built on Tab 2 is what the cohort is measured against."""
+    rows = [
+        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
+        _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.99}),
+    ]
+    model = build_report_model(rows)
+    assert model.preferred_ground_truth() == "STAPLE Consensus"
+    assert model.ground_truths()[0] == "STAPLE Consensus"
+
+
+def test_without_a_consensus_the_busiest_reference_wins():
+    rows = [_row(f"P{i}", "Parotid (L)", "VendorA", {"dice": 0.8}) for i in range(5)]
+    sparse = _row("P9", "Parotid (L)", "VendorA", {"dice": 0.8}, gt="second reader")
+    model = build_report_model([*rows, sparse])
+    assert model.preferred_ground_truth() == "manual"
 
 
 @pytest.mark.parametrize(
-    "mode",
-    ["Multi-observer STAPLE", "Generic STAPLE with GT", "Generic STAPLE no GT", "STAPLE Details"],
+    "mode", ["Multi-observer STAPLE", "Generic STAPLE with GT", "Generic STAPLE no GT"]
 )
-def test_every_consensus_mode_is_excluded(mode):
+def test_consensus_comparisons_are_analysed_not_discarded(mode):
+    """Measuring every source against a consensus is a real analysis."""
     rows = [
-        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
-        _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.99}, mode=mode),
+        _staple_row(f"P{i}", "Parotid (L)", "VendorA", {"dice": 0.8}, mode=mode) for i in range(4)
     ]
     model = build_report_model(rows)
-    assert model.values("Parotid (L)", "VendorA", "dice") == {"P1": 0.80}
+    assert len(model.values("Parotid (L)", "VendorA", "dice")) == 4
+    assert model.ground_truths() == ["STAPLE Consensus"]
 
 
-def test_a_consensus_reference_is_excluded_under_any_mode_label():
-    """Belt and braces: a new mode name must not reopen the collision."""
+def test_the_details_row_is_still_not_a_comparison():
+    """One row per organ describing how the consensus was built, not per source."""
     rows = [
-        _row("P1", "Parotid (L)", "VendorA", {"dice": 0.80}),
-        _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.99}, mode="Some Future Mode"),
-    ]
-    model = build_report_model(rows)
-    assert model.values("Parotid (L)", "VendorA", "dice") == {"P1": 0.80}
-    assert "STAPLE consensus" not in model.reference_sources
-
-
-def test_consensus_metrics_are_dropped_even_from_an_ordinary_row():
-    """They describe how the consensus was built, not a contour comparison."""
-    rows = [
-        _row(
-            "P1",
-            "Parotid (L)",
-            "VendorA",
-            {"dice": 0.80, "staple_sensitivity": 0.9, "mean_entropy": 0.2, "n_raters": 4},
-        )
+        _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.8}),
+        _staple_row("P1", "Parotid (L)", "VendorA", {"mean_entropy": 0.2}, mode="STAPLE Details"),
     ]
     model = build_report_model(rows)
     assert model.metrics() == ["dice"]
+
+
+def test_construction_metrics_are_dropped_but_per_vendor_ones_are_kept():
+    """Sensitivity against the consensus describes a vendor; entropy describes the build."""
+    rows = [
+        _staple_row(
+            "P1",
+            "Parotid (L)",
+            "VendorA",
+            {
+                "dice": 0.80,
+                "staple_sensitivity": 0.91,
+                "staple_specificity": 0.99,
+                "mean_entropy": 0.2,
+                "n_raters": 4,
+                "consensus_volume_cc": 12.5,
+            },
+        )
+    ]
+    model = build_report_model(rows)
+    assert model.metrics() == ["dice", "staple_sensitivity", "staple_specificity"]
+
+
+def test_a_single_reference_view_is_the_model_itself():
+    """The ordinary case must not pay for the feature."""
+    model = build_report_model([_row("P1", "Parotid (L)", "VendorA", {"dice": 0.8})])
+    assert model.for_ground_truth("manual") is model
+    assert model.for_ground_truth("") is model
+
+
+def test_coverage_does_not_borrow_patients_from_another_reference():
+    """A patient seen only under the manual GT is not eligible under the consensus."""
+    rows = [
+        _staple_row("P1", "Parotid (L)", "VendorA", {"dice": 0.8}),
+        _row("P2", "Parotid (L)", "VendorA", {"dice": 0.8}),
+        _row("P3", "Parotid (L)", "VendorA", {"dice": 0.8}),
+    ]
+    model = build_report_model(rows).for_ground_truth("STAPLE Consensus")
+    cell = model.coverage("Parotid (L)", "dice", "VendorA")
+    assert cell.produced == 1
+    assert cell.eligible == 1  # P2 and P3 belong to the other reference

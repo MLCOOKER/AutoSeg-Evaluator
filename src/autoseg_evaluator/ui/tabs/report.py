@@ -303,6 +303,9 @@ class ReportTab(QWidget):
         self._results: Any = None
         self._library: Any = None
         self._acquisition = AcquisitionReport()
+        #: Every observation, across every ground truth.
+        self._all: ReportModel = ReportModel()
+        #: The one ground truth currently on screen. Everything reads this.
         self._model: ReportModel = ReportModel()
         self._family: dict = {}
         self._build_ui()
@@ -322,7 +325,8 @@ class ReportTab(QWidget):
     def refresh(self) -> None:
         """Rebuild from the current results. Cheap — no metric is recomputed."""
         rows = self._results.rows() if self._results is not None else []
-        self._model = build_report_model(rows)
+        self._all = build_report_model(rows)
+        self._model = self._all
         # Independent of the metric rows: a cohort has acquisition parameters
         # whether or not anything has been computed on it yet.
         self._acquisition = collect_acquisition(self._library)
@@ -355,6 +359,20 @@ class ReportTab(QWidget):
         form = QHBoxLayout(controls)
 
         left = QFormLayout()
+        self._ground_truth_combo = QComboBox(self)
+        self._ground_truth_combo.setToolTip(
+            _tip(
+                "What every metric on this page was measured against.",
+                "A cohort can hold more than one: the manual contours, and a "
+                "multi-observer STAPLE consensus built on Tab 2. The same contour "
+                "measured against both is two different measurements, so only one "
+                "is shown at a time.",
+                "A consensus is selected by default where one exists — it is what "
+                "the cohort was built to be measured against.",
+            )
+        )
+        self._ground_truth_combo.currentIndexChanged.connect(self._on_ground_truth_changed)
+        left.addRow("Ground truth", self._ground_truth_combo)
         self._axis_combo = QComboBox(self)
         self._axis_combo.addItem("Organs — one challenger", FamilyAxis.ORGANS)
         self._axis_combo.addItem("Sources — one organ", FamilyAxis.SOURCES)
@@ -511,6 +529,7 @@ class ReportTab(QWidget):
     # ---- Controls ---------------------------------------------------------
 
     def _repopulate_controls(self) -> None:
+        self._repopulate_ground_truths()
         self._repopulate_metrics()
         for combo, values in (
             (self._reference_combo, self._model.sources()),
@@ -540,6 +559,35 @@ class ReportTab(QWidget):
             self._organ_list.addItem(item)
             item.setSelected(organ in selected if selected else True)
         self._organ_list.blockSignals(False)
+
+    def _on_ground_truth_changed(self) -> None:
+        """Re-project, then rebuild the metric list before recomputing.
+
+        The two references need not carry the same metrics — a consensus
+        comparison adds per-vendor agreement metrics and may omit others — so a
+        selector built for one reference offers metrics the other does not have
+        and hides metrics it does.
+        """
+        self._model = self._all.for_ground_truth(self._ground_truth_combo.currentText())
+        self._repopulate_metrics()
+        self._recompute()
+
+    def _repopulate_ground_truths(self) -> None:
+        """Offer every reference the cohort holds, consensus first."""
+        combo = self._ground_truth_combo
+        previous = combo.currentText()
+        available = self._all.ground_truths()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(available)
+        if previous in available:
+            combo.setCurrentText(previous)
+        elif available:
+            combo.setCurrentText(self._all.preferred_ground_truth())
+        combo.blockSignals(False)
+        # One reference is not a choice, so do not present it as one.
+        self._ground_truth_combo.setEnabled(len(available) > 1)
+        self._model = self._all.for_ground_truth(combo.currentText())
 
     def _repopulate_metrics(self) -> None:
         """Fill the metric selector, grouped and with unselectable headings.
@@ -633,6 +681,7 @@ class ReportTab(QWidget):
         self._methods.setText("")
 
     def _recompute(self) -> None:
+        self._model = self._all.for_ground_truth(self._ground_truth_combo.currentText())
         axis = self._axis()
         metric = self._selected_metric()
         reference = self._reference_combo.currentText()
@@ -656,9 +705,11 @@ class ReportTab(QWidget):
             self._forest.plot({}, metric or "", reference="", challenger="")
             return
 
+        ground_truth = self._model.active_ground_truth or self._ground_truth_combo.currentText()
         self._summary_label.setText(
             f"{len(self._model.patients())} patients · {len(self._model.organs())} organs · "
             f"{len(self._model.sources())} sources"
+            + (f" · vs {ground_truth}" if ground_truth else "")
             + (
                 f" · {self._model.duplicates_collapsed} duplicate observation(s) collapsed"
                 if self._model.duplicates_collapsed
