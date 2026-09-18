@@ -96,10 +96,23 @@ def _column(table, header: str) -> int:
     raise AssertionError(f"no {header!r} column")
 
 
+def _row_organ(table, row: int) -> str:
+    """The organ a row belongs to, blank display column notwithstanding.
+
+    The descriptive table names each organ once per group, so a reader carries
+    it down the block; the organ stays on every cell as item data so code can
+    do the same without parsing the gaps.
+    """
+    from autoseg_evaluator.ui.tabs.report import ORGAN_ROLE
+
+    item = table.item(row, 0)
+    return str(item.data(ORGAN_ROLE) or item.text())
+
+
 def _find(table, organ: str, source: str | None = None) -> dict[str, str]:
     """The first row for this organ (and source), as ``{header: text}``."""
     for row in range(table.rowCount()):
-        if table.item(row, 0).text() != organ:
+        if _row_organ(table, row) != organ:
             continue
         if source is not None and table.item(row, 1).text() != source:
             continue
@@ -1189,7 +1202,7 @@ def _shades(tab, column=3):
     for row in range(table.rowCount()):
         item = table.item(row, column)
         colour = item.background().color()
-        found[(table.item(row, 0).text(), table.item(row, 1).text())] = (
+        found[(_row_organ(table, row), table.item(row, 1).text())] = (
             colour.red(),
             colour.green(),
             colour.blue(),
@@ -1284,3 +1297,132 @@ def test_an_empty_acquisition_table_collapses_to_its_header(tab):
     assert tab._image_table.rowCount() == 0
     assert tab._image_table.maximumHeight() == tab._image_table.minimumHeight()
     assert tab._image_table.maximumHeight() < 200
+
+
+# ---- Declutter, separators and the relative forest ------------------------
+
+
+def test_the_organ_is_named_once_per_group(tab):
+    """Six rows of "Lens (L)" carry the label five times too many."""
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    table = tab._descriptive_table
+    labelled = [table.item(r, 0).text() for r in range(table.rowCount()) if table.item(r, 0).text()]
+    assert sorted(labelled) == sorted(ORGANS)  # once each, not once per source
+
+
+def test_a_blank_organ_cell_still_knows_its_organ(tab):
+    """Decluttering the display must not declutter the data."""
+    from autoseg_evaluator.ui.tabs.report import ORGAN_ROLE
+
+    _select(tab, ORGANS)
+    table = tab._descriptive_table
+    for row in range(table.rowCount()):
+        assert table.item(row, 0).data(ORGAN_ROLE) in ORGANS
+
+
+def test_each_group_is_marked_for_the_separator_rule(tab):
+    """The label is gone, so a rule has to carry the boundary instead."""
+    from autoseg_evaluator.ui.tabs.report import GROUP_START_ROLE
+
+    _select(tab, ORGANS)
+    table = tab._descriptive_table
+    starts = sum(1 for r in range(table.rowCount()) if table.item(r, 0).data(GROUP_START_ROLE))
+    assert starts == len(ORGANS)
+
+
+def test_the_shading_legend_states_the_direction(tab):
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    assert "higher is better" in tab._descriptive_note.text()
+    tab._metric_combo.setCurrentText("hausdorff95")
+    assert "lower is better" in tab._descriptive_note.text()
+
+
+def test_an_undirected_metric_says_why_it_is_not_shaded(qapp):
+    """Silence looked like a bug: no colour, and nothing saying why."""
+    rows = []
+    for patient in range(4):
+        for source in (REFERENCE, CHALLENGER):
+            row = _row_for(f"P{patient}", "Parotid (L)", source, 0.8)
+            row["metrics"] = {"volume_ratio": 1.1}
+            rows.append(row)
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+    assert "no better or worse direction" in widget._descriptive_note.text()
+    widget.deleteLater()
+
+
+def test_the_distributions_plot_separates_organ_groups(tab):
+    """With several sources per organ the clusters run together."""
+    _select(tab, ORGANS)
+    axes = tab._distribution.figure.axes[0]
+    # The IQR bars are vertical too, so the separator is identified by its own
+    # colour and hairline width rather than by being vertical.
+    boundaries = sorted(
+        float(line.get_xdata()[0])
+        for line in axes.get_lines()
+        if str(line.get_color()).upper() == "#C8CDD4"
+    )
+    assert boundaries == [0.5, 1.5, 2.5]  # four organs, three gaps
+
+
+def test_the_forest_axis_switches_to_percentages(tab):
+    _select(tab, ORGANS)
+    tab._metric_combo.setCurrentText("hausdorff95")
+    raw = tab._forest.figure.axes[0].get_xlabel()
+    assert "%" not in raw
+
+    tab._relative_check.setChecked(True)
+    relative = tab._forest.figure.axes[0].get_xlabel()
+    assert f"% of {REFERENCE}'s median" in relative
+
+
+def test_relative_mode_makes_organs_on_different_scales_comparable(qapp):
+    """The whole reason for the toggle.
+
+    Three organs degrade by the same 25%, on Hausdorff scales spanning 27x. In
+    raw units the small organ collapses onto zero; as a percentage the three
+    land together.
+    """
+    scale = {"Bowel": 40.0, "Parotid (L)": 6.0, "Cochlea (L)": 1.5}
+    rows = []
+    for organ, base in scale.items():
+        for patient in range(10):
+            for source, mult in ((REFERENCE, 1.00), (CHALLENGER, 1.25)):
+                row = _row_for(f"P{patient:02d}", organ, source, 0.8)
+                row["metrics"] = {"hausdorff95": base * mult + patient * 0.05}
+                rows.append(row)
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._metric_combo.setCurrentText("hausdorff95")
+    widget._reference_combo.setCurrentText(REFERENCE)
+    widget._challenger_combo.setCurrentText(CHALLENGER)
+    _select(widget, list(scale))
+
+    def estimates(tab):
+        """The plotted point for each row, read off the marker collections."""
+        found = []
+        for collection in tab._forest.figure.axes[0].collections:
+            offsets = collection.get_offsets()
+            found.extend(float(point[0]) for point in offsets)
+        return found
+
+    raw = estimates(widget)
+    widget._relative_check.setChecked(True)
+    relative = estimates(widget)
+
+    # Raw: the same 25% degradation reads as 0.375 mm and 10 mm, a 27x spread,
+    # so the small organ collapses onto zero on a shared axis.
+    assert max(raw) / min(raw) > 20
+    # Relative: the three land together. Not exactly equal, because each is
+    # divided by its own reference *median*, which carries the per-patient drift.
+    assert max(relative) / min(relative) < 1.2
+    assert all(20.0 < value < 30.0 for value in relative)
+    widget.deleteLater()

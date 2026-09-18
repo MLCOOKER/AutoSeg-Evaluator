@@ -32,10 +32,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -47,6 +48,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -72,6 +74,35 @@ _ALPHA = 0.05
 #: its contents, so a four-row table costs four rows of page rather than a fixed
 #: block of empty grid.
 MAX_VISIBLE_ROWS = 24
+
+#: The organ a row belongs to, carried on every cell even where the label is
+#: blanked for readability. Decluttering the display must not declutter the
+#: data — anything reading the table back still needs to know the group.
+ORGAN_ROLE = int(Qt.ItemDataRole.UserRole)
+
+#: Marks the first row of an organ's block in the descriptive table.
+GROUP_START_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
+class _GroupRuleDelegate(QStyledItemDelegate):
+    """Draws a hairline above the first row of each organ block.
+
+    The organ is named once per group rather than on every row, which removes
+    most of the clutter but also removes the only cue for where one organ ends
+    and the next begins. The rule restores that cue, and unlike the label it
+    stays visible when the group's first row has scrolled out of view.
+    """
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802 — Qt override
+        super().paint(painter, option, index)
+        if not index.data(GROUP_START_ROLE) or index.row() == 0:
+            return
+        painter.save()
+        painter.setPen(QPen(QColor(0x9A, 0xA3, 0xAD), 1))
+        rect = QRect(option.rect)
+        painter.drawLine(rect.topLeft(), rect.topRight())
+        painter.restore()
+
 
 # ---- Column help ----------------------------------------------------------
 #
@@ -446,6 +477,25 @@ class ReportTab(QWidget):
         buttons.addWidget(self._select_none_btn)
         buttons.addStretch(1)
         right.addLayout(buttons)
+        self._relative_check = QCheckBox("Forest in % of reference median", self)
+        self._relative_check.setToolTip(
+            _tip(
+                "Rescales the forest so each row is a percentage of the "
+                "reference's own median for that organ, instead of the metric's "
+                "raw units.",
+                "Raw units are the default because they are what a clinician "
+                "judges and what goes in a paper. They make organs incomparable "
+                "on an unbounded metric though: the same 25% degradation is "
+                "10 mm on bowel and 0.4 mm on a cochlea, and on one shared axis "
+                "the cochlea collapses onto zero.",
+                "Bounded metrics — Dice, surface Dice — do not have this "
+                "problem, so leaving it off is usually right for them.",
+                "A row whose reference median is zero has no relative form and "
+                "is omitted; the figure footer says how many.",
+            )
+        )
+        self._relative_check.toggled.connect(self._recompute)
+        right.addWidget(self._relative_check)
         form.addLayout(right, stretch=1)
         outer.addWidget(controls)
 
@@ -465,7 +515,16 @@ class ReportTab(QWidget):
         outer.addWidget(self._wrap("Coverage", self._coverage_table))
 
         self._descriptive_table = self._make_table(DESCRIPTIVE_COLUMNS)
-        outer.addWidget(self._wrap("Descriptive statistics", self._descriptive_table))
+        self._descriptive_table.setItemDelegate(_GroupRuleDelegate(self._descriptive_table))
+        descriptive_box = QGroupBox("Descriptive statistics", self)
+        descriptive_layout = QVBoxLayout(descriptive_box)
+        descriptive_layout.setContentsMargins(6, 6, 6, 6)
+        self._descriptive_note = QLabel("", self)
+        self._descriptive_note.setWordWrap(True)
+        self._descriptive_note.setStyleSheet("color:#777; font-size:11px;")
+        descriptive_layout.addWidget(self._descriptive_note)
+        descriptive_layout.addWidget(self._descriptive_table)
+        outer.addWidget(descriptive_box)
 
         self._comparison_table = self._make_table(COMPARISON_COLUMNS)
         outer.addWidget(self._wrap("Paired comparison", self._comparison_table))
@@ -757,9 +816,16 @@ class ReportTab(QWidget):
             },
             metric,
         )
+        scales = None
+        if self._relative_check.isChecked():
+            scales = {
+                label: self._reference_median(label, metric, reference, axis, organs)
+                for label in family
+            }
         self._forest.plot(
             family,
             metric,
+            scales=scales,
             reference=reference,
             # Across sources the challenger is whatever each row names, so the
             # figure must not label a single one.
@@ -816,6 +882,24 @@ class ReportTab(QWidget):
                 "free-text descriptions are read."
             )
 
+    def _reference_median(
+        self,
+        label: str,
+        metric: str,
+        reference: str,
+        axis: FamilyAxis,
+        organs: list[str],
+    ) -> float:
+        """The denominator for one forest row in relative mode.
+
+        Always the *reference* source's median on the organ in question, so
+        every row is a percentage of the same thing it is being compared with.
+        Across sources the organ is fixed, so every row shares one denominator.
+        """
+        organ = organs[0] if axis is FamilyAxis.SOURCES and organs else label
+        summary = self._model.describe_cell(organ, reference, metric)
+        return 0.0 if summary is None else float(summary.median)
+
     def _fill_coverage(self, metric: str, organs: list[str]) -> None:
         table = self._coverage_table
         table.setRowCount(0)
@@ -866,15 +950,20 @@ class ReportTab(QWidget):
 
     @staticmethod
     def _heat_colour(fraction: float) -> QColor:
-        """Worst to best, as a pale wash a reader can still read black text on.
+        """Worst to best, saturated enough to read at a glance.
+
+        An earlier pair sat around 85% lightness. Both were legible behind
+        black text and neither was *visible* — on a light table, in one narrow
+        column, a pastel wash reads as no wash at all, and the mid-range tint
+        was indistinguishable from white.
 
         Deliberately not red-to-green: roughly one man in twelve cannot
-        separate those, and the ranking here is the whole message. Amber to
-        teal keeps its ordering under the common forms of colour blindness and
-        in greyscale, which is how half of these end up printed.
+        separate those, the ranking is the entire message here, and these
+        tables get printed in greyscale, where amber and teal still differ in
+        lightness while red and green do not.
         """
-        low = (0xF2, 0xC2, 0x8B)  # amber
-        high = (0xA8, 0xD8, 0xCE)  # teal
+        low = (0xE8, 0x9A, 0x3C)  # amber
+        high = (0x3F, 0xA8, 0x94)  # teal
         blend = [round(a + (b - a) * fraction) for a, b in zip(low, high, strict=True)]
         return QColor(*blend)
 
@@ -894,7 +983,7 @@ class ReportTab(QWidget):
             # the whole table would rank organs rather than sources.
             medians = [d.median for d in present.values()]
             span = (min(medians), max(medians)) if medians else (0.0, 0.0)
-            for source, summary in present.items():
+            for position, (source, summary) in enumerate(present.items()):
                 row = table.rowCount()
                 table.insertRow(row)
                 ci = (
@@ -907,9 +996,13 @@ class ReportTab(QWidget):
                     fraction = (summary.median - span[0]) / (span[1] - span[0])
                     # Lower is better for distances, so the scale flips.
                     shade = self._heat_colour(fraction if direction > 0 else 1.0 - fraction)
+                # The organ is named once per group. Repeating it down every row
+                # is the bulk of the clutter and carries no information — the
+                # eye needs the boundary, not the label six times.
+                first = position == 0
                 for column, text in enumerate(
                     [
-                        organ,
+                        organ if first else "",
                         source,
                         str(summary.n),
                         f"{summary.median:.3f} [{summary.q1:.3f}, {summary.q3:.3f}]",
@@ -919,11 +1012,27 @@ class ReportTab(QWidget):
                     ]
                 ):
                     item = QTableWidgetItem(text)
+                    item.setData(ORGAN_ROLE, organ)
                     item.setToolTip(self._descriptive_tooltip(organ, source, metric, direction))
+                    if first:
+                        # A rule above the first row of each group, so the
+                        # boundary survives scrolling past the organ's name.
+                        item.setData(GROUP_START_ROLE, True)
+                        if column == 0:
+                            font = item.font()
+                            font.setBold(True)
+                            item.setFont(font)
                     if shade is not None and column == median_column:
                         item.setBackground(shade)
                     table.setItem(row, column, item)
         self._fit_table(table)
+        self._descriptive_note.setText(
+            f"Median shaded within each organ — teal best, amber worst — "
+            f"for {metric}, where {'higher' if direction > 0 else 'lower'} is better."
+            if direction
+            else f"<b>{metric}</b> has no better or worse direction (it is best at a "
+            "target, not at an extreme), so the medians are not shaded."
+        )
 
     @staticmethod
     def _descriptive_tooltip(organ: str, source: str, metric: str, direction: int) -> str:

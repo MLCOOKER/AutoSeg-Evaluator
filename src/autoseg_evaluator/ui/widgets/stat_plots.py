@@ -143,6 +143,12 @@ class DistributionCanvas(_Canvas):
                     zorder=5,
                 )
 
+        # A hairline between organ groups. With several sources per organ the
+        # clusters run together, and the eye has to count colours to work out
+        # where one organ ends.
+        for boundary in range(1, len(organs)):
+            axes.axvline(boundary - 0.5, color="#C8CDD4", linewidth=0.8, zorder=0, linestyle="-")
+
         axes.set_xticks(range(len(organs)))
         axes.set_xticklabels(
             [
@@ -187,6 +193,8 @@ class ForestCanvas(_Canvas):
         reference: str,
         challenger: str | None,
         alpha: float = 0.05,
+        scales: dict[str, float] | None = None,
+        units: str = "",
     ) -> None:
         """``results`` is ``{label: PairedResult}`` from either family method.
 
@@ -195,6 +203,15 @@ class ForestCanvas(_Canvas):
         be labelled with one challenger's name, and the direction annotation has
         to say "the source in each row" instead — writing one vendor's name
         across a figure comparing several would be a plain misstatement.
+
+        ``scales`` divides each row by a per-row denominator — the reference's
+        own median — turning the axis into a relative one. Raw units are the
+        default because they are what a clinician judges and what goes in a
+        paper, but on an unbounded metric they make organs incomparable: a 25%
+        degradation is 10 mm on bowel and 0.4 mm on a cochlea, and on a shared
+        axis the cochlea collapses onto zero. A row whose denominator is zero or
+        missing cannot be expressed relatively and is dropped, with the figure
+        saying how many.
         """
         self.clear()
         axes = self.figure.add_subplot(111)
@@ -203,30 +220,45 @@ class ForestCanvas(_Canvas):
             for organ, result in results.items()
             if result is not None and result.hl_estimate is not None
         ]
+        dropped = 0
+        if scales is not None:
+            kept = [(o, r) for o, r in usable if scales.get(o)]
+            dropped = len(usable) - len(kept)
+            usable = kept
         if not usable:
             axes.text(0.5, 0.5, "Nothing to compare", ha="center", va="center")
             axes.set_axis_off()
             self.draw_idle()
             return
 
-        usable.sort(key=lambda item: item[1].hl_estimate or 0.0)
+        def rescale(value: float | None, organ: str) -> float | None:
+            if value is None:
+                return None
+            if scales is None:
+                return value
+            denominator = scales.get(organ)
+            return None if not denominator else value / abs(denominator) * 100.0
+
+        usable.sort(key=lambda item: rescale(item[1].hl_estimate, item[0]) or 0.0)
         positions = range(len(usable))
 
         for y, (_organ, result) in zip(positions, usable, strict=True):
-            estimate = result.hl_estimate
+            estimate = rescale(result.hl_estimate, _organ)
             significant = result.p_adjusted is not None and result.p_adjusted <= alpha
             colour = "#0F6E6E" if significant else "#4A5866"
 
-            if result.ci_available:
+            low = rescale(result.ci_low, _organ)
+            high = rescale(result.ci_high, _organ)
+            if result.ci_available and low is not None and high is not None:
                 axes.plot(
-                    [result.ci_low, result.ci_high],
+                    [low, high],
                     [y, y],
                     color=colour,
                     linewidth=1.6,
                     solid_capstyle="butt",
                     zorder=2,
                 )
-                for endpoint in (result.ci_low, result.ci_high):
+                for endpoint in (low, high):
                     axes.plot(
                         [endpoint, endpoint],
                         [y - 0.16, y + 0.16],
@@ -262,7 +294,16 @@ class ForestCanvas(_Canvas):
             [f"{_elide(organ)}   n={result.n_pairs}" for organ, result in usable], fontsize=8
         )
         measured = challenger or "each source"
-        axes.set_xlabel(f"Hodges–Lehmann difference in {metric}   ({measured} − {reference})")
+        if scales is None:
+            axis_units = f" {units}" if units else ""
+            axes.set_xlabel(
+                f"Hodges–Lehmann difference in {metric}{axis_units}   ({measured} − {reference})"
+            )
+        else:
+            axes.set_xlabel(
+                f"Hodges–Lehmann difference in {metric}, % of {reference}'s median"
+                f"   ({measured} − {reference})"
+            )
         axes.grid(axis="x", alpha=0.25, linewidth=0.6)
         axes.set_axisbelow(True)
 
@@ -279,6 +320,12 @@ class ForestCanvas(_Canvas):
             0.01,
             0.01,
             "Intervals are unadjusted; filled markers are significant after Holm correction."
+            + (
+                f"  {dropped} row(s) omitted: the reference median is zero, so a "
+                "relative difference is undefined."
+                if dropped
+                else ""
+            )
             + (
                 ""
                 if challenger
