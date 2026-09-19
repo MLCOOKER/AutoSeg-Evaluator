@@ -1665,3 +1665,133 @@ def test_an_empty_paired_view_says_so(tab):
     tab._challenger_combo.setCurrentText(REFERENCE)
     axes = tab._paired.figure.axes[0]
     assert any("No patient has both sources" in t.get_text() for t in axes.texts)
+
+
+# ---- Which patients, and on what scale -------------------------------------
+
+
+def test_the_distribution_shows_per_source_counts_not_one_per_organ(tab):
+    """A single n under an organ claims a coverage the sources do not share."""
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    axes = tab._distribution.figure.axes[0]
+
+    labels = [t.get_text() for t in axes.get_xticklabels()]
+    assert all("n=" not in label for label in labels)  # no aggregate count
+    # One annotation per drawn cluster, carrying that source's own count.
+    counts = sorted(t.get_text() for t in axes.texts if t.get_text().isdigit())
+    assert "4" in counts  # the submandibular gland, which one source declined
+    assert "10" in counts
+
+
+def test_the_distribution_caption_explains_the_marks(tab):
+    """A vertical bar could be a range, an error bar or an interval."""
+    _select(tab, ORGANS)
+    caption = tab._distribution.figure.get_supxlabel()
+    assert "interquartile range (25th–75th percentile)" in caption
+    assert "wide tick is the median" in caption
+    assert "not the paired-comparison sample" in caption
+
+
+def test_a_bounded_metric_shows_its_whole_range(tab):
+    """Ten Dice values in 0.78–0.86 autoscale into an axis that reads as a chasm."""
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    low, high = tab._distribution.figure.axes[0].get_ylim()
+    assert low <= 0.0
+    assert high >= 1.0
+
+
+def test_an_unbounded_metric_keeps_zero_in_view(tab):
+    """Zero is a perfect contour; an axis starting at 3 mm hides how far off everything is."""
+    tab._metric_combo.setCurrentText("hausdorff95")
+    _select(tab, ORGANS)
+    low, _high = tab._distribution.figure.axes[0].get_ylim()
+    assert low <= 0.0
+
+
+def test_the_paired_view_uses_the_same_scale_rule(tab):
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    tab._paired_combo.setCurrentText("Parotid (L)")
+    low, high = tab._paired.figure.axes[0].get_ylim()
+    assert low <= 0.0 and high >= 1.0
+
+
+def _split_cohorts():
+    """Equal counts, different patients — the case that is easy to miss."""
+    rows = []
+    for patient in range(10):
+        pid = f"P{patient:02d}"
+        rows.append(_row_for(pid, "Parotid (L)", REFERENCE, 0.85 + patient * 0.002))
+        if pid != "P00":
+            rows.append(_row_for(pid, "Parotid (L)", CHALLENGER, 0.82 + patient * 0.002))
+        if pid != "P09":
+            rows.append(_row_for(pid, "Parotid (L)", THIRD, 0.84 + patient * 0.002))
+    return rows
+
+
+def test_rows_with_equal_counts_on_different_patients_are_flagged(qapp):
+    """Matching counts make two rows look like a comparison when they are not."""
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(_split_cohorts())
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._metric_combo.setCurrentText("dice")
+    widget._reference_combo.setCurrentText(REFERENCE)
+    widget._axis_combo.setCurrentIndex(1)
+    widget._organ_list.setCurrentRow(0)
+
+    counts = {
+        widget._comparison_table.item(r, 0).text(): widget._comparison_table.item(r, 1).text()
+        for r in range(widget._comparison_table.rowCount())
+    }
+    assert counts == {CHALLENGER: "9", THIRD: "9"}  # identical counts…
+    sets = widget._model.pairing_sets(
+        "dice",
+        REFERENCE,
+        {CHALLENGER: ("Parotid (L)", CHALLENGER), THIRD: ("Parotid (L)", THIRD)},
+    )
+    assert sets[CHALLENGER] != sets[THIRD]  # …different patients
+
+    warning = widget._warning.text()
+    assert "do not all use the same patients" in warning
+    assert "counts match, which makes that easy to miss" in warning
+    widget.deleteLater()
+
+
+def test_rows_on_one_cohort_are_not_flagged(tab):
+    """The note must not fire when every row really does share its patients."""
+    _select(tab, ["Parotid (L)", "Parotid (R)"])
+    assert "do not all use the same patients" not in tab._warning.text()
+
+
+def test_the_paired_view_draws_the_row_it_names(qapp):
+    """Its patients are the row's patients, not the other row's."""
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(_split_cohorts())
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._metric_combo.setCurrentText("dice")
+    widget._reference_combo.setCurrentText(REFERENCE)
+    widget._axis_combo.setCurrentIndex(1)
+    widget._organ_list.setCurrentRow(0)
+
+    for source in (CHALLENGER, THIRD):
+        widget._paired_combo.setCurrentText(source)
+        drawn = {
+            tuple(line.get_ydata())
+            for line in widget._paired.figure.axes[0].get_lines()
+            if len(line.get_xdata()) == 2 and list(line.get_xdata()) == [0, 1]
+        }
+        expected = {
+            (before, after)
+            for _p, before, after in widget._model.paired_values(
+                "Parotid (L)", "dice", REFERENCE, source
+            )
+        }
+        assert drawn == expected, source
+    assert "may not be the same patients as another row" in widget._paired.figure.get_supxlabel()
+    widget.deleteLater()

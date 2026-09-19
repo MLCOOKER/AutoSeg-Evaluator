@@ -397,3 +397,20 @@ def test_a_missing_tolerance_is_said_rather_than_left_blank():
     from autoseg_evaluator.core.readable import tolerance_note
 
     assert tolerance_note("surface_dice", None, None) == "tolerance not recorded"
+
+
+def test_metric_scale_classes():
+    """Axis bounds follow what a metric can be, not what it happened to be."""
+    from autoseg_evaluator.core.readable import (
+        SCALE_BOUNDED_UNIT,
+        SCALE_NON_NEGATIVE,
+        SCALE_SIGNED,
+        metric_scale,
+    )
+
+    for metric in ("dice", "surface_dice", "precision", "recall", "staple_sensitivity"):
+        assert metric_scale(metric) == SCALE_BOUNDED_UNIT, metric
+    for metric in ("hausdorff95", "mean_surface_distance", "apl_total", "dmean_gy", "V20gy_cc"):
+        assert metric_scale(metric) == SCALE_NON_NEGATIVE, metric
+    for metric in ("com_dx_mm", "volume_diff_cc", "d2cc_gy_diff"):
+        assert metric_scale(metric) == SCALE_SIGNED, metric

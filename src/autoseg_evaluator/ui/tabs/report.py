@@ -1403,6 +1403,31 @@ class ReportTab(QWidget):
                 "produce them for everyone. Models tend to fail on hard cases, so that "
                 "subset is unlikely to be representative."
             )
+        # Equal counts are not equal patients. Two rows both reading n = 8 can
+        # rest on different eights, and across a table the counts matching makes
+        # the comparison look like a comparison.
+        if len(estimable) > 1:
+            if axis is FamilyAxis.SOURCES:
+                organ = self._selected_organ()
+                members = {label: (organ, label) for label in estimable}
+            else:
+                members = {label: (label, challenger) for label in estimable}
+            sets = self._model.pairing_sets(metric, reference, members)
+            distinct = {frozenset(patients) for patients in sets.values()}
+            if len(distinct) > 1:
+                sizes = {len(patients) for patients in sets.values()}
+                notes.append(
+                    "<b>The rows do not all use the same patients.</b> Each comparison "
+                    "runs on the patients that pair for it, so a row is sound on its own "
+                    "but two rows are not measured on the same cohort"
+                    + (
+                        " — and their counts match, which makes that easy to miss."
+                        if len(sizes) == 1
+                        else "."
+                    )
+                    + " The paired view below always shows the patients belonging to the "
+                    "row it names."
+                )
         disconnected = [
             organ for organ, r in estimable.items() if r.ci.status is IntervalStatus.DISCONNECTED
         ]

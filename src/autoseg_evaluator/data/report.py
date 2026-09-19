@@ -518,6 +518,25 @@ class ReportModel:
         shared = sorted(set(a_values) & set(b_values))
         return [(patient, a_values[patient], b_values[patient]) for patient in shared]
 
+    def pairing_sets(
+        self, metric: str, reference: str, labels: dict[str, str]
+    ) -> dict[str, frozenset[str]]:
+        """``{row label: the patients that row's test actually used}``.
+
+        ``labels`` maps each row to its ``(organ, challenger)``, since which of
+        the two varies depends on the axis.
+
+        Exists because equal counts do not mean equal patients. Two rows both
+        reading ``n = 8`` can rest on different eights, and a reader comparing
+        them across a table has no way to tell — the counts match, so the
+        comparison looks like a comparison.
+        """
+        found: dict[str, frozenset[str]] = {}
+        for label, (organ, challenger) in labels.items():
+            pairs = self.paired_values(organ, metric, reference, challenger)
+            found[label] = frozenset(patient for patient, _a, _b in pairs)
+        return found
+
     def excluded_patients(self, organ: str, metric: str, source_a: str, source_b: str) -> set[str]:
         """Patients dropped from this comparison for contributing several cases."""
         return self.multi_case_patients(organ, source_a, metric) | self.multi_case_patients(

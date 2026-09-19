@@ -69,6 +69,68 @@ METRIC_UNITS: dict[str, str] = {
 TOLERANCE_METRICS: frozenset[str] = frozenset({"surface_dice", "apl_mean", "apl_total"})
 
 
+#: Metrics bounded to [0, 1] by construction. Their axis shows the whole range,
+#: because a Dice axis cropped to 0.78-0.86 makes a three-point spread look like
+#: a chasm, and a reader who does not check the tick labels will read it as one.
+BOUNDED_UNIT_METRICS: frozenset[str] = frozenset(
+    {
+        "dice",
+        "surface_dice",
+        "precision",
+        "recall",
+        "sensitivity",
+        "specificity",
+        "staple_sensitivity",
+        "staple_specificity",
+    }
+)
+
+#: Metrics that cannot go below zero. Zero is kept in view because it is the
+#: meaningful floor — a perfect contour — and an axis starting at 3 mm hides how
+#: far from perfect everything on it is.
+NON_NEGATIVE_METRICS: frozenset[str] = frozenset(
+    {
+        "hausdorff95",
+        "hausdorff100",
+        "mean_surface_distance",
+        "apl_mean",
+        "apl_total",
+        "com_offset_mm",
+        "volume_gt_cc",
+        "volume_test_cc",
+        "volume_ratio",
+    }
+)
+
+SCALE_BOUNDED_UNIT = "bounded01"
+SCALE_NON_NEGATIVE = "nonnegative"
+SCALE_SIGNED = "signed"
+SCALE_FREE = "free"
+
+
+def metric_scale(metric: str) -> str:
+    """How a figure's axis should be bounded for this metric.
+
+    Autoscaling to the data is the wrong default here. Ten Dice values between
+    0.78 and 0.86 autoscale to an axis where a 0.01 difference spans a third of
+    the plot; the same figure on the full 0-1 range shows what it is, which is
+    a small difference between four good contours.
+    """
+    key = str(metric).strip().lower()
+    if key in BOUNDED_UNIT_METRICS:
+        return SCALE_BOUNDED_UNIT
+    # Differences are tested before anything else, because a difference of a
+    # non-negative quantity is not itself non-negative: ``d2cc_gy`` cannot go
+    # below zero but ``d2cc_gy_diff`` is test minus reference and routinely does.
+    if key.endswith("_diff") or "diff" in key or key.startswith("com_d"):
+        return SCALE_SIGNED
+    if key in NON_NEGATIVE_METRICS:
+        return SCALE_NON_NEGATIVE
+    if key.endswith("_gy") or "gy_cc" in key or re.match(r"^[dv]\d", key):
+        return SCALE_NON_NEGATIVE
+    return SCALE_FREE
+
+
 def readable_metric(metric: str) -> str:
     """``surface_dice`` -> ``Surface Dice``, falling through unknown keys."""
     key = str(metric).strip()
@@ -117,9 +179,16 @@ def tolerance_note(
 
 
 __all__ = [
+    "BOUNDED_UNIT_METRICS",
     "METRIC_PROSE",
     "METRIC_UNITS",
+    "NON_NEGATIVE_METRICS",
+    "SCALE_BOUNDED_UNIT",
+    "SCALE_FREE",
+    "SCALE_NON_NEGATIVE",
+    "SCALE_SIGNED",
     "TOLERANCE_METRICS",
+    "metric_scale",
     "metric_units",
     "readable_metric",
     "tolerance_note",

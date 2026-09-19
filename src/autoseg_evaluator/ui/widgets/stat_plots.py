@@ -22,6 +22,12 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtWidgets import QSizePolicy
 
+from autoseg_evaluator.core.readable import (
+    SCALE_BOUNDED_UNIT,
+    SCALE_NON_NEGATIVE,
+    SCALE_SIGNED,
+    metric_scale,
+)
 from autoseg_evaluator.data.report import metric_direction
 
 #: Below this many observations a kernel density estimate says more about the
@@ -77,6 +83,45 @@ _TIED = "#A8AFB8"
 
 def _elide(text: str, limit: int = MAX_TICK_LABEL) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+#: Said in full because none of it is guessable from the marks themselves: a
+#: vertical bar could be a range, an error bar or an interval, and the counts
+#: above the clusters are per source rather than per organ.
+_DISTRIBUTION_CAPTION = "\n".join(
+    (
+        "Each dot is one patient; the number above a cluster is how many that source produced.",
+        "The vertical bar spans the interquartile range (25th–75th percentile); "
+        "the wide tick is the median.",
+        "Every available observation is shown — these counts are not the paired-comparison sample.",
+    )
+)
+
+
+def _apply_scale(axes, metric: str, values: list[float]) -> None:
+    """Bound a value axis by what the metric can be, not by what it happened to be.
+
+    Autoscaling flatters small differences. Ten Dice values between 0.78 and
+    0.86 autoscale to an axis where 0.01 spans a third of the figure, and a
+    reader who does not check the ticks reads a chasm. On the full 0-1 range the
+    same figure shows four good contours differing slightly, which is the truth.
+
+    For distances the floor is zero — a perfect contour — and hiding it hides how
+    far from perfect everything on the axis is.
+    """
+    finite = [float(v) for v in values if v is not None and np.isfinite(v)]
+    scale = metric_scale(metric)
+    if scale == SCALE_BOUNDED_UNIT:
+        axes.set_ylim(-0.02, 1.02)
+        return
+    if not finite:
+        return
+    top = max(finite)
+    if scale == SCALE_NON_NEGATIVE:
+        axes.set_ylim(min(0.0, min(finite)), top * 1.08 if top > 0 else 1.0)
+    elif scale == SCALE_SIGNED:
+        reach = max(abs(min(finite)), abs(top)) or 1.0
+        axes.set_ylim(-reach * 1.12, reach * 1.12)
 
 
 class _Canvas(FigureCanvasQTAgg):
@@ -156,6 +201,15 @@ class DistributionCanvas(_Canvas):
                     edgecolors="none",
                     zorder=3,
                 )
+                axes.annotate(
+                    str(len(values)),
+                    (centre, max(values)),
+                    textcoords="offset points",
+                    xytext=(0, 7),
+                    ha="center",
+                    fontsize=8,
+                    color=colour,
+                )
                 q1, median, q3 = np.percentile(values, [25, 50, 75])
                 axes.plot(
                     [centre, centre], [q1, q3], color=colour, linewidth=2.2, alpha=0.9, zorder=4
@@ -175,14 +229,16 @@ class DistributionCanvas(_Canvas):
             axes.axvline(boundary - 0.5, color="#C8CDD4", linewidth=0.8, zorder=0, linestyle="-")
 
         axes.set_xticks(range(len(organs)))
+        # No aggregate n on the organ label. One number under an organ whose
+        # sources have different coverage says "this organ has ten patients",
+        # which is exactly the thing that is not true; the per-source counts
+        # above each cluster say what each source actually produced.
         axes.set_xticklabels(
-            [
-                f"{_elide(organ)}\n(n={max((len(v) for v in data[organ].values()), default=0)})"
-                for organ in organs
-            ],
+            [_elide(organ) for organ in organs],
             rotation=30,
             ha="right",
-            fontsize=8,
+            fontsize=9.5,
+            color=_TEXT,
         )
         axes.set_ylabel(label)
         direction = metric_direction(metric)
@@ -190,7 +246,10 @@ class DistributionCanvas(_Canvas):
             axes.set_ylabel(f"{label}  ({'higher' if direction > 0 else 'lower'} is better)")
         if title:
             axes.set_title(title, fontsize=10)
-        axes.grid(axis="y", alpha=0.25, linewidth=0.6)
+        _apply_scale(
+            axes, metric, [v for per in data.values() for vals in per.values() for v in vals]
+        )
+        axes.grid(axis="y", color=_GRID, alpha=0.6, linewidth=0.7)
         axes.set_axisbelow(True)
         for source in sources:
             axes.scatter([], [], color=colours[source], label=source, s=22)
@@ -198,12 +257,14 @@ class DistributionCanvas(_Canvas):
         # with several sources and rotated organ labels there is no corner it
         # can occupy without covering points.
         axes.legend(
-            fontsize=8,
+            fontsize=9.5,
             frameon=False,
             loc="upper left",
             bbox_to_anchor=(1.01, 1.0),
             borderaxespad=0.0,
+            labelcolor=_TEXT,
         )
+        self.figure.supxlabel(_DISTRIBUTION_CAPTION, fontsize=9, color=_MUTED_TEXT, ha="center")
         self.draw_idle()
 
 
@@ -310,6 +371,7 @@ class PairedCanvas(_Canvas):
         axes.tick_params(axis="y", labelsize=9.5, colors=_TEXT, length=3)
         unit_text = f" ({units})" if units else ""
         axes.set_ylabel(f"{label}{unit_text}", fontsize=10, color=_TEXT)
+        _apply_scale(axes, metric, befores + afters)
         axes.grid(axis="y", color=_GRID, alpha=0.6, linewidth=0.7, zorder=0)
         axes.set_axisbelow(True)
         for spine in ("top", "right"):
@@ -332,7 +394,10 @@ class PairedCanvas(_Canvas):
                 color=_MUTED_TEXT,
             )
 
-        caption = [f"{len(pairs)} patients, one line each."]
+        caption = [
+            f"{len(pairs)} patients, one line each — exactly the patients the paired "
+            "test used for this row, which may not be the same patients as another row."
+        ]
         if direction:
             caption.append(
                 f"{improved} improved with {challenger}, {worsened} worsened"
