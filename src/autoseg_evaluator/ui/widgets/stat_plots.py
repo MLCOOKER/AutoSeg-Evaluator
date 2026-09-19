@@ -70,6 +70,9 @@ _GRID = "#D6DAE0"
 _ZERO_LINE = "#5A6572"
 _SIGNIFICANT = "#0F6E6E"
 _NOT_SIGNIFICANT = "#6B7683"
+_BETTER = "#0F6E6E"
+_WORSE = "#B06A1E"
+_TIED = "#A8AFB8"
 
 
 def _elide(text: str, limit: int = MAX_TICK_LABEL) -> str:
@@ -95,9 +98,17 @@ class DistributionCanvas(_Canvas):
         data: dict[str, dict[str, list[float]]],
         metric: str,
         *,
+        display: str = "",
         title: str = "",
     ) -> None:
-        """``data`` is ``{organ: {source: [values]}}``."""
+        """``data`` is ``{organ: {source: [values]}}``.
+
+        ``metric`` is the metric **key**, because direction is looked up from it.
+        ``display`` is what the axis says. They are separate parameters because
+        passing the label where the key belongs silently disables the direction
+        logic — the lookup misses and every metric reads as undirected.
+        """
+        label = display or metric
         self.clear()
         axes = self.figure.add_subplot(111)
         organs = list(data.keys())
@@ -173,10 +184,10 @@ class DistributionCanvas(_Canvas):
             ha="right",
             fontsize=8,
         )
-        axes.set_ylabel(metric)
+        axes.set_ylabel(label)
         direction = metric_direction(metric)
         if direction:
-            axes.set_ylabel(f"{metric}  ({'higher' if direction > 0 else 'lower'} is better)")
+            axes.set_ylabel(f"{label}  ({'higher' if direction > 0 else 'lower'} is better)")
         if title:
             axes.set_title(title, fontsize=10)
         axes.grid(axis="y", alpha=0.25, linewidth=0.6)
@@ -193,6 +204,144 @@ class DistributionCanvas(_Canvas):
             bbox_to_anchor=(1.01, 1.0),
             borderaxespad=0.0,
         )
+        self.draw_idle()
+
+
+class PairedCanvas(_Canvas):
+    """Every patient's two values, joined.
+
+    The distribution figure shows what each source produced; it cannot show
+    which two points came from the same patient, and that is the whole basis of
+    a paired test. Two sources can have near-identical distributions while every
+    patient moved the same way, and identical distributions while the movement
+    was noise — the summary looks the same in both cases and the conclusion is
+    opposite.
+
+    So each patient is one line between two columns, following Weissgerber's
+    argument that a summary statistic should not be the only thing shown when
+    the individual observations are what carry the claim.
+    """
+
+    def plot(
+        self,
+        pairs: list[tuple[str, float, float]],
+        metric: str,
+        *,
+        display: str = "",
+        reference: str,
+        challenger: str,
+        organ: str = "",
+        units: str = "",
+        subtitle: str = "",
+    ) -> None:
+        """``pairs`` is ``[(patient, reference value, challenger value)]``.
+
+        ``metric`` is the metric **key** — direction is looked up from it, and a
+        display label passed here would silently colour every line as tied.
+        ``display`` is what the reader sees.
+        """
+        label = display or metric
+        self.clear()
+        axes = self.figure.add_subplot(111)
+        if not pairs:
+            axes.text(
+                0.5,
+                0.5,
+                "No patient has both sources for this organ",
+                ha="center",
+                va="center",
+                fontsize=11,
+                color=_MUTED_TEXT,
+            )
+            axes.set_axis_off()
+            self.draw_idle()
+            return
+
+        direction = metric_direction(metric)
+        improved = worsened = tied = 0
+        for _patient, before, after in pairs:
+            change = after - before
+            if change == 0 or not direction:
+                colour, width = _TIED, 1.0
+                tied += change == 0
+            elif (change > 0) == (direction > 0):
+                colour, width = _BETTER, 1.2
+                improved += 1
+            else:
+                colour, width = _WORSE, 1.2
+                worsened += 1
+            axes.plot([0, 1], [before, after], color=colour, linewidth=width, alpha=0.75, zorder=2)
+
+        befores = [before for _p, before, _a in pairs]
+        afters = [after for _p, _b, after in pairs]
+        for x, values in ((0, befores), (1, afters)):
+            axes.scatter(
+                [x] * len(values),
+                values,
+                s=38,
+                zorder=4,
+                color="white",
+                edgecolors=_TEXT,
+                linewidths=1.3,
+            )
+            median = float(np.median(values))
+            axes.plot(
+                [x - 0.12, x + 0.12],
+                [median, median],
+                color=_TEXT,
+                linewidth=2.4,
+                zorder=5,
+                solid_capstyle="round",
+            )
+            axes.annotate(
+                f"median {median:.3f}",
+                (x, median),
+                textcoords="offset points",
+                xytext=(0, 10),
+                ha="center",
+                fontsize=9,
+                color=_TEXT,
+            )
+
+        axes.set_xlim(-0.45, 1.45)
+        axes.set_xticks([0, 1])
+        axes.set_xticklabels([reference, challenger], fontsize=11, color=_TEXT)
+        axes.tick_params(axis="x", length=0)
+        axes.tick_params(axis="y", labelsize=9.5, colors=_TEXT, length=3)
+        unit_text = f" ({units})" if units else ""
+        axes.set_ylabel(f"{label}{unit_text}", fontsize=10, color=_TEXT)
+        axes.grid(axis="y", color=_GRID, alpha=0.6, linewidth=0.7, zorder=0)
+        axes.set_axisbelow(True)
+        for spine in ("top", "right"):
+            axes.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            axes.spines[spine].set_color(_GRID)
+
+        title = f"{organ}: {label}" if organ else label
+        axes.set_title(title, fontsize=12, color=_TEXT, fontweight="bold", loc="left", pad=16)
+        if subtitle:
+            axes.annotate(
+                subtitle,
+                xy=(0.0, 1.0),
+                xycoords="axes fraction",
+                xytext=(0, 7),
+                textcoords="offset points",
+                ha="left",
+                va="bottom",
+                fontsize=9.5,
+                color=_MUTED_TEXT,
+            )
+
+        caption = [f"{len(pairs)} patients, one line each."]
+        if direction:
+            caption.append(
+                f"{improved} improved with {challenger}, {worsened} worsened"
+                + (f", {tied} identical" if tied else "")
+                + ". A line's colour is that patient's direction, not its size."
+            )
+        else:
+            caption.append(f"{metric} has no better or worse direction, so lines are not coloured.")
+        self.figure.supxlabel("\n".join(caption), fontsize=9, color=_MUTED_TEXT, ha="center")
         self.draw_idle()
 
 
@@ -420,4 +569,5 @@ __all__ = [
     "MIN_N_FOR_VIOLIN",
     "DistributionCanvas",
     "ForestCanvas",
+    "PairedCanvas",
 ]

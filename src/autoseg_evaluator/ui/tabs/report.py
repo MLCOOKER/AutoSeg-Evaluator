@@ -79,7 +79,11 @@ from autoseg_evaluator.data.report import (
     interval_text,
     metric_direction,
 )
-from autoseg_evaluator.ui.widgets.stat_plots import DistributionCanvas, ForestCanvas
+from autoseg_evaluator.ui.widgets.stat_plots import (
+    DistributionCanvas,
+    ForestCanvas,
+    PairedCanvas,
+)
 
 _ALPHA = 0.05
 
@@ -538,6 +542,31 @@ class ReportTab(QWidget):
 
         self._distribution = DistributionCanvas()
         outer.addWidget(self._wrap("Distributions", self._distribution))
+        paired_box = QGroupBox("Paired differences", self)
+        paired_layout = QVBoxLayout(paired_box)
+        paired_layout.setContentsMargins(6, 6, 6, 6)
+        paired_controls = QHBoxLayout()
+        paired_controls.addWidget(QLabel("Show pairs for", self))
+        self._paired_combo = QComboBox(self)
+        self._paired_combo.setToolTip(
+            _tip(
+                "Which row of the comparison table to open up. Across organs "
+                "these are the organs; across sources they are the sources.",
+                "The distribution figure shows what each source produced, but "
+                "not which two points came from the same patient — and that is "
+                "the whole basis of a paired test. Two sources can have "
+                "near-identical distributions while every patient moved the same "
+                "way, and identical distributions while the movement was noise. "
+                "The summary looks the same; the conclusion is opposite.",
+            )
+        )
+        self._paired_combo.currentIndexChanged.connect(self._draw_paired)
+        paired_controls.addWidget(self._paired_combo, stretch=1)
+        paired_layout.addLayout(paired_controls)
+        self._paired = PairedCanvas()
+        paired_layout.addWidget(self._paired)
+        outer.addWidget(paired_box)
+
         self._forest = ForestCanvas()
         # The toggle belongs beside the figure it rescales, not among the
         # controls that choose what is compared — it changes how one plot is
@@ -822,6 +851,8 @@ class ReportTab(QWidget):
             for table in (self._coverage_table, self._descriptive_table, self._comparison_table):
                 table.setRowCount(0)
             self._distribution.plot({}, metric or "")
+            self._paired_combo.clear()
+            self._paired.plot([], metric or "", reference="", challenger="")
             self._forest.plot({}, metric or "", reference="", challenger="")
             return
 
@@ -863,7 +894,8 @@ class ReportTab(QWidget):
                 }
                 for organ in organs
             },
-            readable_metric(metric),
+            metric,
+            display=readable_metric(metric),
         )
         scales = None
         if self._relative_check.isChecked():
@@ -882,6 +914,7 @@ class ReportTab(QWidget):
             forest_subtitle = f"Paired Hodges–Lehmann difference, {challenger} − {reference}"
         if tolerance:
             forest_subtitle = f"{forest_subtitle} · {tolerance}"
+        self._repopulate_paired(family)
         self._forest.plot(
             family,
             metric,
@@ -958,6 +991,52 @@ class ReportTab(QWidget):
             return tuple(self._results.tolerances())
         except (AttributeError, TypeError, ValueError):
             return (None, None)
+
+    def _repopulate_paired(self, family: dict) -> None:
+        """Offer the rows that actually have a comparison to open up."""
+        combo = self._paired_combo
+        previous = combo.currentText()
+        available = [label for label, result in family.items() if result is not None]
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(available)
+        if previous in available:
+            combo.setCurrentText(previous)
+        combo.blockSignals(False)
+        combo.setEnabled(len(available) > 1)
+        self._draw_paired()
+
+    def _draw_paired(self) -> None:
+        """The chosen row, patient by patient."""
+        metric = self._selected_metric()
+        reference = self._reference_combo.currentText()
+        label = self._paired_combo.currentText()
+        axis = self._axis()
+        if not metric or not reference or not label:
+            self._paired.plot([], metric or "", reference=reference, challenger="")
+            return
+        if axis is FamilyAxis.SOURCES:
+            organ, challenger = self._selected_organ(), label
+        else:
+            organ, challenger = label, self._challenger_combo.currentText()
+        if not organ or not challenger or challenger == reference:
+            self._paired.plot([], metric, reference=reference, challenger=challenger)
+            return
+
+        tolerance = tolerance_note(metric, *self._tolerances())
+        subtitle = f"Each line is one patient · {challenger} against {reference}"
+        if tolerance:
+            subtitle = f"{subtitle} · {tolerance}"
+        self._paired.plot(
+            self._model.paired_values(organ, metric, reference, challenger),
+            metric,
+            display=readable_metric(metric),
+            reference=reference,
+            challenger=challenger,
+            organ=organ,
+            units=metric_units(metric),
+            subtitle=subtitle,
+        )
 
     def _reference_median(
         self,

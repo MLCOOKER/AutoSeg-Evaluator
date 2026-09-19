@@ -1561,3 +1561,107 @@ def test_a_metric_needing_no_tolerance_does_not_claim_one(tab):
     _select(tab, ["Parotid (L)"])
     subtitle = " ".join(t.get_text() for t in tab._forest.figure.axes[0].texts)
     assert "tolerance" not in subtitle
+
+
+# ---- Paired-difference view ------------------------------------------------
+
+
+def _paired_lines(tab):
+    """The per-patient connecting lines, excluding grid and median marks."""
+    axes = tab._paired.figure.axes[0]
+    return [
+        line
+        for line in axes.get_lines()
+        if len(line.get_xdata()) == 2 and list(line.get_xdata()) == [0, 1]
+    ]
+
+
+def test_the_paired_view_draws_one_line_per_patient(tab):
+    """The distribution figure cannot show which two points share a patient."""
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    tab._paired_combo.setCurrentText("Parotid (L)")
+
+    axes = tab._paired.figure.axes[0]
+    assert axes.get_title(loc="left") == "Parotid (L): Dice"
+    assert [t.get_text() for t in axes.get_xticklabels()] == [REFERENCE, CHALLENGER]
+    assert len(_paired_lines(tab)) == PATIENTS
+
+
+def test_the_paired_view_shows_exactly_what_the_test_analysed(tab):
+    """A thin organ has four pairs, not ten, and the figure says four."""
+    _select(tab, ORGANS)
+    tab._paired_combo.setCurrentText(THIN_ORGAN)
+    assert len(_paired_lines(tab)) == 4
+    assert "4 patients" in tab._paired.figure.get_supxlabel()
+
+
+def test_line_colour_follows_the_metric_direction(tab):
+    """A patient whose Dice fell and whose Hausdorff fell did not move the same way."""
+    _select(tab, ORGANS)
+    tab._paired_combo.setCurrentText("Parotid (L)")
+
+    tab._metric_combo.setCurrentText("dice")
+    on_dice = {line.get_color() for line in _paired_lines(tab)}
+    tab._metric_combo.setCurrentText("hausdorff95")
+    on_hd = {line.get_color() for line in _paired_lines(tab)}
+
+    # The challenger is worse on both metrics in this fixture, so both read the
+    # same colour despite the raw values moving in opposite directions.
+    assert on_dice == on_hd
+    assert len(on_dice) == 1
+
+
+def test_the_caption_counts_the_directions(tab):
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    tab._paired_combo.setCurrentText("Parotid (L)")
+    caption = tab._paired.figure.get_supxlabel()
+    assert f"0 improved with {CHALLENGER}, {PATIENTS} worsened" in caption
+
+
+def test_an_undirected_metric_leaves_the_lines_uncoloured(qapp):
+    rows = []
+    for patient in range(6):
+        for source, value in ((REFERENCE, 1.1), (CHALLENGER, 0.9)):
+            row = _row_for(f"P{patient}", "Parotid (L)", source, 0.8)
+            row["metrics"] = {"volume_ratio": value + patient * 0.01}
+            rows.append(row)
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._reference_combo.setCurrentText(REFERENCE)
+    widget._challenger_combo.setCurrentText(CHALLENGER)
+    _select(widget, ["Parotid (L)"])
+
+    assert "no better or worse direction" in widget._paired.figure.get_supxlabel()
+    widget.deleteLater()
+
+
+def test_the_paired_selector_follows_the_axis(tab):
+    """Across organs it lists organs; across sources it lists sources."""
+    _select(tab, ORGANS)
+    offered = [tab._paired_combo.itemText(i) for i in range(tab._paired_combo.count())]
+    assert sorted(offered) == sorted(ORGANS)
+
+    _across_sources(tab, "Parotid (L)")
+    offered = [tab._paired_combo.itemText(i) for i in range(tab._paired_combo.count())]
+    assert sorted(offered) == sorted([CHALLENGER, THIRD])
+    assert tab._paired.figure.axes[0].get_title(loc="left").startswith("Parotid (L):")
+
+
+def test_the_paired_view_matches_the_model(tab):
+    """Drawn from the same call the test consumes, not a parallel selection."""
+    _select(tab, ORGANS)
+    tab._paired_combo.setCurrentText("Parotid (L)")
+    pairs = tab._model.paired_values("Parotid (L)", "dice", REFERENCE, CHALLENGER)
+    drawn = sorted(tuple(line.get_ydata()) for line in _paired_lines(tab))
+    assert drawn == sorted((before, after) for _p, before, after in pairs)
+
+
+def test_an_empty_paired_view_says_so(tab):
+    tab._challenger_combo.setCurrentText(REFERENCE)
+    axes = tab._paired.figure.axes[0]
+    assert any("No patient has both sources" in t.get_text() for t in axes.texts)

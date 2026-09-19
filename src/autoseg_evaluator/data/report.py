@@ -504,6 +504,20 @@ class ReportModel:
 
     # ---- Coverage ---------------------------------------------------------
 
+    def paired_values(
+        self, organ: str, metric: str, source_a: str, source_b: str
+    ) -> list[tuple[str, float, float]]:
+        """``[(patient, a, b)]`` for the patients both sources contoured.
+
+        The raw material of the paired test, returned in the same order the test
+        consumes it, so a figure drawn from this is showing exactly what was
+        analysed rather than a parallel selection of it.
+        """
+        a_values = self.values(organ, source_a, metric)
+        b_values = self.values(organ, source_b, metric)
+        shared = sorted(set(a_values) & set(b_values))
+        return [(patient, a_values[patient], b_values[patient]) for patient in shared]
+
     def excluded_patients(self, organ: str, metric: str, source_a: str, source_b: str) -> set[str]:
         """Patients dropped from this comparison for contributing several cases."""
         return self.multi_case_patients(organ, source_a, metric) | self.multi_case_patients(
