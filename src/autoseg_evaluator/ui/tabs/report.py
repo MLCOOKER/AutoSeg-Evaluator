@@ -477,25 +477,6 @@ class ReportTab(QWidget):
         buttons.addWidget(self._select_none_btn)
         buttons.addStretch(1)
         right.addLayout(buttons)
-        self._relative_check = QCheckBox("Forest in % of reference median", self)
-        self._relative_check.setToolTip(
-            _tip(
-                "Rescales the forest so each row is a percentage of the "
-                "reference's own median for that organ, instead of the metric's "
-                "raw units.",
-                "Raw units are the default because they are what a clinician "
-                "judges and what goes in a paper. They make organs incomparable "
-                "on an unbounded metric though: the same 25% degradation is "
-                "10 mm on bowel and 0.4 mm on a cochlea, and on one shared axis "
-                "the cochlea collapses onto zero.",
-                "Bounded metrics — Dice, surface Dice — do not have this "
-                "problem, so leaving it off is usually right for them.",
-                "A row whose reference median is zero has no relative form and "
-                "is omitted; the figure footer says how many.",
-            )
-        )
-        self._relative_check.toggled.connect(self._recompute)
-        right.addWidget(self._relative_check)
         form.addLayout(right, stretch=1)
         outer.addWidget(controls)
 
@@ -532,7 +513,33 @@ class ReportTab(QWidget):
         self._distribution = DistributionCanvas()
         outer.addWidget(self._wrap("Distributions", self._distribution))
         self._forest = ForestCanvas()
-        outer.addWidget(self._wrap("Difference from reference", self._forest))
+        # The toggle belongs beside the figure it rescales, not among the
+        # controls that choose what is compared — it changes how one plot is
+        # drawn, nothing about the analysis.
+        forest_box = QGroupBox("Difference from reference", self)
+        forest_layout = QVBoxLayout(forest_box)
+        forest_layout.setContentsMargins(6, 6, 6, 6)
+        self._relative_check = QCheckBox("Show as % of the reference's median", self)
+        self._relative_check.setToolTip(
+            _tip(
+                "Rescales this figure so each row is a percentage of the "
+                "reference's own median for that organ, instead of the metric's "
+                "raw units.",
+                "Raw units are the default because they are what a clinician "
+                "judges and what goes in a paper. They make organs incomparable "
+                "on an unbounded metric though: the same 25% degradation is "
+                "10 mm on bowel and 0.4 mm on a cochlea, and on one shared axis "
+                "the cochlea collapses onto zero.",
+                "Bounded metrics — Dice, surface Dice — do not have this "
+                "problem, so leaving it off is usually right for them.",
+                "A row whose reference median is zero has no relative form and "
+                "is omitted; the figure footer says how many.",
+            )
+        )
+        self._relative_check.toggled.connect(self._recompute)
+        forest_layout.addWidget(self._relative_check)
+        forest_layout.addWidget(self._forest)
+        outer.addWidget(forest_box)
 
         self._acquisition_box = QGroupBox("Acquisition parameters", self)
         acquisition_layout = QVBoxLayout(self._acquisition_box)

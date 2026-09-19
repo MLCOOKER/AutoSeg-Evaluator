@@ -1426,3 +1426,18 @@ def test_relative_mode_makes_organs_on_different_scales_comparable(qapp):
     assert max(relative) / min(relative) < 1.2
     assert all(20.0 < value < 30.0 for value in relative)
     widget.deleteLater()
+
+
+def test_the_relative_toggle_sits_with_the_figure_it_rescales(tab):
+    """It changes how one plot is drawn, not what is being compared.
+
+    Among the family controls it read as an analysis choice, which it is not.
+    """
+    from PySide6.QtWidgets import QGroupBox
+
+    box = tab._relative_check.parentWidget()
+    while box is not None and not isinstance(box, QGroupBox):
+        box = box.parentWidget()
+    assert box is not None
+    assert box.title() == "Difference from reference"
+    assert tab._forest in box.findChildren(type(tab._forest))
