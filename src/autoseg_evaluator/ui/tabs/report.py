@@ -42,11 +42,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from PySide6.QtCore import QPointF, QRect, QSizeF, Qt
+from PySide6.QtCore import QRect, QSizeF, Qt
 from PySide6.QtGui import (
     QColor,
     QImage,
-    QLinearGradient,
     QPageLayout,
     QPageSize,
     QPainter,
@@ -1747,23 +1746,27 @@ _FIGURE_TITLES = {
     "forest": "Forest plot",
 }
 
-#: The band lifted out of the splash artwork for the masthead: the wordmark, the
-#: dice and the top of the head, leaving the strapline behind because the page's
-#: own title already says what the document is. Measured against the shipped
-#: 1000x563 image, so it moves if that artwork is replaced.
-_BANNER_CROP_TOP = 150
-_BANNER_CROP_HEIGHT = 198
+#: The band lifted out of the splash artwork for the masthead: wordmark,
+#: strapline, dice and head. Measured against the shipped 1000x563 image, so it
+#: moves if that artwork is replaced.
+_BANNER_CROP_TOP = 85
+_BANNER_CROP_HEIGHT = 325
 
-#: How far in from each edge the banner dissolves into the page, as a fraction
-#: of that edge. The bottom is shallowest because the wordmark sits close to it
-#: and a fade that reaches the letters reads as a printing fault; the top is
-#: deepest because there is nothing up there but backdrop.
-_BANNER_FADE = {"left": 0.06, "right": 0.14, "top": 0.30, "bottom": 0.13}
+#: How tall the masthead band is, as a fraction of the page width. Kept thin
+#: enough that it introduces the first page rather than taking it over.
+_BANNER_HEIGHT_SHARE = 0.125
+
+#: What the band is filled with where the artwork does not reach. The artwork is
+#: set flush right rather than left, which looks like a choice about where the
+#: logo goes and is really about the seam: its left edge is pure black and
+#: disappears into this fill, while its right edge carries the lit rim of the
+#: head and would show as a hard line against it.
+_BANNER_FILL = "#000000"
 
 _PDF_STYLE = f"""
 body {{ color: {_INK}; font-family: "Segoe UI", Calibri, Arial, sans-serif; }}
 td, th, p {{ font-family: "Segoe UI", Calibri, Arial, sans-serif; }}
-p.banner {{ margin: 0; }}
+p.banner {{ margin: 0 0 9px 0; }}
 h1 {{ font-family: Georgia, "Times New Roman", serif; font-size: 19pt;
       color: {_INK}; margin: 4px 0 1px 0; font-weight: normal; }}
 p.subtitle {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
@@ -1812,62 +1815,28 @@ def _section(title: str) -> str:
 
 
 def _banner_image(width: int) -> QImage | None:
-    """The masthead band, dissolving into white at all four edges.
+    """The masthead band: the artwork flush right on a black field.
 
     Drawn here rather than shipped as a second file so it follows the page
     width, and so the artwork stays a single asset: the splash screen and this
-    are the same image.
+    are the same image. The artwork cannot span the measure at a readable height
+    — the wordmark sets its aspect — so the rest of the band is filled, and
+    every edge of it is hard.
     """
     source = _ASSET_DIR / "splash.png"
     art = QImage(str(source)) if source.exists() else QImage()
     if art.isNull():
         return None
     band = art.copy(QRect(0, _BANNER_CROP_TOP, art.width(), _BANNER_CROP_HEIGHT))
-    height = max(1, round(width * band.height() / band.width()))
-    band = band.scaled(
-        width,
-        height,
-        Qt.AspectRatioMode.IgnoreAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
+    height = max(1, round(width * _BANNER_HEIGHT_SHARE))
+    band = band.scaledToHeight(height, Qt.TransformationMode.SmoothTransformation)
+
     canvas = QImage(width, height, QImage.Format.Format_RGB32)
-    canvas.fill(QColor("#FFFFFF"))
+    canvas.fill(QColor(_BANNER_FILL))
     painter = QPainter(canvas)
-    painter.drawImage(0, 0, band)
-    for origin, inward, rect in _fade_spans(width, height):
-        wash = QLinearGradient(origin, inward)
-        wash.setColorAt(0.0, QColor(255, 255, 255, 255))
-        wash.setColorAt(0.45, QColor(255, 255, 255, 110))
-        wash.setColorAt(1.0, QColor(255, 255, 255, 0))
-        painter.fillRect(rect, wash)
+    painter.drawImage(width - band.width(), 0, band)
     painter.end()
     return canvas
-
-
-def _fade_spans(width: int, height: int) -> list[tuple[QPointF, QPointF, QRect]]:
-    """Where each edge's white wash runs from, to, and over.
-
-    Four straight washes rather than one radial vignette: the corners take two
-    each and so go whiter, which is what a corner should do.
-    """
-    left = int(width * _BANNER_FADE["left"])
-    right = int(width * _BANNER_FADE["right"])
-    top = int(height * _BANNER_FADE["top"])
-    bottom = int(height * _BANNER_FADE["bottom"])
-    return [
-        (QPointF(0, 0), QPointF(left, 0), QRect(0, 0, left + 1, height)),
-        (
-            QPointF(width, 0),
-            QPointF(width - right, 0),
-            QRect(width - right, 0, right + 1, height),
-        ),
-        (QPointF(0, 0), QPointF(0, top), QRect(0, 0, width, top + 1)),
-        (
-            QPointF(0, height),
-            QPointF(0, height - bottom),
-            QRect(0, height - bottom, width, bottom + 1),
-        ),
-    ]
 
 
 def _banner_html(scratch: Path, width: int) -> str:
