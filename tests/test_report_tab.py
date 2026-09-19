@@ -10,7 +10,6 @@ reported as a failure to detect rather than as agreement.
 
 from __future__ import annotations
 
-import csv
 import os
 import sys
 
@@ -174,13 +173,18 @@ def test_coverage_separates_a_declined_organ_from_an_unrun_patient(tab):
     """The distinction that decides whether an absence is a finding."""
     declined = _find(tab._coverage_table, THIN_ORGAN, CHALLENGER)
     assert declined["Coverage"] == "4 / 10"
-    assert declined["Not produced"] == "6"
-    assert declined["Not run"] == "0"
 
     unrun = _find(tab._coverage_table, "Parotid (L)", THIRD)
     assert unrun["Coverage"] == "8 / 8 · 2 not run"
-    assert unrun["Not produced"] == "0"
-    assert unrun["Not run"] == "2"
+
+    # The breakdown columns are gone: produced-versus-not-run cannot be
+    # determined from metric rows alone, so the cell text says what is knowable
+    # and no column claims more.
+    headers = [
+        tab._coverage_table.horizontalHeaderItem(c).text()
+        for c in range(tab._coverage_table.columnCount())
+    ]
+    assert headers == ["Organ", "Source", "Coverage"]
 
 
 def test_a_comparison_reports_how_much_the_pairing_discarded(tab):
@@ -326,44 +330,60 @@ def test_the_figures_survive_losing_their_comparison(tab):
 # ---- Export ---------------------------------------------------------------
 
 
-def test_export_writes_one_row_per_family_member(tab, tmp_path, monkeypatch):
-    _select(tab, ["Parotid (L)", "Parotid (R)"])
-    target = tmp_path / "comparison.csv"
+def _export_pdf(tab, tmp_path, monkeypatch, name="report.pdf"):
+    target = tmp_path / name
     monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "CSV"))
+        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "PDF"))
     )
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     tab._export_btn.click()
-
-    with open(target, encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    assert [r["organ"] for r in rows] == ["Parotid (L)", "Parotid (R)"]
-    assert all(r["challenger"] == CHALLENGER and r["reference"] == REFERENCE for r in rows)
-    assert all(r["n_pairs"] == "10" for r in rows)
-    assert all(0.0 <= float(r["p"]) <= 1.0 for r in rows)
+    return target
 
 
-def test_the_exported_comparison_carries_no_patient_identifiers(tab, tmp_path, monkeypatch):
+def test_export_writes_a_pdf_of_the_whole_page(tab, tmp_path, monkeypatch):
+    """A table on its own loses the selections it was computed under."""
+    _select(tab, ["Parotid (L)", "Parotid (R)"])
+    target = _export_pdf(tab, tmp_path, monkeypatch)
+
+    assert target.exists()
+    assert target.read_bytes().startswith(b"%PDF")
+    assert target.stat().st_size > 20_000  # the figures are in there
+
+
+def test_the_export_carries_no_patient_identifiers(tab, tmp_path):
     """The report is aggregate by construction; the export must stay that way.
 
-    These structure sets come from real, albeit anonymised, patients — a
-    per-patient column here would carry that back out of the application.
+    These structure sets come from real, albeit anonymised, patients, and a
+    document leaving the application is the last place to start naming them.
     """
+    from pathlib import Path
+
     _select(tab, ORGANS)
-    target = tmp_path / "comparison.csv"
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "CSV"))
-    )
-    tab._export_btn.click()
-
-    text = target.read_text(encoding="utf-8")
+    html = tab._pdf_html(Path(tmp_path))
     for patient in range(PATIENTS):
-        assert f"P{patient:02d}" not in text
-    header = text.splitlines()[0].split(",")
-    assert not any("patient" in column for column in header)
+        assert f"P{patient:02d}" not in html
+    assert "patient_id" not in html
 
 
-def test_export_with_nothing_to_export_says_so(tab, monkeypatch):
-    tab._challenger_combo.setCurrentText(REFERENCE)  # no comparison possible
+def test_the_export_records_what_it_was_produced_under(tab, tmp_path):
+    """Which metric, which ground truth, which sources — a year later this is
+    most of what makes the tables readable."""
+    from pathlib import Path
+
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    html = tab._pdf_html(Path(tmp_path))
+    assert "Ground truth" in html
+    assert REFERENCE in html and CHALLENGER in html
+    assert "Dice" in html
+    assert "Coverage" in html and "Descriptive statistics" in html
+    assert "Paired comparison" in html and "Methods" in html
+
+
+def test_export_with_nothing_to_export_says_so(qapp, monkeypatch):
+    widget = ReportTab()
+    widget.refresh()  # no results at all
+    tab = widget
     told: list[str] = []
     monkeypatch.setattr(
         QMessageBox, "information", staticmethod(lambda _p, _t, text, *a, **k: told.append(text))
@@ -382,6 +402,23 @@ def test_a_cancelled_save_dialog_writes_nothing(tab, tmp_path, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
     tab._export_btn.click()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_saving_the_figures_writes_one_file_each(tab, tmp_path, monkeypatch):
+    _select(tab, ORGANS)
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(tmp_path))
+    )
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    tab._figures_btn.click()
+
+    written = sorted(p.name for p in tmp_path.iterdir())
+    assert len(written) == 3
+    assert any(name.endswith("_distributions.png") for name in written)
+    assert any(name.endswith("_paired.png") for name in written)
+    assert any(name.endswith("_forest.png") for name in written)
+    # The stem says what they are of, so a folder of them stays identifiable.
+    assert all(name.startswith("dice_Limbus_MVision") for name in written)
 
 
 # ---- Stale state ----------------------------------------------------------
@@ -489,6 +526,26 @@ def test_the_help_corrects_the_three_standard_misreadings(tab):
     assert "unadjusted" in tips["p"].lower()
 
 
+def test_no_tooltip_mentions_a_correction_that_is_not_applied(tab):
+    """Holm was removed; leaving it in the help would describe other software."""
+    widgets = [
+        tab._metric_combo,
+        tab._reference_combo,
+        tab._challenger_combo,
+        tab._organ_list,
+        tab._axis_combo,
+        tab._ground_truth_combo,
+        tab._export_btn,
+        tab._figures_btn,
+        tab._relative_check,
+        tab._sort_check,
+    ]
+    texts = [w.toolTip() for w in widgets]
+    for table in (tab._coverage_table, tab._descriptive_table, tab._comparison_table):
+        texts += [table.horizontalHeaderItem(c).toolTip() for c in range(table.columnCount())]
+    assert not any("holm" in text.lower() for text in texts)
+
+
 def test_a_coverage_cell_explains_its_own_shorthand(tab):
     """`8 / 8 · 2 not run` is unreadable without being told what it means."""
     for row in range(tab._coverage_table.rowCount()):
@@ -594,20 +651,14 @@ def test_the_methods_paragraph_admits_the_unestimable_member(unmatched_tab):
     assert "1 could not be estimated and are reported as such" in methods
 
 
-def test_an_unestimable_organ_exports_as_a_row_not_a_gap(unmatched_tab, tmp_path, monkeypatch):
-    _select(unmatched_tab, ["Parotid (L)", "Cochlea (L)"])
-    target = tmp_path / "comparison.csv"
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "CSV"))
-    )
-    unmatched_tab._export_btn.click()
+def test_an_unestimable_organ_exports_as_a_row_not_a_gap(unmatched_tab, tmp_path):
+    """Omitting it would leave no trace the comparison was asked for."""
+    from pathlib import Path
 
-    with open(target, encoding="utf-8", newline="") as handle:
-        rows = {r["organ"]: r for r in csv.DictReader(handle)}
-    assert set(rows) == {"Parotid (L)", "Cochlea (L)"}
-    assert rows["Cochlea (L)"]["n_pairs"] == "0"
-    assert rows["Cochlea (L)"]["ci_status"] == "not estimable"
-    assert rows["Cochlea (L)"]["p"] == ""
+    _select(unmatched_tab, ["Parotid (L)", "Cochlea (L)"])
+    html = unmatched_tab._pdf_html(Path(tmp_path))
+    assert "Cochlea (L)" in html
+    assert "not estimable: no matched patients" in html
 
 
 def test_a_collision_inside_one_context_is_reported(qapp):
@@ -837,20 +888,16 @@ def test_the_source_rows_are_unadjusted_too(tab):
     assert all(r.p_adjusted is None for r in tab._family.values())
 
 
-def test_export_across_sources_keys_rows_by_source(tab, tmp_path, monkeypatch):
-    _across_sources(tab)
-    target = tmp_path / "by_source.csv"
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), "CSV"))
-    )
-    tab._export_btn.click()
+def test_export_across_sources_names_the_organ_and_the_sources(tab, tmp_path):
+    """The source-wise export has to say which organ it is about."""
+    from pathlib import Path
 
-    with open(target, encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    assert [r["source"] for r in rows] == [CHALLENGER, THIRD]
-    # The challenger column names the row, not the inert combo.
-    assert [r["challenger"] for r in rows] == [CHALLENGER, THIRD]
-    assert all(r["reference"] == REFERENCE for r in rows)
+    _across_sources(tab, "Parotid (L)")
+    html = tab._pdf_html(Path(tmp_path))
+    assert "Parotid (L)" in html
+    assert CHALLENGER in html and THIRD in html
+    # The fixed side is labelled as the organ, not as a challenger.
+    assert ">Organ</th>" in html
 
 
 def test_switching_back_restores_the_organ_family(tab):
@@ -1670,18 +1717,59 @@ def test_an_empty_paired_view_says_so(tab):
 # ---- Which patients, and on what scale -------------------------------------
 
 
-def test_the_distribution_shows_per_source_counts_not_one_per_organ(tab):
-    """A single n under an organ claims a coverage the sources do not share."""
+def test_the_distribution_stars_an_organ_with_uneven_coverage(tab):
+    """A bare n would claim a coverage the sources do not share."""
     tab._metric_combo.setCurrentText("dice")
     _select(tab, ORGANS)
     axes = tab._distribution.figure.axes[0]
+    labels = {t.get_text().split("\n")[0]: t.get_text() for t in axes.get_xticklabels()}
 
-    labels = [t.get_text() for t in axes.get_xticklabels()]
-    assert all("n=" not in label for label in labels)  # no aggregate count
-    # One annotation per drawn cluster, carrying that source's own count.
-    counts = sorted(t.get_text() for t in axes.texts if t.get_text().isdigit())
-    assert "4" in counts  # the submandibular gland, which one source declined
-    assert "10" in counts
+    # One source declined this organ on six patients, another was never run on two.
+    assert labels[THIN_ORGAN].endswith("(n=10*)")
+    assert labels["Parotid (L)"].endswith("(n=10*)")
+    assert "*" in tab._distribution.figure.get_supxlabel()
+    assert "did not all contour the same number" in tab._distribution.figure.get_supxlabel()
+
+
+def test_an_evenly_covered_cohort_gets_no_star(qapp):
+    rows = []
+    for patient in range(6):
+        for source in (REFERENCE, CHALLENGER):
+            rows.append(_row_for(f"P{patient}", "Parotid (L)", source, 0.8))
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+    labels = [t.get_text() for t in widget._distribution.figure.axes[0].get_xticklabels()]
+    assert labels == ["Parotid (L)\n(n=6)"]
+    assert "*" not in widget._distribution.figure.get_supxlabel()
+    widget.deleteLater()
+
+
+def test_the_distribution_axis_carries_the_units(tab):
+    tab._metric_combo.setCurrentText("hausdorff95")
+    _select(tab, ORGANS)
+    assert "(mm)" in tab._distribution.figure.axes[0].get_ylabel()
+    tab._metric_combo.setCurrentText("dice")
+    assert "(mm)" not in tab._distribution.figure.axes[0].get_ylabel()
+
+
+def test_the_distribution_widens_with_the_organ_count(tab):
+    """Twenty organs at a fixed width stack the points into a line."""
+    _select(tab, ["Parotid (L)"])
+    narrow = tab._distribution.minimumWidth()
+    _select(tab, ORGANS)
+    assert tab._distribution.minimumWidth() > narrow
+
+
+def test_the_paired_plot_imposes_no_scale(tab):
+    """It exists to show movement; a metric's full range flattens it."""
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    tab._paired_combo.setCurrentText("Parotid (L)")
+    low, high = tab._paired.figure.axes[0].get_ylim()
+    assert low > 0.1 and high < 0.99  # autoscaled to the data, not 0–1
 
 
 def test_the_distribution_caption_explains_the_marks(tab):
@@ -1708,14 +1796,6 @@ def test_an_unbounded_metric_keeps_zero_in_view(tab):
     _select(tab, ORGANS)
     low, _high = tab._distribution.figure.axes[0].get_ylim()
     assert low <= 0.0
-
-
-def test_the_paired_view_uses_the_same_scale_rule(tab):
-    tab._metric_combo.setCurrentText("dice")
-    _select(tab, ORGANS)
-    tab._paired_combo.setCurrentText("Parotid (L)")
-    low, high = tab._paired.figure.axes[0].get_ylim()
-    assert low <= 0.0 and high >= 1.0
 
 
 def _split_cohorts():

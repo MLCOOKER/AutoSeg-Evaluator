@@ -37,10 +37,12 @@ instead of printing a column of 1.000 that reads as evidence of agreement.
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QPen
+from PySide6.QtCore import QRect, QSizeF, Qt
+from PySide6.QtGui import QColor, QPageLayout, QPageSize, QPdfWriter, QPen, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -164,24 +166,6 @@ COVERAGE_COLUMNS: list[tuple[str, str]] = [
             "Caveat: patients where <i>no</i> source produced the organ generate no result row, so they are invisible here. The denominator is 'patients where at least one source produced it', not 'patients who have this organ'.",
         ),
     ),
-    (
-        "Produced",
-        _tip("Patients where this source produced the organ and the metric computed successfully."),
-    ),
-    (
-        "Not produced",
-        _tip(
-            "Patients where this source ran, but produced no contour for this organ.",
-            "This is the number that carries information about the model — it declined a case it had the chance to attempt.",
-        ),
-    ),
-    (
-        "Not run",
-        _tip(
-            "Patients where this source produced nothing at all, so it was presumably never run.",
-            "Missing data, not a model failure. Kept separate from 'not produced' for exactly that reason.",
-        ),
-    ),
 ]
 
 DESCRIPTIVE_COLUMNS: list[tuple[str, str]] = [
@@ -282,7 +266,7 @@ COMPARISON_COLUMNS: list[tuple[str, str]] = [
         "n chall. / n ref.",
         _tip(
             "What each source produced on its own, before pairing.",
-            "When these exceed <b>n pairs</b>, patients were discarded. A source compared on four of ten patients is being judged on the four it chose to attempt — very likely the four it found easiest.",
+            "When these exceed <b>n pairs</b>, patients were discarded: the comparison runs only on the patients both sources contoured.",
             "Read this before you read the result.",
         ),
     ),
@@ -299,7 +283,7 @@ COMPARISON_COLUMNS: list[tuple[str, str]] = [
         _tip(
             "The range of differences consistent with the data. Two things to read: whether it crosses zero, and how wide it is.",
             "Width is what answers 'do I need more patients'. A narrow interval straddling zero means the difference is genuinely small; a wide one means you do not yet know.",
-            "<b>Unadjusted</b> — unlike the Holm column, it is not corrected for testing several organs, so it can exclude zero while the adjusted p is not significant. That is the correction working, not a contradiction.",
+            "<b>Unadjusted</b>, like the p-value beside it: this interval describes this organ and is not widened for the other rows on screen.",
         ),
     ),
     (
@@ -327,9 +311,7 @@ COMPARISON_COLUMNS: list[tuple[str, str]] = [
             "says nothing about size.",
             "<b>Unadjusted, and per organ.</b> Each row answers its own question — "
             "for this organ and this metric, do these two sources differ? — and "
-            "that answer does not change because another organ is on screen. "
-            "Correcting across whichever organs happened to be selected made the "
-            "p-value depend on a list widget, which is worse than not correcting.",
+            "that answer does not change because another organ is on screen.",
             "Multiplicity still costs something when you scan many rows for the "
             "ones below 0.05; the note under the table says how many would look "
             "significant by chance.",
@@ -347,7 +329,7 @@ COMPARISON_COLUMNS: list[tuple[str, str]] = [
     (
         "Reading",
         _tip(
-            "The verdict in words, taken from the Holm-adjusted p.",
+            "The verdict in words, taken from this row's p-value.",
             "<b>'No detectable difference' is not 'no difference.'</b> At ten patients only fairly large effects are detectable, so a real but modest difference appears here as undetectable. Claiming equivalence would need a margin nobody has supplied.",
             "Direction is computed from the metric, so a lower Hausdorff and a higher Dice both read as 'better'.",
         ),
@@ -405,11 +387,27 @@ class ReportTab(QWidget):
         self._summary_label = QLabel("", self)
         self._summary_label.setStyleSheet("color: #777;")
         header.addWidget(self._summary_label, stretch=1)
-        self._export_btn = QPushButton("Export CSV…", self)
+        self._figures_btn = QPushButton("Save figures…", self)
+        self._figures_btn.setToolTip(
+            _tip(
+                "Writes every figure on this page to a folder as PNG, at print "
+                "resolution rather than screen resolution.",
+                "Filenames carry the metric, the sources and the organ, so a folder "
+                "of them stays identifiable once they are out of here.",
+            )
+        )
+        self._figures_btn.clicked.connect(self._on_save_figures)
+        header.addWidget(self._figures_btn)
+        self._export_btn = QPushButton("Export PDF…", self)
         self._export_btn.setToolTip(
-            "<p style='margin:0 0 6px 0'>Writes the paired comparison table — one row per "
-            "organ in the current family — with full precision.</p>"
-            "<p style='margin:0'>Aggregate only: no patient identifiers are written.</p>"
+            _tip(
+                "Writes everything on this page to one PDF: the selections it was "
+                "produced under, the tables, the figures, the warnings and the "
+                "methods paragraph.",
+                "A table on its own loses the conditions it was computed under, and "
+                "those conditions are most of what makes it readable a year later. "
+                "Aggregate throughout — no patient identifiers are written.",
+            )
         )
         self._export_btn.clicked.connect(self._on_export)
         header.addWidget(self._export_btn)
@@ -446,10 +444,9 @@ class ReportTab(QWidget):
                 "<b>Sources</b> — every other source against the reference, on one "
                 "organ. <i>For this organ, how does each vendor compare to the one "
                 "we use?</i>",
-                "Varying both at once is the combination to avoid: at ten patients "
-                "Holm can reject nothing in a family larger than 25, so five "
-                "vendors across more than five organs would show adjusted p = 1.000 "
-                "whatever the data said.",
+                "Varying both at once would put a great many comparisons on one "
+                "screen, and scanning that many for the ones below 0.05 turns a set "
+                "of separate questions into a search.",
             )
         )
         self._axis_combo.currentIndexChanged.connect(self._on_axis_changed)
@@ -491,9 +488,9 @@ class ReportTab(QWidget):
         self._organ_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         self._organ_list.setMaximumHeight(110)
         self._organ_list.setToolTip(
-            "Holm correction applies across exactly these organs. A smaller, "
-            "deliberately chosen family corrects less harshly and is the only tier "
-            "that carries a confirmatory claim; everything else is exploratory."
+            "Which organs to show. Each is analysed on its own, so adding or "
+            "removing one changes what is displayed and nothing about the "
+            "comparisons themselves."
         )
         self._organ_list.itemSelectionChanged.connect(self._recompute)
         right.addWidget(self._organ_list)
@@ -896,6 +893,7 @@ class ReportTab(QWidget):
             },
             metric,
             display=readable_metric(metric),
+            units=metric_units(metric),
         )
         scales = None
         if self._relative_check.isChecked():
@@ -1094,16 +1092,7 @@ class ReportTab(QWidget):
                         else ""
                     )
                 )
-                for column, text in enumerate(
-                    [
-                        organ if first else "",
-                        source,
-                        cell.summary(),
-                        str(cell.produced),
-                        str(cell.not_produced),
-                        str(cell.source_absent),
-                    ]
-                ):
+                for column, text in enumerate([organ if first else "", source, cell.summary()]):
                     item = QTableWidgetItem(text)
                     item.setData(ORGAN_ROLE, organ)
                     item.setToolTip(explanation)
@@ -1217,9 +1206,9 @@ class ReportTab(QWidget):
             table.insertRow(row)
             if result is None:
                 # Declared in the family, but no patient had both sources. It
-                # still counts toward the Holm divisor, so it is shown rather
-                # than dropped — otherwise the family appears to be smaller
-                # than the correction actually applied.
+                # Shown rather than dropped: a declared comparison that could
+                # not be made is a result, and silently omitting the row would
+                # leave the reader believing it was never asked for.
                 blank = ["—"] * table.columnCount()
                 blank[0] = organ
                 blank[1] = "0"
@@ -1231,10 +1220,9 @@ class ReportTab(QWidget):
                             f"<b>{organ}</b> was included in the correction family but "
                             "no patient had a contour from both sources, so no "
                             "comparison could be made.",
-                            "It is still counted in the Holm divisor. A family that "
-                            "quietly shrank to whatever the data supported would "
-                            "correct less harshly exactly when a source produced "
-                            "fewer organs.",
+                            "The row is kept so the question it represents stays "
+                            "visible; dropping it would leave no trace that the "
+                            "comparison was asked for.",
                         )
                     )
                     table.setItem(row, column, item)
@@ -1360,9 +1348,8 @@ class ReportTab(QWidget):
             notes.append(
                 f"<b>Not estimable:</b> {', '.join(missing[:4])}"
                 + (f" and {len(missing) - 4} more" if len(missing) > 4 else "")
-                + " had no patient contoured by both sources. They remain in the "
-                "correction family, so the Holm divisor is "
-                f"{len(family)}, not {len(estimable)}."
+                + " had no patient contoured by both sources, so no comparison "
+                "could be made. The rows are shown rather than omitted."
             )
         if estimable and not self._model.family_can_detect(family.values(), _ALPHA):
             largest = max(r.n_pairs for r in estimable.values())
@@ -1512,51 +1499,193 @@ class ReportTab(QWidget):
 
     # ---- Export -----------------------------------------------------------
 
-    def _on_export(self) -> None:
-        if not self._family:
+    # ---- Saving -----------------------------------------------------------
+
+    def _figure_stem(self) -> str:
+        """A filename stem that says what the figures are of."""
+        parts = [
+            self._selected_metric() or "metric",
+            self._reference_combo.currentText() or "reference",
+        ]
+        if self._axis() is FamilyAxis.SOURCES:
+            parts.append(self._selected_organ() or "organ")
+        else:
+            parts.append(self._challenger_combo.currentText() or "challenger")
+        cleaned = ["".join(c if c.isalnum() else "_" for c in part).strip("_") for part in parts]
+        return "_".join(part for part in cleaned if part) or "report"
+
+    def _on_save_figures(self) -> None:
+        if not self._model.organs():
             QMessageBox.information(
-                self, "Export", "Nothing to export yet — compute metrics and pick two sources."
+                self, "Save figures", "Compute metrics first — there is nothing to draw."
             )
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export comparison", "report.csv", "CSV files (*.csv)"
-        )
-        if not path:
+        folder = QFileDialog.getExistingDirectory(self, "Save figures to folder")
+        if not folder:
             return
+        stem = self._figure_stem()
+        written: list[str] = []
+        try:
+            for name, canvas in self._figures():
+                target = Path(folder) / f"{stem}_{name}.png"
+                # 200 dpi rather than the screen's, so a figure dropped into a
+                # manuscript is not a blurry screenshot of one.
+                canvas.figure.savefig(target, dpi=200, bbox_inches="tight", facecolor="white")
+                written.append(target.name)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save figures", f"Could not write the figures:\n{exc}")
+            return
+        QMessageBox.information(self, "Save figures", "Written:\n" + "\n".join(written))
+
+    def _figures(self) -> list[tuple[str, Any]]:
+        return [
+            ("distributions", self._distribution),
+            ("paired", self._paired),
+            ("forest", self._forest),
+        ]
+
+    # ---- Export -----------------------------------------------------------
+
+    def _on_export(self) -> None:
+        """The whole page as one PDF.
+
+        Everything visible goes in, in the order it is read on screen. A table
+        exported on its own loses the selections it was produced under — which
+        ground truth, which metric, which sources, which organs — and those are
+        most of what makes it interpretable to someone who was not driving the
+        software at the time, including its author months later.
+        """
+        if not self._model.organs():
+            QMessageBox.information(
+                self, "Export", "Nothing to export yet — compute metrics first."
+            )
+            return
+        path_text, _ = QFileDialog.getSaveFileName(
+            self, "Export report", f"{self._figure_stem()}.pdf", "PDF files (*.pdf)"
+        )
+        if not path_text:
+            return
+        try:
+            self._write_pdf(Path(path_text))
+        except OSError as exc:
+            QMessageBox.critical(self, "Export", f"Could not write the file:\n{exc}")
+            return
+        QMessageBox.information(self, "Export", f"Written to {Path(path_text).name}.")
+
+    def _write_pdf(self, target: Path) -> None:
+        """Render the page to ``target`` through Qt's own PDF writer.
+
+        HTML into a QTextDocument rather than drawing to a painter: the tables
+        keep real typography and reflow to the page, and figures embed as images
+        at their drawn resolution. No new dependency, and nothing here has to
+        know about page breaks.
+        """
+        writer = QPdfWriter(str(target))
+        writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        writer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        writer.setResolution(150)
+        writer.setTitle("AutoSeg Evaluator — statistical report")
+
+        document = QTextDocument()
+        document.setDefaultStyleSheet(_PDF_STYLE)
+        with TemporaryDirectory() as scratch:
+            document.setHtml(self._pdf_html(Path(scratch)))
+            document.setPageSize(QSizeF(writer.width(), writer.height()))
+            document.print_(writer)
+
+    def _pdf_html(self, scratch: Path) -> str:
+        """The page as HTML, with the figures written beside it as PNGs."""
+        axis = self._axis()
         metric = self._selected_metric()
         reference = self._reference_combo.currentText()
         challenger = self._challenger_combo.currentText()
-        try:
-            with open(path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(
-                    f"{self._axis().noun},metric,challenger,reference,n_pairs,n_challenger,n_reference,"
-                    "n_zero,hl_difference,ci_low,ci_high,ci_status,ci_exhaustive,"
-                    "rank_biserial,p,"
-                    "sign_positive,sign_nonzero,sign_p,ci_agrees_with_test\n"
-                )
-                across_sources = self._axis() is FamilyAxis.SOURCES
-                for organ, r in self._family.items():
-                    row_challenger = organ if across_sources else challenger
-                    if r is None:
-                        handle.write(
-                            f"{organ},{metric},{row_challenger},{reference},0,,,,,,,"
-                            "not estimable,,,,,,\n"
-                        )
-                        continue
-                    handle.write(
-                        f"{organ},{metric},{row_challenger},{reference},{r.n_pairs},{r.n_a},"
-                        f"{r.n_b},{r.n_zero},"
-                        f"{'' if r.hl_estimate is None else f'{r.hl_estimate:.6f}'},"
-                        f"{'' if r.ci_low is None else f'{r.ci_low:.6f}'},"
-                        f"{'' if r.ci_high is None else f'{r.ci_high:.6f}'},"
-                        f"{r.ci.status.value},{r.ci.exhaustive},"
-                        f"{'' if r.effect_r is None else f'{r.effect_r:.4f}'},"
-                        f"{r.p_value:.6f},"
-                        f"{r.sign.n_positive},{r.sign.n_nonzero},{r.sign.p_value:.6f},"
-                        f"{r.ci_agrees_with_test}\n"
-                    )
-        except OSError as exc:
-            QMessageBox.critical(self, "Export", f"Could not write the file:\n{exc}")
+        tolerance = tolerance_note(metric, *self._tolerances())
+
+        conditions = [
+            ("Metric", readable_metric(metric) + (f" · {tolerance}" if tolerance else "")),
+            ("Ground truth", self._ground_truth_combo.currentText() or "—"),
+            ("Compared against", reference or "—"),
+            (
+                "Challenger" if axis is FamilyAxis.ORGANS else "Organ",
+                (challenger if axis is FamilyAxis.ORGANS else self._selected_organ()) or "—",
+            ),
+            ("Comparisons run across", axis.plural),
+            ("Cohort", self._summary_label.text()),
+        ]
+
+        parts = [
+            "<h1>Statistical report</h1>",
+            "<table class='conditions'>"
+            + "".join(f"<tr><th>{name}</th><td>{value}</td></tr>" for name, value in conditions)
+            + "</table>",
+        ]
+        if self._warning.text():
+            parts.append(f"<div class='warning'>{self._warning.text()}</div>")
+
+        parts.append("<h2>Coverage</h2>" + _table_html(self._coverage_table))
+        parts.append(
+            "<h2>Descriptive statistics</h2>"
+            + f"<p class='note'>{self._descriptive_note.text()}</p>"
+            + _table_html(self._descriptive_table)
+        )
+        parts.append("<h2>Paired comparison</h2>" + _table_html(self._comparison_table))
+
+        for name, canvas in self._figures():
+            image = scratch / f"{name}.png"
+            canvas.figure.savefig(image, dpi=150, bbox_inches="tight", facecolor="white")
+            parts.append(f"<h2>{name.capitalize()}</h2><img src='{image.as_uri()}' width='980'/>")
+
+        if self._acquisition.available:
+            parts.append(
+                "<h2>Acquisition parameters</h2>"
+                + f"<p class='note'>{self._acquisition_note.text()}</p>"
+                + _table_html(self._image_table)
+            )
+        if self._methods.text():
+            parts.append(f"<h2>Methods</h2><p class='methods'>{self._methods.text()}</p>")
+        return "<html><body>" + "".join(parts) + "</body></html>"
+
+
+#: Plain, print-oriented, and deliberately not a copy of the screen's styling —
+#: a PDF is read on paper more often than the tab is.
+_PDF_STYLE = """
+h1 { font-size: 17pt; margin: 0 0 10px 0; }
+h2 { font-size: 12pt; margin: 16px 0 5px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 8pt; }
+th, td { border: 1px solid #C8CDD4; padding: 3px 5px; text-align: left; }
+th { background: #EFF1F4; }
+table.conditions { width: 60%; font-size: 9pt; }
+table.conditions th { width: 30%; }
+.note, .methods { font-size: 8pt; color: #44505E; }
+.warning { font-size: 8pt; border: 1px solid #D9C27A; background: #FFF8E1;
+           padding: 6px 8px; margin: 8px 0; }
+"""
+
+
+def _table_html(table: QTableWidget) -> str:
+    """One Qt table as an HTML table, blanks and all.
+
+    Blank cells are kept blank: the organ column is deliberately empty on
+    continuation rows, and filling it back in for the PDF would undo the
+    grouping the table exists to show.
+    """
+    headers = [table.horizontalHeaderItem(column).text() for column in range(table.columnCount())]
+    rows = []
+    for row in range(table.rowCount()):
+        cells = []
+        for column in range(table.columnCount()):
+            item = table.item(row, column)
+            value = item.text() if item is not None else ""
+            weight = " style='font-weight:bold'" if item is not None and item.font().bold() else ""
+            cells.append(f"<td{weight}>{value}</td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    return (
+        "<table><tr>"
+        + "".join(f"<th>{header}</th>" for header in headers)
+        + "</tr>"
+        + "".join(rows)
+        + "</table>"
+    )
 
 
 __all__ = ["ReportTab"]

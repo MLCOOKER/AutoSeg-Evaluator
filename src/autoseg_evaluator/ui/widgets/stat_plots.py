@@ -63,6 +63,11 @@ MIN_CANVAS_HEIGHT = 260
 #: clean from 540 px, collapsing below 500 — so the floor keeps some headroom.
 MIN_FOREST_WIDTH = 620
 
+#: Horizontal space each organ needs before its sources overlap. Past a handful
+#: of organs the figure grows sideways and the enclosing view scrolls, rather
+#: than squeezing every cluster until the points stack into a line.
+ORGAN_SLOT_WIDTH = 108
+
 #: Organ labels longer than this are elided on the axis. Long TG-263 names
 #: rotated at 30 degrees are the single largest consumer of vertical space, and
 #: they are the reason the layout collapses at all.
@@ -90,9 +95,8 @@ def _elide(text: str, limit: int = MAX_TICK_LABEL) -> str:
 #: above the clusters are per source rather than per organ.
 _DISTRIBUTION_CAPTION = "\n".join(
     (
-        "Each dot is one patient; the number above a cluster is how many that source produced.",
-        "The vertical bar spans the interquartile range (25th–75th percentile); "
-        "the wide tick is the median.",
+        "Each dot is one patient. The vertical bar spans the interquartile range "
+        "(25th–75th percentile); the wide tick is the median.",
         "Every available observation is shown — these counts are not the paired-comparison sample.",
     )
 )
@@ -136,7 +140,16 @@ class _Canvas(FigureCanvasQTAgg):
 
 
 class DistributionCanvas(_Canvas):
-    """Per-organ distributions, one colour per source."""
+    """Per-organ distributions, one colour per source.
+
+    Grows sideways rather than compressing: with twenty organs at a fixed width
+    each cluster is a few pixels across and the points stack into a line, which
+    looks like data and is not. The enclosing scroll area supplies the panning.
+    """
+
+    def _resize_for(self, organs: int, sources: int) -> None:
+        needed = int(ORGAN_SLOT_WIDTH * max(organs, 1) * max(1.0, sources / 3.0)) + 220
+        self.setMinimumWidth(max(needed, MIN_CANVAS_WIDTH))
 
     def plot(
         self,
@@ -144,6 +157,7 @@ class DistributionCanvas(_Canvas):
         metric: str,
         *,
         display: str = "",
+        units: str = "",
         title: str = "",
     ) -> None:
         """``data`` is ``{organ: {source: [values]}}``.
@@ -164,6 +178,7 @@ class DistributionCanvas(_Canvas):
             return
 
         sources = sorted({s for per_source in data.values() for s in per_source})
+        self._resize_for(len(organs), len(sources))
         colours = {s: _PALETTE[i % len(_PALETTE)] for i, s in enumerate(sources)}
         width = 0.8 / max(len(sources), 1)
         rng = np.random.default_rng(0)  # reproducible jitter
@@ -201,15 +216,6 @@ class DistributionCanvas(_Canvas):
                     edgecolors="none",
                     zorder=3,
                 )
-                axes.annotate(
-                    str(len(values)),
-                    (centre, max(values)),
-                    textcoords="offset points",
-                    xytext=(0, 7),
-                    ha="center",
-                    fontsize=8,
-                    color=colour,
-                )
                 q1, median, q3 = np.percentile(values, [25, 50, 75])
                 axes.plot(
                     [centre, centre], [q1, q3], color=colour, linewidth=2.2, alpha=0.9, zorder=4
@@ -229,21 +235,26 @@ class DistributionCanvas(_Canvas):
             axes.axvline(boundary - 0.5, color="#C8CDD4", linewidth=0.8, zorder=0, linestyle="-")
 
         axes.set_xticks(range(len(organs)))
-        # No aggregate n on the organ label. One number under an organ whose
-        # sources have different coverage says "this organ has ten patients",
-        # which is exactly the thing that is not true; the per-source counts
-        # above each cluster say what each source actually produced.
-        axes.set_xticklabels(
-            [_elide(organ) for organ in organs],
-            rotation=30,
-            ha="right",
-            fontsize=9.5,
-            color=_TEXT,
-        )
-        axes.set_ylabel(label)
+        # One count per organ, starred where the sources did not all contour the
+        # same number of patients. A bare n there would claim a coverage they do
+        # not share; the star costs one character and the caption explains it.
+        uneven = False
+        tick_labels = []
+        for organ in organs:
+            counts = [
+                len([v for v in vals if v is not None and np.isfinite(v)])
+                for vals in data[organ].values()
+            ]
+            present = [n for n in counts if n]
+            mixed = len(set(present)) > 1
+            uneven = uneven or mixed
+            star = "*" if mixed else ""
+            tick_labels.append(f"{_elide(organ)}\n(n={max(present, default=0)}{star})")
+        axes.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=9.5, color=_TEXT)
+        unit_text = f" ({units})" if units else ""
         direction = metric_direction(metric)
-        if direction:
-            axes.set_ylabel(f"{label}  ({'higher' if direction > 0 else 'lower'} is better)")
+        sense = f"  —  {'higher' if direction > 0 else 'lower'} is better" if direction else ""
+        axes.set_ylabel(f"{label}{unit_text}{sense}", fontsize=10, color=_TEXT)
         if title:
             axes.set_title(title, fontsize=10)
         _apply_scale(
@@ -264,7 +275,13 @@ class DistributionCanvas(_Canvas):
             borderaxespad=0.0,
             labelcolor=_TEXT,
         )
-        self.figure.supxlabel(_DISTRIBUTION_CAPTION, fontsize=9, color=_MUTED_TEXT, ha="center")
+        caption = _DISTRIBUTION_CAPTION
+        if uneven:
+            caption += (
+                "\n*  the sources did not all contour the same number of patients for that "
+                "organ; n is the largest of them. The coverage table has the split."
+            )
+        self.figure.supxlabel(caption, fontsize=9, color=_MUTED_TEXT, ha="center")
         self.draw_idle()
 
 
@@ -371,7 +388,9 @@ class PairedCanvas(_Canvas):
         axes.tick_params(axis="y", labelsize=9.5, colors=_TEXT, length=3)
         unit_text = f" ({units})" if units else ""
         axes.set_ylabel(f"{label}{unit_text}", fontsize=10, color=_TEXT)
-        _apply_scale(axes, metric, befores + afters)
+        # No imposed bounds here. This figure exists to show movement between
+        # two columns, and forcing a metric's full range flattens exactly the
+        # movement it was drawn for.
         axes.grid(axis="y", color=_GRID, alpha=0.6, linewidth=0.7, zorder=0)
         axes.set_axisbelow(True)
         for spine in ("top", "right"):
