@@ -187,7 +187,14 @@ def test_a_comparison_with_no_shared_patients_is_none():
     assert model.compare("Parotid (L)", "dice", "VendorA", "VendorB") is None
 
 
-def test_family_adjusts_across_the_declared_organs_only():
+def test_a_comparison_does_not_change_because_another_is_displayed():
+    """The defect that ended the Holm correction here.
+
+    Correcting across whichever organs were selected made the divisor a view
+    setting: one organ selected gave a significant result, adding organs took it
+    away, and the same data supported both. Each organ is its own question now,
+    and its answer is the same whatever else is on screen.
+    """
     rows = []
     for organ, offset in (("Parotid (L)", 0.06), ("Parotid (R)", 0.05), ("Brainstem", 0.001)):
         for i in range(10):
@@ -195,18 +202,61 @@ def test_family_adjusts_across_the_declared_organs_only():
             rows.append(_row(f"P{i}", organ, "VendorB", {"dice": 0.80 + i * 0.005 - offset}))
     model = build_report_model(rows)
 
-    all_three = model.family("dice", reference="VendorB", challenger="VendorA")
-    assert set(all_three) == {"Parotid (L)", "Parotid (R)", "Brainstem"}
-    assert all(r.p_adjusted is not None for r in all_three.values())
+    alone = model.family("dice", "VendorB", "VendorA", organs=["Parotid (L)"])
+    with_others = model.family("dice", reference="VendorB", challenger="VendorA")
 
-    # A smaller declared family corrects less harshly — which is exactly why the
-    # family has to be chosen deliberately rather than inferred from the view.
-    just_one = model.family("dice", "VendorB", "VendorA", organs=["Parotid (L)"])
-    assert just_one["Parotid (L)"].p_adjusted <= all_three["Parotid (L)"].p_adjusted
+    assert set(with_others) == {"Parotid (L)", "Parotid (R)", "Brainstem"}
+    assert alone["Parotid (L)"].p_value == with_others["Parotid (L)"].p_value
 
 
-def test_family_reports_when_it_cannot_detect_anything():
-    """At ten pairs, a family of 26 cannot reject however the data fall."""
+def test_no_multiplicity_adjustment_is_applied():
+    """Reported unadjusted, so nothing has to be unpicked to read a row."""
+    rows = []
+    for organ in ("Parotid (L)", "Parotid (R)", "Brainstem"):
+        for i in range(10):
+            rows.append(_row(f"P{i}", organ, "VendorA", {"dice": 0.80 + i * 0.005}))
+            rows.append(_row(f"P{i}", organ, "VendorB", {"dice": 0.74 + i * 0.005}))
+    family = build_report_model(rows).family("dice", "VendorB", "VendorA")
+    assert all(r.p_adjusted is None for r in family.values())
+    assert all(r.p_value > 0 for r in family.values())
+
+
+def test_the_multiplicity_cost_is_stated_rather_than_applied():
+    """Scanning twenty rows for the ones below 0.05 is still a selection."""
+    from autoseg_evaluator.data.report import expected_false_positives
+
+    assert expected_false_positives(20, 0.05) == pytest.approx(1.0)
+    assert expected_false_positives(1, 0.05) == pytest.approx(0.05)
+    assert expected_false_positives(0) == 0
+
+
+def test_nothing_can_be_detected_below_six_paired_patients():
+    """Uncorrected, the bound is arithmetic: 2/2^n must not exceed 0.05.
+
+    Five pairs give 0.0625 at best, so no arrangement of contours produces a
+    significant result. Six give 0.03125 and can.
+    """
+
+    def cohort(patients):
+        rows = []
+        for i in range(patients):
+            rows.append(_row(f"P{i}", "Parotid (L)", "VendorA", {"dice": 0.80}))
+            rows.append(_row(f"P{i}", "Parotid (L)", "VendorB", {"dice": 0.70}))
+        return build_report_model(rows)
+
+    for patients in (2, 3, 4, 5):
+        model = cohort(patients)
+        family = model.family("dice", "VendorB", "VendorA")
+        assert model.family_can_detect(family.values()) is False, patients
+
+    for patients in (6, 8, 10):
+        model = cohort(patients)
+        family = model.family("dice", "VendorB", "VendorA")
+        assert model.family_can_detect(family.values()) is True, patients
+
+
+def test_the_number_of_organs_no_longer_affects_detectability():
+    """It used to: 26 organs put every result past the Holm threshold."""
     rows = []
     for organ_index in range(26):
         for i in range(10):
@@ -215,10 +265,7 @@ def test_family_reports_when_it_cannot_detect_anything():
     model = build_report_model(rows)
     family = model.family("dice", "VendorB", "VendorA")
     assert len(family) == 26
-    assert model.family_can_detect(family.values()) is False
-
-    smaller = model.family("dice", "VendorB", "VendorA", organs=[f"Organ{i}" for i in range(5)])
-    assert model.family_can_detect(smaller.values()) is True
+    assert model.family_can_detect(family.values()) is True
 
 
 # ---- Direction ------------------------------------------------------------
@@ -275,12 +322,11 @@ def test_describe_cell_returns_none_for_an_unknown_cell():
 
 
 def test_the_ceiling_is_judged_on_the_most_favourable_member():
-    """One thin organ must not declare the whole family undetectable.
+    """One thin organ must not declare the whole table undetectable.
 
     Caught by smoke-testing the tab: the banner said nothing could reach
-    significance while a ten-patient organ in the same family sat on screen at
-    Holm-adjusted p = 0.008. Holm's strictest threshold applies to the smallest
-    p in the family, so the comparison with the most pairs decides.
+    significance while a ten-patient organ sat on screen at p = 0.002. The
+    comparison with the most pairs decides whether anything shown can reject.
     """
     rows = []
     for i in range(10):
@@ -294,8 +340,8 @@ def test_the_ceiling_is_judged_on_the_most_favourable_member():
 
     assert min(r.n_pairs for r in family.values()) == 4
     assert model.family_can_detect(family.values()) is True
-    # …and the claim is consistent with what the family actually produced.
-    assert any(r.p_adjusted <= 0.05 for r in family.values())
+    # …and the claim is consistent with what the table actually produced.
+    assert any(r.p_value <= 0.05 for r in family.values())
 
 
 # ---- Treatment context (external review: unsafe observation key) -----------
@@ -453,17 +499,19 @@ def test_a_source_wise_family_holds_every_other_source():
     assert all(r is not None for r in family.values())
 
 
-def test_the_source_wise_divisor_is_the_number_of_sources():
-    """Three challengers is a family of three, whichever organ it runs on."""
+def test_the_source_wise_rows_are_also_unadjusted():
+    """Same rule on both axes: each row answers its own question."""
     model = build_report_model(_multi_vendor_rows())
     family = model.family_across_sources("dice", "Limbus", "Parotid (L)")
-    smallest = min(r.p_value for r in family.values())
-    matching = next(r for r in family.values() if r.p_value == smallest)
-    assert matching.p_adjusted == pytest.approx(min(1.0, 3 * smallest))
+    assert all(r.p_adjusted is None for r in family.values())
+
+    # And a row is unchanged by how many sources sit beside it.
+    pair = model.family_across_sources("dice", "Limbus", "Parotid (L)", sources=["MVision"])
+    assert pair["MVision"].p_value == family["MVision"].p_value
 
 
 def test_the_two_axes_agree_on_a_shared_cell():
-    """Same pair, same organ, same numbers — only the family differs."""
+    """Same pair, same organ, same numbers, whichever way you got there."""
     model = build_report_model(_multi_vendor_rows())
     by_organ = model.family("dice", "Limbus", "MVision", organs=["Parotid (L)"])
     by_source = model.family_across_sources("dice", "Limbus", "Parotid (L)")
@@ -471,9 +519,10 @@ def test_the_two_axes_agree_on_a_shared_cell():
     organ_row = by_organ["Parotid (L)"]
     source_row = by_source["MVision"]
     assert organ_row.hl_estimate == pytest.approx(source_row.hl_estimate)
+    # Identical in every respect: the same pair, the same organ, the same test.
+    # Which axis it was reached by is a navigation choice, not a statistical one.
     assert organ_row.p_value == pytest.approx(source_row.p_value)
-    # The adjusted values differ, because the families do.
-    assert organ_row.p_adjusted < source_row.p_adjusted
+    assert organ_row.p_adjusted is None and source_row.p_adjusted is None
 
 
 def test_a_source_that_never_produced_the_organ_stays_in_the_divisor():

@@ -241,17 +241,29 @@ def test_the_reading_follows_the_metric_direction_not_the_sign(tab):
 # ---- The correction family ------------------------------------------------
 
 
-def test_a_smaller_declared_family_corrects_less_harshly(tab):
-    """Which is exactly why the family is chosen, not inferred from the view."""
+def test_a_result_does_not_move_when_other_organs_are_shown(tab):
+    """The reported defect: one organ selected was significant, four were not.
+
+    The p-value depended on a list widget, which is not a property of the data.
+    """
     _select(tab, ORGANS)
-    wide = float(_find(tab._comparison_table, "Parotid (L)")["p (Holm)"])
+    wide = _find(tab._comparison_table, "Parotid (L)")["p"]
 
-    _select(tab, ["Parotid (L)", "Parotid (R)"])
-    assert tab._comparison_table.rowCount() == 2
-    narrow = float(_find(tab._comparison_table, "Parotid (L)")["p (Holm)"])
+    _select(tab, ["Parotid (L)"])
+    assert tab._comparison_table.rowCount() == 1
+    alone = _find(tab._comparison_table, "Parotid (L)")["p"]
 
-    assert narrow < wide
-    assert float(_find(tab._comparison_table, "Parotid (L)")["p"]) <= narrow
+    assert alone == wide
+
+
+def test_there_is_no_adjusted_p_column(tab):
+    _select(tab, ORGANS)
+    headers = [
+        tab._comparison_table.horizontalHeaderItem(c).text()
+        for c in range(tab._comparison_table.columnCount())
+    ]
+    assert "p" in headers
+    assert not any("Holm" in header for header in headers)
 
 
 def test_the_banner_never_contradicts_the_table_beneath_it(tab):
@@ -262,14 +274,14 @@ def test_the_banner_never_contradicts_the_table_beneath_it(tab):
     Holm-adjusted p of 0.008.
     """
     _select(tab, ORGANS)
-    column = _column(tab._comparison_table, "p (Holm)")
-    adjusted = [
+    column = _column(tab._comparison_table, "p")
+    values = [
         float(tab._comparison_table.item(row, column).text())
         for row in range(tab._comparison_table.rowCount())
         if tab._comparison_table.item(row, column).text() != "—"
     ]
-    assert min(adjusted) <= 0.05  # something is significant on screen
-    assert "cannot reach significance" not in tab._warning.text()
+    assert min(values) <= 0.05  # something is significant on screen
+    assert "Nothing here can reach significance" not in tab._warning.text()
 
 
 def test_partial_coverage_is_called_out_where_it_occurs(tab):
@@ -281,14 +293,16 @@ def test_partial_coverage_is_called_out_where_it_occurs(tab):
     assert "Partial coverage" not in tab._warning.text()
 
 
-def test_the_methods_paragraph_names_the_test_and_the_family(tab):
+def test_the_methods_paragraph_names_the_test_and_the_reporting_rule(tab):
     _select(tab, ["Parotid (L)", "Parotid (R)"])
     methods = tab._methods.text()
     assert "Wilcoxon signed-rank" in methods
     assert "Pratt" in methods
     assert "Hodges–Lehmann" in methods
-    assert "across the 2 organs" in methods
-    assert "unadjusted" in methods  # the intervals are not corrected
+    assert "2 organs is treated as a separate question" in methods
+    assert "unadjusted" in methods
+    # The safeguard that makes reporting unadjusted p-values defensible.
+    assert "Every comparison is reported rather than a selected subset" in methods
     assert CHALLENGER in methods and REFERENCE in methods
 
 
@@ -325,7 +339,7 @@ def test_export_writes_one_row_per_family_member(tab, tmp_path, monkeypatch):
     assert [r["organ"] for r in rows] == ["Parotid (L)", "Parotid (R)"]
     assert all(r["challenger"] == CHALLENGER and r["reference"] == REFERENCE for r in rows)
     assert all(r["n_pairs"] == "10" for r in rows)
-    assert all(float(r["p_holm"]) >= float(r["p_raw"]) for r in rows)
+    assert all(0.0 <= float(r["p"]) <= 1.0 for r in rows)
 
 
 def test_the_exported_comparison_carries_no_patient_identifiers(tab, tmp_path, monkeypatch):
@@ -471,8 +485,8 @@ def test_the_help_corrects_the_three_standard_misreadings(tab):
     assert "is not 'no difference.'" in tips["Reading"]
     # An effect size of +/-1.00 at small n is arithmetic, not strength.
     assert "arithmetic" in tips["r"]
-    # And the column to judge against 0.05 is named explicitly.
-    assert "0.05" in tips["p (Holm)"]
+    # And the p column says plainly that it is per organ and uncorrected.
+    assert "unadjusted" in tips["p"].lower()
 
 
 def test_a_coverage_cell_explains_its_own_shorthand(tab):
@@ -561,24 +575,23 @@ def test_an_unestimable_organ_still_appears_in_the_table(unmatched_tab):
     assert unmatched_tab._comparison_table.rowCount() == 3
 
 
-def test_the_holm_divisor_keeps_the_unestimable_member(unmatched_tab):
-    """The reduction is not cosmetic: it changes the adjusted p-values."""
+def test_an_unestimable_organ_changes_no_other_row(unmatched_tab):
+    """It is shown so the reader sees it, and affects nothing else."""
     _select(unmatched_tab, ["Parotid (L)", "Parotid (R)"])
-    without = float(_find(unmatched_tab._comparison_table, "Parotid (L)")["p (Holm)"])
+    without = _find(unmatched_tab._comparison_table, "Parotid (L)")["p"]
 
     _select(unmatched_tab, ["Parotid (L)", "Parotid (R)", "Cochlea (L)"])
-    with_unestimable = float(_find(unmatched_tab._comparison_table, "Parotid (L)")["p (Holm)"])
+    with_unestimable = _find(unmatched_tab._comparison_table, "Parotid (L)")["p"]
 
-    assert with_unestimable > without  # a family of three, not two
+    assert with_unestimable == without
     assert "Not estimable" in unmatched_tab._warning.text()
-    assert "Holm divisor is 3, not 2" in unmatched_tab._warning.text()
 
 
 def test_the_methods_paragraph_admits_the_unestimable_member(unmatched_tab):
     _select(unmatched_tab, ["Parotid (L)", "Parotid (R)", "Cochlea (L)"])
     methods = unmatched_tab._methods.text()
-    assert "across the 3 organs" in methods
-    assert "1 could not be estimated and were retained in the divisor" in methods
+    assert "3 organs is treated as a separate question" in methods
+    assert "1 could not be estimated and are reported as such" in methods
 
 
 def test_an_unestimable_organ_exports_as_a_row_not_a_gap(unmatched_tab, tmp_path, monkeypatch):
@@ -594,7 +607,7 @@ def test_an_unestimable_organ_exports_as_a_row_not_a_gap(unmatched_tab, tmp_path
     assert set(rows) == {"Parotid (L)", "Cochlea (L)"}
     assert rows["Cochlea (L)"]["n_pairs"] == "0"
     assert rows["Cochlea (L)"]["ci_status"] == "not estimable"
-    assert rows["Cochlea (L)"]["p_holm"] == ""
+    assert rows["Cochlea (L)"]["p"] == ""
 
 
 def test_a_collision_inside_one_context_is_reported(qapp):
@@ -809,17 +822,11 @@ def test_the_methods_paragraph_describes_the_source_family(tab):
     assert "do not constitute comparisons between the other sources" in methods
 
 
-def test_the_source_family_corrects_across_sources_not_organs(tab):
-    """Two challengers is a family of two, however many organs exist.
-
-    Checked against the stored values rather than the table text: the columns
-    show four decimals, and 2 x 0.001953 rounds to 0.0039 rather than 0.0040.
-    """
+def test_the_source_rows_are_unadjusted_too(tab):
+    """Same rule on both axes: a row answers its own question."""
     _across_sources(tab)
-    smallest = min(r.p_value for r in tab._family.values())
-    row = next(r for r in tab._family.values() if r.p_value == smallest)
-    assert row.p_adjusted == pytest.approx(2 * smallest)
     assert len(tab._family) == 2  # the two non-reference sources
+    assert all(r.p_adjusted is None for r in tab._family.values())
 
 
 def test_export_across_sources_keys_rows_by_source(tab, tmp_path, monkeypatch):

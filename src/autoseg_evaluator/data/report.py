@@ -63,7 +63,6 @@ from autoseg_evaluator.core.statistics import (
     describe,
     holm_detection_ceiling,
     paired_comparison,
-    with_holm,
 )
 
 # ---- Metric families ------------------------------------------------------
@@ -630,13 +629,27 @@ class ReportModel:
 
     @staticmethod
     def _correct(results: dict[str, PairedResult | None]) -> dict[str, PairedResult | None]:
-        """Attach Holm p-values, keeping the declared family in the divisor."""
-        estimable = {label: r for label, r in results.items() if r is not None}
-        if not estimable:
-            return results
-        adjusted = with_holm(list(estimable.values()), family_size=len(results))
-        for label, result in zip(estimable.keys(), adjusted, strict=True):
-            results[label] = result
+        """Return the comparisons as computed, with no multiplicity adjustment.
+
+        Each row answers its own question — *for this organ and this metric, is
+        there evidence that these two sources differ?* — and a question is not
+        made harder to answer by another question being asked beside it. Two
+        organs are two studies that happen to share a screen.
+
+        This replaces a Holm correction across whichever organs were selected,
+        which had a defect worse than the problem it addressed: the divisor was
+        a **view setting**. Narrowing the organ list made a result significant
+        and widening it made the same result disappear, so the p-value depended
+        on what was on screen. A correction that can be dialled by a list widget
+        invites exactly the selection it exists to prevent, and looks rigorous
+        while doing it.
+
+        What multiplicity costs is not hidden, it is *stated*: see
+        :func:`expected_false_positives`. Scanning twenty organs and reporting
+        the two that reached 0.05 is still a selected finding, and the tab says
+        how many to expect by chance. The safeguard is reporting every organ,
+        not shrinking the p-values of the ones that happen to win.
+        """
         return results
 
     def family_can_detect(
@@ -644,13 +657,14 @@ class ReportModel:
     ) -> bool:
         """Could *any* member of this family reach significance after Holm?
 
-        False means the design cannot produce a significant result however the
-        data fall, because the smallest attainable p at the available sample
-        sizes exceeds the corrected threshold. Worth saying out loud: a column
-        of adjusted p = 1.000 otherwise reads as evidence the sources agree.
+        False means no comparison shown can reach significance however the data
+        fall, because the smallest attainable p even at the largest sample here
+        exceeds alpha. Worth saying out loud: a column of large p-values
+        otherwise reads as evidence the sources agree.
 
-        The family size counted is the number **declared**, unevaluable members
-        included, matching the divisor Holm actually applies.
+        With no multiplicity adjustment the bound is simply ``2 / 2ⁿ ≤ alpha``,
+        which needs six paired patients at the conventional 0.05. Five or fewer
+        cannot produce a significant result whatever the contours look like.
         """
         collected = [r for r in results if r is not None]
         if not collected:
@@ -662,7 +676,20 @@ class ReportModel:
         # would warn that nothing is detectable while a well-populated organ in
         # the same family is significant on screen.
         largest_n = max(r.n_pairs for r in collected)
-        return holm_detection_ceiling(largest_n, len(list(results)), alpha)
+        return holm_detection_ceiling(largest_n, 1, alpha)
+
+
+def expected_false_positives(comparisons: int, alpha: float = 0.05) -> float:
+    """How many of ``comparisons`` would look significant by chance alone.
+
+    The honest replacement for a correction the user did not want. Each organ
+    is reported as its own question with an unadjusted p-value, which is right
+    for answering *this* organ — but a reader scanning twenty rows for the ones
+    below 0.05 is doing something the individual p-values do not account for.
+    Stating the expected count leaves that judgement with the reader instead of
+    silently making every p-value larger.
+    """
+    return max(0, int(comparisons)) * float(alpha)
 
 
 # ---- Acquisition ----------------------------------------------------------
@@ -834,6 +861,7 @@ __all__ = [
     "GEOMETRIC_METRICS",
     "HIGHER_IS_BETTER",
     "STAPLE_METRICS",
+    "expected_false_positives",
     "is_consensus_reference",
     "reference_rank",
     "metric_family",

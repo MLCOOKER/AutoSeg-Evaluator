@@ -9,11 +9,10 @@ the shape is what a reader takes away. Below that threshold the points are the
 figure, which is also the honest answer to whether a distribution is bimodal.
 
 **Forest** plots the Hodges–Lehmann difference and its interval per organ
-against one chosen reference source. Those intervals are **unadjusted**, while
-the filled markers reflect Holm-adjusted significance, so the two can legitimately
-disagree — an interval excluding zero beside a non-significant adjusted p is the
-correction doing its job, not an inconsistency. The figure says so rather than
-leaving a reader to reconcile it.
+against one chosen reference source. Each row is its own question, so the
+interval and the marker agree by construction — both come from the same
+uncorrected test on that organ. Nothing about a row changes because another row
+is on screen.
 """
 
 from __future__ import annotations
@@ -244,7 +243,7 @@ class ForestCanvas(_Canvas):
 
         for y, (_organ, result) in zip(positions, usable, strict=True):
             estimate = rescale(result.hl_estimate, _organ)
-            significant = result.p_adjusted is not None and result.p_adjusted <= alpha
+            significant = result.p_value <= alpha
             colour = "#0F6E6E" if significant else "#4A5866"
 
             low = rescale(result.ci_low, _organ)
@@ -319,7 +318,8 @@ class ForestCanvas(_Canvas):
         self.figure.text(
             0.01,
             0.01,
-            "Intervals are unadjusted; filled markers are significant after Holm correction."
+            "Filled markers are significant at p <= 0.05 for that row alone; p-values "
+            "and intervals are per organ and uncorrected."
             + (
                 f"  {dropped} row(s) omitted: the reference median is zero, so a "
                 "relative difference is undefined."

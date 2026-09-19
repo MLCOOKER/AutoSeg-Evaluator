@@ -18,9 +18,16 @@ neither the typical case nor the failure.
 **Inference last**, and deliberately understated. The Wilcoxon signed-rank test
 is the headline because it is what the field uses and what the reviewer asked
 for; the exact sign test sits beside it always, so direction and magnitude can
-be read separately and neither can be chosen after the fact. Holm correction
-applies within one declared family — this metric, this pair of sources, these
-organs — and controls nothing beyond it.
+be read separately and neither can be chosen after the fact.
+
+**Each organ is its own question**, and its p-value is reported unadjusted. An
+earlier design corrected across whichever organs were selected, which made the
+divisor a view setting: narrowing the list made a result significant and
+widening it took the result away, on the same data. A correction dialled by a
+list widget invites the very selection it exists to prevent. What multiplicity
+costs is stated instead — the tab says how many rows would fall below 0.05 by
+chance — and every comparison is shown, which is what makes reporting
+uncorrected p-values defensible.
 
 At the sample sizes this tool sees, "inconclusive" is the expected answer rather
 than a failure, so intervals are presented as the primary result and p-values as
@@ -62,6 +69,7 @@ from autoseg_evaluator.data.report import (
     ReportModel,
     build_report_model,
     collect_acquisition,
+    expected_false_positives,
     favours,
     interval_text,
     metric_direction,
@@ -303,17 +311,21 @@ COMPARISON_COLUMNS: list[tuple[str, str]] = [
     (
         "p",
         _tip(
-            "If the two sources were genuinely equivalent, how often would a pattern this lopsided arise by chance alone? 0.002 is about one in five hundred.",
-            "It is <b>not</b> the probability that the difference is real, and it says nothing about size.",
-            "Exact Wilcoxon signed-rank, computed from the full sign-flip distribution rather than a normal approximation.",
-        ),
-    ),
-    (
-        "p (Holm)",
-        _tip(
-            "<b>This is the column to judge against 0.05</b>, not the raw p.",
-            "Testing many organs at once means some will look significant by luck; Holm corrects for exactly that. Its value depends on how many organs are selected in the family list — a smaller, deliberately chosen family corrects less harshly.",
-            "Familywise control applies within the selected organs only. Picking the best result from across several different families does not carry the guarantee.",
+            "If these two sources were genuinely equivalent on this organ, how "
+            "often would a pattern this lopsided arise by chance alone? 0.002 is "
+            "about one in five hundred.",
+            "It is <b>not</b> the probability that the difference is real, and it "
+            "says nothing about size.",
+            "<b>Unadjusted, and per organ.</b> Each row answers its own question — "
+            "for this organ and this metric, do these two sources differ? — and "
+            "that answer does not change because another organ is on screen. "
+            "Correcting across whichever organs happened to be selected made the "
+            "p-value depend on a list widget, which is worse than not correcting.",
+            "Multiplicity still costs something when you scan many rows for the "
+            "ones below 0.05; the note under the table says how many would look "
+            "significant by chance.",
+            "Exact Wilcoxon signed-rank, from the full sign-flip distribution "
+            "rather than a normal approximation.",
         ),
     ),
     (
@@ -1113,7 +1125,6 @@ class ReportTab(QWidget):
                     f"{result.effect_r:+.2f}" if result.effect_r is not None else "—",
                     str(result.n_zero),
                     f"{result.p_value:.4f}",
-                    f"{result.p_adjusted:.4f}" if result.p_adjusted is not None else "—",
                     sign_text,
                     self._reading(
                         metric,
@@ -1164,9 +1175,7 @@ class ReportTab(QWidget):
         A large p means no difference was *detected*, never that the sources are
         equivalent — that would need a margin nobody has supplied.
         """
-        if result.p_adjusted is None:
-            return "—"
-        if result.p_adjusted > _ALPHA:
+        if result.p_value > _ALPHA:
             return "no detectable difference"
         side = favours(metric, result.hl_estimate or 0.0)
         if not side:
@@ -1228,13 +1237,30 @@ class ReportTab(QWidget):
                 f"{len(family)}, not {len(estimable)}."
             )
         if estimable and not self._model.family_can_detect(family.values(), _ALPHA):
-            smallest = min(r.n_pairs for r in estimable.values())
+            largest = max(r.n_pairs for r in estimable.values())
             notes.append(
-                f"<b>This comparison cannot reach significance.</b> With {smallest} paired "
-                f"observations the smallest attainable p-value is larger than the Holm "
-                f"threshold for a family of {len(family)} {unit}, so no result can be "
-                f"significant however the data fall. Reduce the family to a few "
-                f"prespecified {unit}, or read the intervals rather than the p-values."
+                f"<b>Nothing here can reach significance.</b> The largest comparison "
+                f"shown has {largest} paired patient(s), and below six the smallest "
+                f"attainable p-value exceeds 0.05 — so no row can be significant "
+                f"however the contours look. Read the effect sizes and intervals "
+                f"instead, and treat the p-values as unusable at this sample size."
+            )
+        thin_rows = [r for r in estimable.values() if r.n_pairs < 6]
+        if thin_rows and len(thin_rows) != len(estimable):
+            notes.append(
+                f"<b>{len(thin_rows)} of {len(estimable)} {unit} have fewer than six "
+                "paired patients</b>, which cannot produce a p-value at or below 0.05 "
+                "whatever the data show. Their p-values are not evidence of similarity."
+            )
+        if len(estimable) > 1:
+            expected = expected_false_positives(len(estimable), _ALPHA)
+            notes.append(
+                f"<b>{len(estimable)} comparisons are shown, each answering its own "
+                f"question.</b> p-values are per {axis.noun} and unadjusted, so a row "
+                "does not change because another is displayed. If you scan the table "
+                f"for rows below 0.05, expect about <b>{expected:.1f}</b> to appear "
+                "there by chance even if every source performed identically — so "
+                "report every row, not only the ones that crossed."
             )
         thin = [
             organ
@@ -1307,24 +1333,26 @@ class ReportTab(QWidget):
                 f"<b>Methods.</b> {challenger} was compared with {reference} on {metric} "
                 f"for each organ separately"
             )
-            family_clause = f"across the {len(family)} organs of this metric and source pair"
+            family_clause = f"{len(family)} organs"
             caveat = ""
         self._methods.setText(
             opening + ", using the Wilcoxon signed-rank test on patients where both "
             f"produced the organ (n = {span} pairs). Zero differences were handled by Pratt's "
             "method and p-values computed exactly from the conditional sign-flip distribution. "
             "Differences are summarised by the Hodges–Lehmann estimator with a 95% confidence "
-            "interval obtained by inverting the same test; these intervals are unadjusted. "
-            "An exact sign test is reported alongside. Holm–Bonferroni correction was applied "
-            + family_clause
+            "interval obtained by inverting the same test. "
+            "An exact sign test is reported alongside. "
+            f"Each of the {family_clause} is treated as a separate question — for that "
+            "organ and metric, is there evidence that the two sources differ? — so "
+            "p-values are reported <b>unadjusted</b> and no multiplicity correction is "
+            "applied across them"
             + (
-                f", of which {len(family) - len(estimable)} could not be estimated and were "
-                "retained in the divisor"
+                f". {len(family) - len(estimable)} could not be estimated and are reported as such"
                 if len(estimable) != len(family)
                 else ""
             )
-            + ", and controls the "
-            "familywise error rate within that family only." + caveat + " Descriptive values "
+            + ". Every comparison is reported rather than a selected subset, which is what "
+            "makes that defensible." + caveat + " Descriptive values "
             "are median [Q1, Q3] with a distribution-free 95% interval for the median, which "
             "is not estimable below six observations."
         )
@@ -1350,7 +1378,7 @@ class ReportTab(QWidget):
                 handle.write(
                     f"{self._axis().noun},metric,challenger,reference,n_pairs,n_challenger,n_reference,"
                     "n_zero,hl_difference,ci_low,ci_high,ci_status,ci_exhaustive,"
-                    "rank_biserial,p_raw,p_holm,"
+                    "rank_biserial,p,"
                     "sign_positive,sign_nonzero,sign_p,ci_agrees_with_test\n"
                 )
                 across_sources = self._axis() is FamilyAxis.SOURCES
@@ -1371,7 +1399,6 @@ class ReportTab(QWidget):
                         f"{r.ci.status.value},{r.ci.exhaustive},"
                         f"{'' if r.effect_r is None else f'{r.effect_r:.4f}'},"
                         f"{r.p_value:.6f},"
-                        f"{'' if r.p_adjusted is None else f'{r.p_adjusted:.6f}'},"
                         f"{r.sign.n_positive},{r.sign.n_nonzero},{r.sign.p_value:.6f},"
                         f"{r.ci_agrees_with_test}\n"
                     )
