@@ -209,6 +209,12 @@ architecture reference (~5 000 words) covering the matching pipeline, mask
 creation, every metric implementation, STAPLE algorithm details, session
 schema, performance engineering, and a literature index.
 
+> **Work in progress.** A seventh tab, **Report**, and the canonical organ
+> grouping behind it are on the `v3-dev` branch and are not described above
+> yet. [`docs/V3_RELEASE_STATUS.md`](docs/V3_RELEASE_STATUS.md) records what
+> v3.0.0 will contain, what is still outstanding, and which numbers the release
+> moves.
+
 ## Validation
 
 Every numerical engine in AutoSeg Evaluator — mask rasterisation, geometric

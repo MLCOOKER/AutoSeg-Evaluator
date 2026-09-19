@@ -26,6 +26,80 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   two candidates.
 
 ### Added
+- **Canonical organ grouping (`core/organ_groups.py`, `data/organ_index.py`).**
+  Collapses the spellings of one organ into one group so statistics can pool
+  them, without ever pooling two organs. Grouping is on a structured key —
+  `(base, laterality, qualifier)` — and **only `base` is ever fuzzy-matched**.
+  That is forced by measurement, not taste: on this project's own matcher,
+  left/right pairs of the same organ score 0.82–0.93 while genuinely different
+  organs score 0.38–0.45, so no similarity threshold separates them and
+  laterality has to be an extracted axis rather than a matching outcome.
+
+  Assignment runs in tiers — `manual` > `dictionary` > `stripped` > `fuzzy` >
+  `unassigned` — and a fuzzy result is **a proposal, never applied without
+  confirmation**. It also cannot cross four barriers, each added after a real
+  merge failure on cohort data: laterality extraction, index signature
+  (including roman numerals, for Rib 1–12), positional signature (sup/inf,
+  asc/desc, prox/dist), and a short-code difference (`UJ_Front_L` vs
+  `LJ_Front_L` — upper versus lower jaw). An unassigned name is not an error:
+  it forms a group of one, and the only thing lost is pooling.
+
+  Measured: 280 names → 226 groups on the HN1 set with no left/right
+  contamination, 1439 → 1289 on the larger corpus. A TG-263 mismatch is a flag,
+  not a block — over 5483 ground-truth × producer pairs it blocked nothing and
+  changed no selection. Fixed 11 canonical hijacks and 24 laterality inversions
+  in the shipped `synonyms.json` along the way.
+- **Review Organ Groups and Label Organs (Matching tab).** Frequency-ranked and
+  bulk-capable, because after type triage 527 names still need assignment and a
+  one-row-at-a-time dialog would not survive that; the top 100 cover 66 % of
+  unresolved ROI instances. Curation lives in the Matching tab only, labels are
+  label-only and never merge drawers, and answers persist on explicit session
+  save.
+- **Report tab (Tab 7)** — `core/statistics.py`, `data/report.py`,
+  `ui/widgets/stat_plots.py`, `ui/tabs/report.py`. Paired comparison of two
+  sources against a common ground truth, per organ and per metric.
+
+  Wilcoxon signed-rank with **Pratt's** zero handling and an exact conditional
+  p-value; Hodges–Lehmann point estimate with a confidence set obtained by
+  **inverting that same test** rather than by a normal approximation; a
+  rank-biserial effect size; and an exact sign test reported alongside always,
+  so direction and magnitude can be read separately and neither can be chosen
+  after the fact.
+
+  **Each organ is its own question and its p-value is reported unadjusted.** An
+  earlier design corrected across whichever organs happened to be selected,
+  which made the divisor a view setting — narrowing the list made a result
+  significant and widening it took the result away, on identical data. What
+  multiplicity costs is stated instead (how many rows would fall below 0.05 by
+  chance), and every comparison is shown, which is what makes reporting
+  uncorrected p-values defensible. Recorded as a reversal in D8 of the register.
+
+  Coverage is shown **before** any comparison, because a paired test silently
+  uses only the patients both sources contoured, and a model that declines the
+  hard cases is otherwise rewarded for declining them. Every comparison carries
+  the counts it was computed from, and rows with equal counts but different
+  patients are flagged as such.
+
+  A comparison case is `(patient, planning CT)`, not `PatientID` — a patient
+  with two courses contributes two cases, and multi-case patients are excluded
+  from the paired analysis rather than silently collapsed.
+
+  Where the design cannot reach significance at all the tab says so, rather
+  than printing a column of 1.000 that reads as agreement. With unadjusted
+  p-values that floor is **six paired patients**.
+- **Acquisition parameters section (Report tab).** Scanner, reconstruction and
+  geometry summarised across the cohort, so a report says what the images
+  actually were. `core/acquisition.py` is an **allowlist** — the tags it may
+  read are enumerated and the read loop iterates that list, so the allowlist is
+  the code path rather than a comment next to it. Values that vary across the
+  cohort are summarised as ranges, never averaged.
+- **PDF export (Report tab).** Everything visible on the page, in reading
+  order, as one document: a masthead band, the conditions the report was
+  produced under, the tables, the figures as drawn, and a sign-off naming the
+  software and version. A table exported on its own loses the selections that
+  make it interpretable — which ground truth, which metric, which sources — so
+  the export is the whole page or nothing. Figures can also be saved on their
+  own as PNGs at 200 dpi.
 - **Explicit-reference DICOM linking (`autoseg_evaluator.data.linkage`).**
   Answers the reviewer criticism that `FrameOfReferenceUID` alone cannot match
   dose to structure set when one Frame of Reference holds several imaging
@@ -63,12 +137,24 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   block when a dose metric is actually switched on.
 - `tests/test_data_links_ui.py` — 12 tests over the dialog and the compute
   gate.
+- `scripts/compare_rasterisers.py` + `docs/RASTERISER_COMPARISON.md` —
+  quantifies per-ROI agreement and runtime between the two backends on a real
+  cohort (PHI-safe report). RTSTRUCTs are discovered by DICOM Modality rather
+  than filename, so vendor exports are no longer missed.
+- `NOTICE` — the continuous backend is adapted from dcmrtstruct2nii v5 (MIT);
+  full upstream licence plus an enumerated list of local modifications.
+- CI now installs `dcmrtstruct2nii` so the default backend's upstream
+  conformance test cannot silently skip.
+- `docs/V3_RELEASE_STATUS.md` — what v3.0.0 contains, what is outstanding, and
+  which numbers the release moves.
 
 ### Changed
-- **Session schema v4 → v5.** Adds `link_overrides`, recording the answers
-  given in Review Data Links so a cohort whose links needed settling by hand
-  does not need settling again on reload. v4 and earlier sessions load
-  unchanged.
+- **Session schema v4 → v5 → v6.** v5 adds `link_overrides`, recording the
+  answers given in Review Data Links so a cohort whose links needed settling by
+  hand does not need settling again on reload. v6 adds `organ_assignments`,
+  mapping a raw ROI name to the organ it was assigned — kept in the session
+  rather than in the settings file, because the answers are about one cohort
+  and not about the application. Earlier sessions load unchanged.
 - **The sub-voxel (`continuous`) mask rasteriser is now the default.**
   ⚠️ **This changes numerical output.** Every mask-derived metric moves —
   volume, Dice, Hausdorff, MSD, Surface Dice, APL, centre-of-mass, STAPLE, and
@@ -94,16 +180,6 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   voxel-identical to PlatiPy 0.7.2 by `tests/test_platipy_equivalence.py`.
   Case coverage is unchanged: on the HN1 set both backends converted exactly
   the same 357 of 389 ROIs.
-
-### Added
-- `scripts/compare_rasterisers.py` + `docs/RASTERISER_COMPARISON.md` —
-  quantifies per-ROI agreement and runtime between the two backends on a real
-  cohort (PHI-safe report). RTSTRUCTs are discovered by DICOM Modality rather
-  than filename, so vendor exports are no longer missed.
-- `NOTICE` — the continuous backend is adapted from dcmrtstruct2nii v5 (MIT);
-  full upstream licence plus an enumerated list of local modifications.
-- CI now installs `dcmrtstruct2nii` so the default backend's upstream
-  conformance test cannot silently skip.
 
 ## [2.6.1] — 2026-06-30
 
