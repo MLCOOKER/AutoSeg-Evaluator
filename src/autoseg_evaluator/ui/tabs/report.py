@@ -37,6 +37,7 @@ instead of printing a column of 1.000 that reads as evidence of agreement.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -64,6 +65,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from autoseg_evaluator import __version__
 from autoseg_evaluator.core.readable import (
     metric_units,
     readable_metric,
@@ -88,6 +90,9 @@ from autoseg_evaluator.ui.widgets.stat_plots import (
 )
 
 _ALPHA = 0.05
+
+#: Where the masthead logo lives.
+_ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 #: Rows a section shows before it starts scrolling. Below this a table sizes to
 #: its contents, so a four-row table costs four rows of page rather than a fixed
@@ -1594,72 +1599,200 @@ class ReportTab(QWidget):
             document.print_(writer)
 
     def _pdf_html(self, scratch: Path) -> str:
-        """The page as HTML, with the figures written beside it as PNGs."""
+        """The page as HTML, with the figures written beside it as PNGs.
+
+        Laid out as a report rather than as a dump of the screen: a masthead,
+        the conditions it was produced under, then the sections in reading
+        order, then a sign-off saying what produced it and when. The figures go
+        in exactly as drawn — they have their own typography, and restyling them
+        to match the page would trade legibility for a matching palette.
+        """
         axis = self._axis()
         metric = self._selected_metric()
         reference = self._reference_combo.currentText()
         challenger = self._challenger_combo.currentText()
         tolerance = tolerance_note(metric, *self._tolerances())
+        produced = datetime.now().strftime("%d %B %Y · %H:%M")
 
-        conditions = [
-            ("Metric", readable_metric(metric) + (f" · {tolerance}" if tolerance else "")),
-            ("Ground truth", self._ground_truth_combo.currentText() or "—"),
-            ("Compared against", reference or "—"),
-            (
-                "Challenger" if axis is FamilyAxis.ORGANS else "Organ",
-                (challenger if axis is FamilyAxis.ORGANS else self._selected_organ()) or "—",
-            ),
-            ("Comparisons run across", axis.plural),
-            ("Cohort", self._summary_label.text()),
-        ]
+        fixed_label = "Challenger" if axis is FamilyAxis.ORGANS else "Organ"
+        fixed_value = (challenger if axis is FamilyAxis.ORGANS else self._selected_organ()) or "—"
 
-        parts = [
-            "<h1>Statistical report</h1>",
-            "<table class='conditions'>"
-            + "".join(f"<tr><th>{name}</th><td>{value}</td></tr>" for name, value in conditions)
-            + "</table>",
-        ]
-        if self._warning.text():
-            parts.append(f"<div class='warning'>{self._warning.text()}</div>")
+        sections = ["Coverage", "Descriptive statistics", "Paired comparison"]
+        if self._acquisition.available:
+            sections.append("Acquisition")
 
-        parts.append("<h2>Coverage</h2>" + _table_html(self._coverage_table))
+        parts = [_masthead_html(produced), "<hr/>", "<h1>Auto-contouring evaluation report</h1>"]
+        parts.append("<p class='subtitle'>" + "  ·  ".join(sections) + "</p>")
         parts.append(
-            "<h2>Descriptive statistics</h2>"
+            _panel_html(
+                [
+                    ("Metric", readable_metric(metric) or "—"),
+                    ("Tolerance", tolerance.replace("tolerance = ", "") if tolerance else "n/a"),
+                    ("Ground truth", self._ground_truth_combo.currentText() or "—"),
+                ],
+                [
+                    ("Compared against", reference or "—"),
+                    (fixed_label, fixed_value),
+                    ("Compared across", axis.plural),
+                ],
+                [("Cohort", self._summary_label.text() or "—")],
+            )
+        )
+
+        parts.append(_section("Coverage") + _table_html(self._coverage_table))
+        parts.append(
+            _section("Descriptive statistics")
             + f"<p class='note'>{self._descriptive_note.text()}</p>"
             + _table_html(self._descriptive_table)
         )
-        parts.append("<h2>Paired comparison</h2>" + _table_html(self._comparison_table))
+        parts.append(_section("Paired comparison") + _table_html(self._comparison_table))
 
         for name, canvas in self._figures():
             image = scratch / f"{name}.png"
             canvas.figure.savefig(image, dpi=150, bbox_inches="tight", facecolor="white")
-            parts.append(f"<h2>{name.capitalize()}</h2><img src='{image.as_uri()}' width='980'/>")
+            parts.append(_section(name) + f"<img src='{image.as_uri()}' width='940'/>")
 
         if self._acquisition.available:
             parts.append(
-                "<h2>Acquisition parameters</h2>"
+                _section("Acquisition parameters")
                 + f"<p class='note'>{self._acquisition_note.text()}</p>"
                 + _table_html(self._image_table)
             )
+
+        comments = []
+        if self._warning.text():
+            for note in self._warning.text().split("<br><br>"):
+                comments.append(("Caution", note))
         if self._methods.text():
-            parts.append(f"<h2>Methods</h2><p class='methods'>{self._methods.text()}</p>")
+            comments.append(("Methods", self._methods.text()))
+        if comments:
+            parts.append(_section("Notes & interpretation") + _comments_html(comments))
+
+        parts.append(_signoff_html(produced))
         return "<html><body>" + "".join(parts) + "</body></html>"
 
 
-#: Plain, print-oriented, and deliberately not a copy of the screen's styling —
-#: a PDF is read on paper more often than the tab is.
-_PDF_STYLE = """
-h1 { font-size: 17pt; margin: 0 0 10px 0; }
-h2 { font-size: 12pt; margin: 16px 0 5px 0; }
-table { border-collapse: collapse; width: 100%; font-size: 8pt; }
-th, td { border: 1px solid #C8CDD4; padding: 3px 5px; text-align: left; }
-th { background: #EFF1F4; }
-table.conditions { width: 60%; font-size: 9pt; }
-table.conditions th { width: 30%; }
-.note, .methods { font-size: 8pt; color: #44505E; }
-.warning { font-size: 8pt; border: 1px solid #D9C27A; background: #FFF8E1;
-           padding: 6px 8px; margin: 8px 0; }
+#: The PDF follows a clinical-report idiom rather than the screen's: spaced
+#: small-caps section labels, a serif title, a teal rule under a masthead, and a
+#: sign-off block. It is the visual language of a document that gets printed,
+#: filed and read months later, which is what this one is for.
+#:
+#: The figures are exempt. They carry their own typography, chosen for what they
+#: have to show, and restyling them to match a page would cost legibility for
+#: the sake of a matching palette.
+_INK = "#1B2A32"
+_ACCENT = "#15606E"
+_MUTED = "#6B7B85"
+_RULE = "#C9D6DC"
+_PANEL = "#E8EFF2"
+_ROW_TINT = "#F5F8F9"
+
+_PDF_STYLE = f"""
+body {{ color: {_INK}; font-family: "Segoe UI", Calibri, Arial, sans-serif; }}
+td, th, p {{ font-family: "Segoe UI", Calibri, Arial, sans-serif; }}
+h1 {{ font-family: Georgia, "Times New Roman", serif; font-size: 19pt;
+      color: {_INK}; margin: 2px 0 2px 0; font-weight: normal; }}
+p.subtitle {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
+              color: {_ACCENT}; font-size: 9.5pt; margin: 0 0 14px 0; }}
+p.masthead {{ color: {_ACCENT}; font-size: 12pt; font-weight: bold; margin: 0; }}
+p.masthead-sub {{ color: {_MUTED}; font-size: 7.5pt; margin: 3px 0 0 0; }}
+p.section {{ color: {_ACCENT}; font-size: 8pt; font-weight: bold;
+             margin: 16px 0 5px 0; }}
+p.note {{ color: {_MUTED}; font-size: 7.5pt; margin: 0 0 5px 0; }}
+p.methods {{ color: {_INK}; font-size: 8pt; margin: 0; }}
+p.sign-name {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
+               color: {_ACCENT}; font-size: 16pt; margin: 14px 0 0 0; }}
+p.sign-role {{ color: {_INK}; font-size: 8.5pt; font-weight: bold; margin: 3px 0 0 0; }}
+p.sign-meta {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
+               color: {_MUTED}; font-size: 7.5pt; margin: 2px 0 0 0; }}
+table.data {{ border-collapse: collapse; width: 100%; font-size: 7.5pt; }}
+table.data th {{ background-color: {_ACCENT}; color: #FFFFFF; font-size: 7pt;
+                 padding: 5px 6px; text-align: left; border: 1px solid {_ACCENT}; }}
+table.data td {{ padding: 4px 6px; border: 1px solid {_RULE}; }}
+table.panel {{ border-collapse: collapse; width: 100%; margin: 0 0 4px 0; }}
+table.panel td {{ padding: 9px 12px; font-size: 8pt;
+                  background-color: {_PANEL}; }}
+table.masthead {{ border-collapse: collapse; width: 100%; }}
+table.comments {{ border-collapse: collapse; width: 100%; }}
+table.comments td {{ padding: 4px 0 8px 0; vertical-align: top; }}
+td.comment-label {{ color: {_ACCENT}; font-size: 7pt; font-weight: bold; width: 22%; }}
+td.comment-body {{ color: {_INK}; font-size: 8pt; }}
 """
+
+
+def _spaced(text: str) -> str:
+    """``RESULTS`` -> ``R E S U L T S``.
+
+    The report idiom this follows letter-spaces its small-caps labels, and
+    QTextDocument's CSS subset has no ``letter-spacing``. Spacing the characters
+    is the same effect by other means; it costs nothing because these labels are
+    never read as words, only recognised as section markers.
+    """
+    return "   ".join(" ".join(word) for word in str(text).upper().split())
+
+
+def _section(title: str) -> str:
+    return f"<p class='section'>{_spaced(title)}</p>"
+
+
+def _masthead_html(produced: str) -> str:
+    """Product name left, logo right, above a rule."""
+    logo = _ASSET_DIR / "icon.png"
+    badge = f"<img src='{logo.as_uri()}' width='52' height='52'/>" if logo.exists() else ""
+    return (
+        "<table class='masthead'><tr>"
+        "<td>"
+        f"<p class='masthead'>{_spaced('AutoSeg Evaluator')}</p>"
+        f"<p class='masthead-sub'>Auto-contouring evaluation · version {__version__} · "
+        f"generated {produced}</p>"
+        "</td>"
+        f"<td align='right'>{badge}</td>"
+        "</tr></table>"
+    )
+
+
+def _panel_html(*columns: list[tuple[str, str]]) -> str:
+    """The conditions block: spaced small-caps labels over their values.
+
+    These are what make the tables interpretable later — which metric, which
+    ground truth, which sources — so they sit above the data rather than in a
+    footnote under it.
+    """
+    cells = []
+    for column in columns:
+        entries = "".join(
+            f"<p class='section' style='margin:0 0 2px 0'>{_spaced(label)}</p>"
+            f"<p style='margin:0 0 8px 0; font-size:8.5pt'>{value}</p>"
+            for label, value in column
+        )
+        cells.append(f"<td>{entries}</td>")
+    return "<table class='panel'><tr>" + "".join(cells) + "</tr></table>"
+
+
+def _comments_html(entries: list[tuple[str, str]]) -> str:
+    """Label on the left, prose on the right — the interpretation idiom."""
+    rows = "".join(
+        f"<tr><td class='comment-label'>{_spaced(label)}</td>"
+        f"<td class='comment-body'>{body}</td></tr>"
+        for label, body in entries
+    )
+    return f"<table class='comments'>{rows}</table>"
+
+
+def _signoff_html(produced: str) -> str:
+    """Who produced it and from what — the report's provenance, not a signature.
+
+    Deliberately not styled as an authorising signature: nothing here has been
+    reviewed by a person, and a document that looks signed invites the reader to
+    assume it was.
+    """
+    return (
+        "<hr/>"
+        f"<p class='sign-name'>AutoSeg Evaluator</p>"
+        f"<p class='sign-role'>Generated report · version {__version__}</p>"
+        "<p class='sign-meta'>Produced automatically from the computed metrics. "
+        "Not reviewed or approved by a person.</p>"
+    )
 
 
 def _table_html(table: QTableWidget) -> str:
@@ -1680,7 +1813,7 @@ def _table_html(table: QTableWidget) -> str:
             cells.append(f"<td{weight}>{value}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
     return (
-        "<table><tr>"
+        "<table class='data'><tr>"
         + "".join(f"<th>{header}</th>" for header in headers)
         + "</tr>"
         + "".join(rows)

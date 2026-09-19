@@ -370,14 +370,38 @@ def test_the_export_records_what_it_was_produced_under(tab, tmp_path):
     most of what makes the tables readable."""
     from pathlib import Path
 
+    from autoseg_evaluator.ui.tabs.report import _spaced
+
     tab._metric_combo.setCurrentText("dice")
     _select(tab, ORGANS)
     html = tab._pdf_html(Path(tmp_path))
-    assert "Ground truth" in html
+
+    # Section and field labels are letter-spaced for the report idiom, so the
+    # document is checked for what it renders rather than for the source words.
+    for label in ("Ground truth", "Metric", "Compared against", "Cohort"):
+        assert _spaced(label) in html, label
+    for section in ("Coverage", "Descriptive statistics", "Paired comparison"):
+        assert _spaced(section) in html, section
     assert REFERENCE in html and CHALLENGER in html
     assert "Dice" in html
-    assert "Coverage" in html and "Descriptive statistics" in html
-    assert "Paired comparison" in html and "Methods" in html
+    assert "Methods" in html or _spaced("Notes & interpretation") in html
+
+
+def test_the_export_carries_the_masthead_and_provenance(tab, tmp_path):
+    """A figure or table that escapes the document should still be traceable."""
+    from pathlib import Path
+
+    from autoseg_evaluator import __version__
+    from autoseg_evaluator.ui.tabs.report import _spaced
+
+    _select(tab, ORGANS)
+    html = tab._pdf_html(Path(tmp_path))
+    assert _spaced("AutoSeg Evaluator") in html
+    assert "icon.png" in html  # the logo, top right
+    assert __version__ in html
+    # Said plainly, because a document laid out like a report invites the
+    # assumption that a person signed it off.
+    assert "Not reviewed or approved by a person" in html
 
 
 def test_export_with_nothing_to_export_says_so(qapp, monkeypatch):
