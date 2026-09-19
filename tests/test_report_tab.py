@@ -479,7 +479,7 @@ def test_a_coverage_cell_explains_its_own_shorthand(tab):
     """`8 / 8 · 2 not run` is unreadable without being told what it means."""
     for row in range(tab._coverage_table.rowCount()):
         if (
-            tab._coverage_table.item(row, 0).text() == "Parotid (L)"
+            _row_organ(tab._coverage_table, row) == "Parotid (L)"
             and tab._coverage_table.item(row, 1).text() == THIRD
         ):
             tip = tab._coverage_table.item(row, 2).toolTip()
@@ -1354,3 +1354,107 @@ def test_the_relative_toggle_sits_with_the_figure_it_rescales(tab):
     assert box is not None
     assert box.title() == "Difference from reference"
     assert tab._forest in box.findChildren(type(tab._forest))
+
+
+# ---- Coverage grouping and the best-median mark ---------------------------
+
+
+def test_the_coverage_table_groups_organs_too(tab):
+    """Same treatment as the descriptive table: named once, ruled between."""
+    from autoseg_evaluator.ui.tabs.report import GROUP_START_ROLE
+
+    _select(tab, ORGANS)
+    table = tab._coverage_table
+    labelled = [table.item(r, 0).text() for r in range(table.rowCount()) if table.item(r, 0).text()]
+    assert sorted(labelled) == sorted(ORGANS)
+    starts = sum(1 for r in range(table.rowCount()) if table.item(r, 0).data(GROUP_START_ROLE))
+    assert starts == len(ORGANS)
+    # And the organ is still recoverable from every row.
+    for row in range(table.rowCount()):
+        assert _row_organ(table, row) in ORGANS
+
+
+def test_the_best_median_in_each_organ_is_bold(tab):
+    """Bold rather than colour: weight survives greyscale and colour blindness.
+
+    In this fixture Limbus has the highest Dice in every organ.
+    """
+    from autoseg_evaluator.ui.tabs.report import BEST_ROLE, MEDIAN_COLUMN
+
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    table = tab._descriptive_table
+    marked = {
+        (_row_organ(table, r), table.item(r, 1).text())
+        for r in range(table.rowCount())
+        if table.item(r, MEDIAN_COLUMN).data(BEST_ROLE)
+    }
+    assert marked == {(organ, REFERENCE) for organ in ORGANS}
+    for organ, source in marked:
+        for row in range(table.rowCount()):
+            if _row_organ(table, row) == organ and table.item(row, 1).text() == source:
+                assert table.item(row, MEDIAN_COLUMN).font().bold()
+
+
+def test_the_best_mark_follows_the_metric_direction(tab):
+    """On Hausdorff the winner is the smallest, not the largest."""
+    from autoseg_evaluator.ui.tabs.report import BEST_ROLE, MEDIAN_COLUMN
+
+    _select(tab, ["Parotid (L)"])
+    table = tab._descriptive_table
+
+    def winner():
+        for row in range(table.rowCount()):
+            if table.item(row, MEDIAN_COLUMN).data(BEST_ROLE):
+                return table.item(row, 1).text()
+        return ""
+
+    tab._metric_combo.setCurrentText("dice")
+    on_dice = winner()
+    medians_dice = {
+        table.item(r, 1).text(): float(table.item(r, MEDIAN_COLUMN).text().split(" ")[0])
+        for r in range(table.rowCount())
+    }
+    assert on_dice == max(medians_dice, key=medians_dice.get)
+
+    tab._metric_combo.setCurrentText("hausdorff95")
+    medians_hd = {
+        table.item(r, 1).text(): float(table.item(r, MEDIAN_COLUMN).text().split(" ")[0])
+        for r in range(table.rowCount())
+    }
+    assert winner() == min(medians_hd, key=medians_hd.get)
+
+
+def test_an_undirected_metric_marks_no_winner(qapp):
+    """Best is undefined when the metric is best at a target, not an extreme."""
+    from autoseg_evaluator.ui.tabs.report import BEST_ROLE, MEDIAN_COLUMN
+
+    rows = []
+    for patient in range(4):
+        for source, value in ((REFERENCE, 1.4), (CHALLENGER, 0.8)):
+            row = _row_for(f"P{patient}", "Parotid (L)", source, 0.8)
+            row["metrics"] = {"volume_ratio": value}
+            rows.append(row)
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+
+    table = widget._descriptive_table
+    assert not any(table.item(r, MEDIAN_COLUMN).data(BEST_ROLE) for r in range(table.rowCount()))
+    assert "no result is marked best" in widget._descriptive_note.text()
+    widget.deleteLater()
+
+
+def test_the_note_explains_the_bold(tab):
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    assert "best median within each organ is shown in bold" in tab._descriptive_note.text()
+
+
+def test_spacing_between_slices_is_no_longer_reported(tab):
+    tab.set_library(_fake_library())
+    labels = [tab._image_table.item(r, 0).text() for r in range(tab._image_table.rowCount())]
+    assert not any("Spacing between slices" in label for label in labels)
+    assert "Slice thickness (mm)" in labels

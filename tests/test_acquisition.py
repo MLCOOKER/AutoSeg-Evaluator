@@ -102,7 +102,6 @@ def test_the_acquisition_object_has_no_field_for_an_identifier():
         "model",
         "software_versions",
         "slice_thickness",
-        "spacing_between_slices",
         "pixel_spacing_row",
         "pixel_spacing_col",
         "kvp",

@@ -80,8 +80,16 @@ MAX_VISIBLE_ROWS = 24
 #: data — anything reading the table back still needs to know the group.
 ORGAN_ROLE = int(Qt.ItemDataRole.UserRole)
 
-#: Marks the first row of an organ's block in the descriptive table.
+#: Marks the first row of an organ's block, in coverage and descriptives.
 GROUP_START_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+#: Marks the best median within an organ. Bold rather than coloured: a wash
+#: behind one narrow column proved invisible on a real display, and weight is
+#: legible in greyscale and to a colour-blind reader without a legend.
+BEST_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+
+#: Column holding the median, which is the performance figure of the row.
+MEDIAN_COLUMN = 3
 
 
 class _GroupRuleDelegate(QStyledItemDelegate):
@@ -493,6 +501,7 @@ class ReportTab(QWidget):
         # each, which is where the "bunched up" reading came from; the tab is
         # inside a scroll area, so height is free and width is not.
         self._coverage_table = self._make_table(COVERAGE_COLUMNS)
+        self._coverage_table.setItemDelegate(_GroupRuleDelegate(self._coverage_table))
         outer.addWidget(self._wrap("Coverage", self._coverage_table))
 
         self._descriptive_table = self._make_table(DESCRIPTIVE_COLUMNS)
@@ -911,10 +920,15 @@ class ReportTab(QWidget):
         table = self._coverage_table
         table.setRowCount(0)
         for organ in organs:
-            for source in self._model.sources():
-                cell = self._model.coverage(organ, metric, source)
-                if cell.eligible == 0:
-                    continue
+            # Only the sources that have something to say about this organ, so
+            # "first of the group" means the first row actually drawn.
+            present = [
+                (source, self._model.coverage(organ, metric, source))
+                for source in self._model.sources()
+            ]
+            present = [(source, cell) for source, cell in present if cell.eligible]
+            for position, (source, cell) in enumerate(present):
+                first = position == 0
                 row = table.rowCount()
                 table.insertRow(row)
                 explanation = _tip(
@@ -942,7 +956,7 @@ class ReportTab(QWidget):
                 )
                 for column, text in enumerate(
                     [
-                        organ,
+                        organ if first else "",
                         source,
                         cell.summary(),
                         str(cell.produced),
@@ -951,7 +965,14 @@ class ReportTab(QWidget):
                     ]
                 ):
                     item = QTableWidgetItem(text)
+                    item.setData(ORGAN_ROLE, organ)
                     item.setToolTip(explanation)
+                    if first:
+                        item.setData(GROUP_START_ROLE, True)
+                        if column == 0:
+                            font = item.font()
+                            font.setBold(True)
+                            item.setFont(font)
                     table.setItem(row, column, item)
         self._fit_table(table)
 
@@ -965,6 +986,15 @@ class ReportTab(QWidget):
                 for source in self._model.sources()
             }
             present = {s: d for s, d in summaries.items() if d is not None}
+            # The best median in this organ, marked in bold. Within the organ
+            # only — a Dice excellent for a cochlea is poor for a parotid, so a
+            # single winner across the table would rank organs, not sources.
+            # An undirected metric has no winner and none is marked.
+            best_source = ""
+            if direction and len(present) > 1:
+                best_source = (max if direction > 0 else min)(
+                    present, key=lambda source: present[source].median
+                )
             for position, (source, summary) in enumerate(present.items()):
                 row = table.rowCount()
                 table.insertRow(row)
@@ -991,6 +1021,11 @@ class ReportTab(QWidget):
                     item = QTableWidgetItem(text)
                     item.setData(ORGAN_ROLE, organ)
                     item.setToolTip(self._descriptive_tooltip(organ, source, metric, direction))
+                    if source == best_source and column == MEDIAN_COLUMN:
+                        item.setData(BEST_ROLE, True)
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
                     if first:
                         # A rule above the first row of each group, so the
                         # boundary survives scrolling past the organ's name.
@@ -1004,10 +1039,11 @@ class ReportTab(QWidget):
         self._descriptive_note.setText(
             f"Every source, on {metric}"
             + (
-                f", where {'higher' if direction > 0 else 'lower'} is better."
+                f", where {'higher' if direction > 0 else 'lower'} is better. "
+                "The best median within each organ is shown in bold."
                 if direction
                 else " — a metric with no better or worse direction, since it is best at "
-                "a target rather than at an extreme."
+                "a target rather than at an extreme, so no result is marked best."
             )
         )
 

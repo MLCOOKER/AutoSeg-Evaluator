@@ -46,7 +46,6 @@ IMAGE_TAGS: dict[str, str] = {
     "model": "ManufacturerModelName",
     "software_versions": "SoftwareVersions",
     "slice_thickness": "SliceThickness",
-    "spacing_between_slices": "SpacingBetweenSlices",
     "kvp": "KVP",
     "convolution_kernel": "ConvolutionKernel",
     "patient_position": "PatientPosition",
@@ -118,7 +117,6 @@ class ImageAcquisition:
     model: str = ""
     software_versions: str = ""
     slice_thickness: float | None = None
-    spacing_between_slices: float | None = None
     pixel_spacing_row: float | None = None
     pixel_spacing_col: float | None = None
     kvp: float | None = None
@@ -179,7 +177,7 @@ def read_image_acquisition(dataset: Any) -> ImageAcquisition:
         raw = getattr(dataset, keyword, None)
         if raw is None:
             continue
-        if attribute in {"slice_thickness", "spacing_between_slices", "kvp"}:
+        if attribute in {"slice_thickness", "kvp"}:
             setattr(found, attribute, _number(raw))
         elif attribute in {"rows", "columns"}:
             number = _number(raw)
@@ -283,7 +281,6 @@ IMAGE_FIELDS: Sequence[tuple[str, str]] = (
     ("software_versions", "Scanner software"),
     ("in_plane_mm", "In-plane pixel spacing (mm)"),
     ("slice_thickness", "Slice thickness (mm)"),
-    ("spacing_between_slices", "Spacing between slices (mm)"),
     ("matrix", "Acquisition matrix"),
     ("kvp", "Tube voltage (kVp)"),
     ("convolution_kernel", "Reconstruction kernel"),
