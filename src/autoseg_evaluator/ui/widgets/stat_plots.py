@@ -22,6 +22,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtWidgets import QSizePolicy
 
+from autoseg_evaluator.core.readable import readable_organ
 from autoseg_evaluator.data.report import metric_direction
 
 #: Below this many observations a kernel density estimate says more about the
@@ -51,10 +52,26 @@ _PALETTE = [
 MIN_CANVAS_WIDTH = 360
 MIN_CANVAS_HEIGHT = 260
 
+#: The forest needs more width than the distributions do. Its row labels are
+#: prose — "Right submandibular gland" rather than "Glnd Submand (R)" — which is
+#: the point of them, but prose is long, and it competes with the interval for
+#: the same horizontal space. Measured: the layout collapses at 540 px and
+#: survives at 600, so the floor sits above that.
+MIN_FOREST_WIDTH = 620
+
 #: Organ labels longer than this are elided on the axis. Long TG-263 names
 #: rotated at 30 degrees are the single largest consumer of vertical space, and
 #: they are the reason the layout collapses at all.
 MAX_TICK_LABEL = 22
+
+#: Figure ink. Darker than matplotlib's defaults because these figures are read
+#: in slides and printed manuscripts, not only on the screen that drew them.
+_TEXT = "#22272E"
+_MUTED_TEXT = "#5A6572"
+_GRID = "#D6DAE0"
+_ZERO_LINE = "#5A6572"
+_SIGNIFICANT = "#0F6E6E"
+_NOT_SIGNIFICANT = "#6B7683"
 
 
 def _elide(text: str, limit: int = MAX_TICK_LABEL) -> str:
@@ -182,7 +199,28 @@ class DistributionCanvas(_Canvas):
 
 
 class ForestCanvas(_Canvas):
-    """Paired differences against one reference source, one row per family member."""
+    """Paired differences against one reference source, one row per member.
+
+    Sized to its content rather than to a fixed box: a three-row comparison gets
+    three rows of height. A forest with generous row spacing and a two-inch gap
+    under the last row reads as though data are missing.
+
+    Type is larger and darker than a default matplotlib figure, because these
+    are read in slides and printed manuscripts rather than on the screen that
+    drew them, and the caption sits in reserved space below the axis instead of
+    floating over the figure corner.
+    """
+
+    #: Vertical space per row, in inches. Tight enough that ten organs stay on
+    #: one screen, loose enough that the interval caps do not touch.
+    ROW_INCHES = 0.30
+
+    #: Everything that is not a row: titles, axis, tick labels, caption.
+    CHROME_INCHES = 2.35
+
+    def __init__(self, width: float = 9.0, height: float = 5.0) -> None:
+        super().__init__(width, height)
+        self.setMinimumWidth(MIN_FOREST_WIDTH)
 
     def plot(
         self,
@@ -194,6 +232,9 @@ class ForestCanvas(_Canvas):
         alpha: float = 0.05,
         scales: dict[str, float] | None = None,
         units: str = "",
+        title: str = "",
+        subtitle: str = "",
+        sort_by_effect: bool = False,
     ) -> None:
         """``results`` is ``{label: PairedResult}`` from either family method.
 
@@ -211,131 +252,167 @@ class ForestCanvas(_Canvas):
         axis the cochlea collapses onto zero. A row whose denominator is zero or
         missing cannot be expressed relatively and is dropped, with the figure
         saying how many.
+
+        ``sort_by_effect`` reorders rows largest-difference-first. Off by
+        default: the caller's order is anatomical or vendor order and is stable
+        across metrics, so a reader comparing two figures finds the same row in
+        the same place. Sorting by effect moves rows whenever the data move.
         """
         self.clear()
         axes = self.figure.add_subplot(111)
         usable = [
-            (organ, result)
-            for organ, result in results.items()
+            (label, result)
+            for label, result in results.items()
             if result is not None and result.hl_estimate is not None
         ]
         dropped = 0
         if scales is not None:
-            kept = [(o, r) for o, r in usable if scales.get(o)]
+            kept = [(label, r) for label, r in usable if scales.get(label)]
             dropped = len(usable) - len(kept)
             usable = kept
+
         if not usable:
-            axes.text(0.5, 0.5, "Nothing to compare", ha="center", va="center")
+            self._resize_for(0)
+            axes.text(0.5, 0.5, "Nothing to compare", ha="center", va="center", fontsize=11)
             axes.set_axis_off()
             self.draw_idle()
             return
 
-        def rescale(value: float | None, organ: str) -> float | None:
+        def rescale(value: float | None, label: str) -> float | None:
             if value is None:
                 return None
             if scales is None:
                 return value
-            denominator = scales.get(organ)
+            denominator = scales.get(label)
             return None if not denominator else value / abs(denominator) * 100.0
 
-        usable.sort(key=lambda item: rescale(item[1].hl_estimate, item[0]) or 0.0)
+        if sort_by_effect:
+            usable.sort(key=lambda item: rescale(item[1].hl_estimate, item[0]) or 0.0)
+        else:
+            # Drawn bottom-up, so reverse the caller's order to keep the first
+            # row at the top where a reader looks for it.
+            usable.reverse()
+
+        self._resize_for(len(usable))
         positions = range(len(usable))
 
-        for y, (_organ, result) in zip(positions, usable, strict=True):
-            estimate = rescale(result.hl_estimate, _organ)
+        for y, (label, result) in zip(positions, usable, strict=True):
+            estimate = rescale(result.hl_estimate, label)
             significant = result.p_value <= alpha
-            colour = "#0F6E6E" if significant else "#4A5866"
+            colour = _SIGNIFICANT if significant else _NOT_SIGNIFICANT
 
-            low = rescale(result.ci_low, _organ)
-            high = rescale(result.ci_high, _organ)
+            low = rescale(result.ci_low, label)
+            high = rescale(result.ci_high, label)
             if result.ci_available and low is not None and high is not None:
                 axes.plot(
                     [low, high],
                     [y, y],
                     color=colour,
-                    linewidth=1.6,
+                    linewidth=1.8,
                     solid_capstyle="butt",
-                    zorder=2,
+                    zorder=3,
                 )
                 for endpoint in (low, high):
                     axes.plot(
                         [endpoint, endpoint],
-                        [y - 0.16, y + 0.16],
+                        [y - 0.14, y + 0.14],
                         color=colour,
-                        linewidth=1.6,
-                        zorder=2,
+                        linewidth=1.8,
+                        zorder=3,
                     )
             else:
-                # No finite interval exists at this sample size — shown as an
-                # open span rather than omitted, so the row is not mistaken for
-                # a precise estimate.
                 axes.annotate(
                     "no interval at this n",
                     (estimate, y),
                     textcoords="offset points",
-                    xytext=(10, -3),
-                    fontsize=7,
-                    color="#8A5414",
+                    xytext=(11, -3),
+                    fontsize=8.5,
+                    color=_MUTED_TEXT,
                 )
             axes.scatter(
                 [estimate],
                 [y],
-                s=46,
-                zorder=4,
+                s=52,
+                zorder=5,
                 color=colour if significant else "white",
                 edgecolors=colour,
-                linewidths=1.6,
+                linewidths=1.8,
             )
 
-        axes.axvline(0.0, color="#4A5866", linestyle="--", linewidth=1, zorder=1)
+        # The zero line carries the whole reading, so it stays prominent while
+        # the reference grid drops back.
+        axes.axvline(0.0, color=_ZERO_LINE, linestyle="-", linewidth=1.5, zorder=2)
+        axes.grid(axis="x", color=_GRID, alpha=0.6, linewidth=0.7, zorder=0)
+        axes.set_axisbelow(True)
+        for spine in ("top", "right", "left"):
+            axes.spines[spine].set_visible(False)
+        axes.spines["bottom"].set_color(_GRID)
+
         axes.set_yticks(list(positions))
         axes.set_yticklabels(
-            [f"{_elide(organ)}   n={result.n_pairs}" for organ, result in usable], fontsize=8
+            [f"{readable_organ(label)}   n={result.n_pairs}" for label, result in usable],
+            fontsize=10,
+            color=_TEXT,
         )
-        measured = challenger or "each source"
+        axes.tick_params(axis="x", labelsize=9.5, colors=_TEXT, length=3)
+        axes.tick_params(axis="y", length=0)
+
         if scales is None:
-            axis_units = f" {units}" if units else ""
-            axes.set_xlabel(
-                f"Hodges–Lehmann difference in {metric}{axis_units}   ({measured} − {reference})"
-            )
+            unit_text = f" ({units})" if units else ""
+            axes.set_xlabel(f"Difference{unit_text}", fontsize=10, color=_TEXT)
         else:
-            axes.set_xlabel(
-                f"Hodges–Lehmann difference in {metric}, % of {reference}'s median"
-                f"   ({measured} − {reference})"
+            axes.set_xlabel(f"Difference, % of {reference}'s median", fontsize=10, color=_TEXT)
+
+        if title:
+            axes.set_title(title, fontsize=12, color=_TEXT, fontweight="bold", loc="left", pad=16)
+        if subtitle:
+            axes.annotate(
+                subtitle,
+                xy=(0.0, 1.0),
+                xycoords="axes fraction",
+                xytext=(0, 7),
+                textcoords="offset points",
+                ha="left",
+                va="bottom",
+                fontsize=9.5,
+                color=_MUTED_TEXT,
             )
-        axes.grid(axis="x", alpha=0.25, linewidth=0.6)
-        axes.set_axisbelow(True)
 
         direction = metric_direction(metric)
+        caption = []
         if direction:
-            rows = challenger or "the source in each row"
-            better, worse = (rows, reference) if direction > 0 else (reference, rows)
-            axes.set_title(
-                f"← favours {worse}          favours {better} →", fontsize=8, color="#4A5866"
-            )
-
-        axes.margins(x=0.18, y=0.08)
-        self.figure.text(
-            0.01,
-            0.01,
-            "Filled markers are significant at p <= 0.05 for that row alone; p-values "
-            "and intervals are per organ and uncorrected."
-            + (
-                f"  {dropped} row(s) omitted: the reference median is zero, so a "
-                "relative difference is undefined."
-                if dropped
-                else ""
-            )
-            + (
-                ""
-                if challenger
-                else "  Every row shares the same reference arm, so rows are correlated "
-                "and do not compare the sources with each other."
-            ),
-            fontsize=7,
-            color="#7A8794",
+            rows_are = challenger or "the source in each row"
+            better, worse = (rows_are, reference) if direction > 0 else (reference, rows_are)
+            caption.append(f"← favours {worse}    |    favours {better} →")
+        caption.append(
+            "Filled marker: p ≤ 0.05 for that row alone. p-values and intervals are "
+            "per row and uncorrected."
         )
+        if challenger is None:
+            caption.append(
+                "Every row shares the same reference arm, so rows are correlated and "
+                "do not compare the sources with each other."
+            )
+        if dropped:
+            caption.append(
+                f"{dropped} row(s) omitted: the reference median is zero, so a relative "
+                "difference is undefined."
+            )
+        # supxlabel is laid out by constrained_layout, so the caption gets its
+        # own reserved band instead of floating over the figure.
+        self.figure.supxlabel("\n".join(caption), fontsize=9, color=_MUTED_TEXT, ha="center")
+
+        axes.margins(x=0.20, y=0.10 if len(usable) > 2 else 0.30)
         self.draw_idle()
+
+    def _resize_for(self, rows: int) -> None:
+        """Height follows the row count; width is left to the layout."""
+        inches = self.CHROME_INCHES + max(rows, 1) * self.ROW_INCHES
+        width = self.figure.get_size_inches()[0]
+        self.figure.set_size_inches(width, inches, forward=False)
+        pixels = int(round(inches * self.figure.dpi))
+        self.setMinimumHeight(max(pixels, MIN_CANVAS_HEIGHT))
+        self.setMaximumHeight(max(pixels, MIN_CANVAS_HEIGHT))
 
 
 __all__ = [

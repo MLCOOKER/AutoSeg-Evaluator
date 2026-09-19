@@ -62,6 +62,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from autoseg_evaluator.core.readable import (
+    metric_units,
+    readable_metric,
+    readable_organ,
+    tolerance_note,
+)
 from autoseg_evaluator.core.statistics import IntervalStatus, smallest_attainable_p
 from autoseg_evaluator.data.report import (
     AcquisitionReport,
@@ -558,7 +564,23 @@ class ReportTab(QWidget):
             )
         )
         self._relative_check.toggled.connect(self._recompute)
-        forest_layout.addWidget(self._relative_check)
+        self._sort_check = QCheckBox("Sort rows by effect size", self)
+        self._sort_check.setToolTip(
+            _tip(
+                "Off by default, and that is deliberate. The standing order is "
+                "anatomical (or vendor) and does not move when the data do, so a "
+                "reader comparing this figure with the same figure on another "
+                "metric finds each row in the same place.",
+                "Sorting by effect makes the largest difference easiest to see, at "
+                "the cost of every row shifting whenever the metric changes.",
+            )
+        )
+        self._sort_check.toggled.connect(self._recompute)
+        forest_controls = QHBoxLayout()
+        forest_controls.addWidget(self._relative_check)
+        forest_controls.addWidget(self._sort_check)
+        forest_controls.addStretch(1)
+        forest_layout.addLayout(forest_controls)
         forest_layout.addWidget(self._forest)
         outer.addWidget(forest_box)
 
@@ -836,13 +858,13 @@ class ReportTab(QWidget):
 
         self._distribution.plot(
             {
-                organ: {
+                readable_organ(organ): {
                     source: list(self._model.values(organ, source, metric).values())
                     for source in self._model.sources()
                 }
                 for organ in organs
             },
-            metric,
+            readable_metric(metric),
         )
         scales = None
         if self._relative_check.isChecked():
@@ -850,10 +872,25 @@ class ReportTab(QWidget):
                 label: self._reference_median(label, metric, reference, axis, organs)
                 for label in family
             }
+        tolerance = tolerance_note(metric, *self._tolerances())
+        metric_name = readable_metric(metric)
+        if axis is FamilyAxis.SOURCES:
+            organ_name = readable_organ(organs[0]) if organs else ""
+            forest_title = f"{organ_name}: {metric_name}"
+            forest_subtitle = f"Each source minus baseline {reference}"
+        else:
+            forest_title = f"{metric_name}: {challenger} versus {reference}"
+            forest_subtitle = f"Paired Hodges–Lehmann difference, {challenger} − {reference}"
+        if tolerance:
+            forest_subtitle = f"{forest_subtitle} · {tolerance}"
         self._forest.plot(
             family,
             metric,
             scales=scales,
+            units=metric_units(metric),
+            title=forest_title,
+            subtitle=forest_subtitle,
+            sort_by_effect=self._sort_check.isChecked(),
             reference=reference,
             # Across sources the challenger is whatever each row names, so the
             # figure must not label a single one.
@@ -909,6 +946,19 @@ class ReportTab(QWidget):
                 + "  Equipment and geometry only: no identifiers, dates, institutions or "
                 "free-text descriptions are read."
             )
+
+    def _tolerances(self) -> tuple[float | None, float | None]:
+        """Surface-Dice and APL tolerances for the loaded results, if recorded.
+
+        Surface Dice at 1 mm and at 5 mm are different measurements, so a figure
+        that omits which was used cannot be compared with another.
+        """
+        if self._results is None:
+            return (None, None)
+        try:
+            return tuple(self._results.tolerances())
+        except (AttributeError, TypeError, ValueError):
+            return (None, None)
 
     def _reference_median(
         self,

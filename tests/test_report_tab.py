@@ -724,9 +724,17 @@ def test_the_figures_draw_cleanly_at_their_smallest_allowed_size(tab):
     _select(tab, ORGANS)
     from autoseg_evaluator.ui.widgets.stat_plots import MIN_CANVAS_HEIGHT, MIN_CANVAS_WIDTH
 
-    for canvas in (tab._distribution, tab._forest):
+    def canvas_width(canvas):
+        return canvas.minimumWidth()
+
+    # The distribution has a fixed floor; the forest sizes itself to its rows,
+    # so its own minimum is the size that has to survive.
+    for canvas, width, height in (
+        (tab._distribution, MIN_CANVAS_WIDTH, MIN_CANVAS_HEIGHT),
+        (tab._forest, canvas_width(tab._forest), tab._forest.minimumHeight()),
+    ):
         dpi = canvas.figure.dpi
-        canvas.figure.set_size_inches(MIN_CANVAS_WIDTH / dpi, MIN_CANVAS_HEIGHT / dpi)
+        canvas.figure.set_size_inches(width / dpi, height / dpi)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             canvas.figure.canvas.draw()
@@ -793,9 +801,9 @@ def test_the_forest_names_no_single_challenger(tab):
     """Writing one vendor's name across a figure of several would be a misstatement."""
     _across_sources(tab)
     axes = tab._forest.figure.axes[0]
-    assert "the source in each row" in axes.get_title()
-    assert f"(each source − {REFERENCE})" in axes.get_xlabel()
-    assert CHALLENGER not in axes.get_title()
+    caption = tab._forest.figure.get_supxlabel()
+    assert "the source in each row" in caption
+    assert CHALLENGER not in axes.get_title(loc="left")
     assert sorted(t.get_text().split()[0] for t in axes.get_yticklabels()) == sorted(
         [CHALLENGER, THIRD]
     )
@@ -1465,3 +1473,93 @@ def test_spacing_between_slices_is_no_longer_reported(tab):
     labels = [tab._image_table.item(r, 0).text() for r in range(tab._image_table.rowCount())]
     assert not any("Spacing between slices" in label for label in labels)
     assert "Slice thickness (mm)" in labels
+
+
+# ---- Forest presentation ---------------------------------------------------
+
+
+def test_the_forest_height_follows_the_row_count(tab):
+    """A three-row comparison should not reserve a fixed slab of figure."""
+    _select(tab, ["Parotid (L)"])
+    one = tab._forest.minimumHeight()
+    _select(tab, ORGANS)
+    four = tab._forest.minimumHeight()
+    assert four > one
+    assert tab._forest.minimumHeight() == tab._forest.maximumHeight()
+
+
+def test_the_forest_uses_prose_names(tab):
+    """An axis label is read alone, often where the abbreviation was never defined."""
+    _select(tab, ORGANS)
+    labels = [t.get_text() for t in tab._forest.figure.axes[0].get_yticklabels()]
+    assert any(label.startswith("Right submandibular gland") for label in labels)
+    assert any(label.startswith("Left parotid") for label in labels)
+    assert not any("Glnd" in label or "(R)" in label for label in labels)
+
+
+def test_the_across_organs_title_names_the_pair(tab):
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    axes = tab._forest.figure.axes[0]
+    assert axes.get_title(loc="left") == f"Dice: {CHALLENGER} versus {REFERENCE}"
+
+
+def test_the_across_sources_title_names_the_organ(tab):
+    """Without it the figure does not say which organ it describes."""
+    _across_sources(tab, "Parotid (L)")
+    axes = tab._forest.figure.axes[0]
+    assert axes.get_title(loc="left") == "Left parotid: Dice"
+
+
+def test_the_caption_sits_below_the_axis(tab):
+    """Reserved space, not floating over the figure corner."""
+    _select(tab, ORGANS)
+    caption = tab._forest.figure.get_supxlabel()
+    assert "Filled marker" in caption
+    assert "uncorrected" in caption
+
+
+def test_rows_keep_a_stable_order_unless_sorting_is_asked_for(tab):
+    """A reader comparing two metrics should find each row in the same place."""
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ORGANS)
+    on_dice = [t.get_text() for t in tab._forest.figure.axes[0].get_yticklabels()]
+    tab._metric_combo.setCurrentText("hausdorff95")
+    on_hd = [t.get_text() for t in tab._forest.figure.axes[0].get_yticklabels()]
+    assert [x.split("   n=")[0] for x in on_dice] == [x.split("   n=")[0] for x in on_hd]
+
+    tab._sort_check.setChecked(True)
+    sorted_rows = [t.get_text() for t in tab._forest.figure.axes[0].get_yticklabels()]
+    assert sorted_rows != on_hd
+
+
+def test_a_tolerance_metric_states_its_tolerance(qapp):
+    """Surface Dice at 1 mm and at 5 mm are different measurements."""
+    rows = []
+    for patient in range(8):
+        for source, value in ((REFERENCE, 0.90), (CHALLENGER, 0.84)):
+            row = _row_for(f"P{patient}", "Parotid (L)", source, 0.8)
+            row["metrics"] = {"surface_dice": value + patient * 0.002}
+            rows.append(row)
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.set_tolerances(3.0, None)
+    manager.add_rows(rows)
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._reference_combo.setCurrentText(REFERENCE)
+    widget._challenger_combo.setCurrentText(CHALLENGER)
+    _select(widget, ["Parotid (L)"])
+
+    axes = widget._forest.figure.axes[0]
+    assert axes.get_title(loc="left").startswith("Surface Dice:")
+    subtitle = " ".join(t.get_text() for t in axes.texts)
+    assert "tolerance = 3.00 mm" in subtitle
+    widget.deleteLater()
+
+
+def test_a_metric_needing_no_tolerance_does_not_claim_one(tab):
+    tab._metric_combo.setCurrentText("dice")
+    _select(tab, ["Parotid (L)"])
+    subtitle = " ".join(t.get_text() for t in tab._forest.figure.axes[0].texts)
+    assert "tolerance" not in subtitle

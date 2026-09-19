@@ -345,3 +345,68 @@ def test_structure_set_fields_all_resolve():
 def test_pydicom_is_the_only_dicom_reader_involved():
     """Guards against a future change reading tags some other way."""
     assert pydicom.__name__ == "pydicom"
+
+
+# ---- Prose names for figures ----------------------------------------------
+
+
+def test_organ_names_become_prose():
+    """A figure's axis label is read alone, where the abbreviation is undefined."""
+    from autoseg_evaluator.core.readable import readable_organ
+
+    assert readable_organ("Opticnrv (L)") == "Left optic nerve"
+    assert readable_organ("Spinalcord") == "Spinal cord"
+    assert readable_organ("Glnd Submand (R)") == "Right submandibular gland"
+    assert readable_organ("Parotid (L)") == "Left parotid"
+    assert readable_organ("Brainstem") == "Brainstem"
+
+
+def test_an_unrecognised_organ_is_shown_as_written():
+    """Inventing an expansion would read as authoritative and be wrong."""
+    from autoseg_evaluator.core.readable import readable_organ
+
+    assert readable_organ("Wibble_Xyz") == "Wibble_Xyz"
+    assert readable_organ("Wibble (L)") == "Left Wibble"
+    assert readable_organ("") == ""
+
+
+def test_a_qualifier_survives_the_rendering():
+    from autoseg_evaluator.core.readable import readable_organ
+
+    assert readable_organ("Parotid (L) [target]") == "Left parotid (target)"
+
+
+def test_metric_names_become_prose():
+    from autoseg_evaluator.core.readable import readable_metric
+
+    assert readable_metric("surface_dice") == "Surface Dice"
+    assert readable_metric("hausdorff95") == "Hausdorff 95%"
+    assert readable_metric("mean_surface_distance") == "Mean surface distance"
+    assert readable_metric("dice") == "Dice"
+    assert readable_metric("something_odd") == "Something odd"
+
+
+def test_units_are_separated_from_the_name():
+    """The name belongs in the title and the unit on the axis."""
+    from autoseg_evaluator.core.readable import metric_units, readable_metric
+
+    assert readable_metric("hausdorff95") == "Hausdorff 95%"  # no "(mm)"
+    assert metric_units("hausdorff95") == "mm"
+    assert metric_units("dice") == ""
+    assert metric_units("dmean_gy") == "Gy"
+
+
+def test_a_tolerance_metric_reports_its_tolerance():
+    """Surface Dice at 1 mm and at 5 mm are different measurements."""
+    from autoseg_evaluator.core.readable import tolerance_note
+
+    assert tolerance_note("surface_dice", 3.0, None) == "tolerance = 3.00 mm"
+    assert tolerance_note("apl_mean", None, 2.5) == "tolerance = 2.50 mm"
+    assert tolerance_note("dice", 3.0, 2.5) == ""
+
+
+def test_a_missing_tolerance_is_said_rather_than_left_blank():
+    """Blank reads as "no tolerance applies", which is a different claim."""
+    from autoseg_evaluator.core.readable import tolerance_note
+
+    assert tolerance_note("surface_dice", None, None) == "tolerance not recorded"
