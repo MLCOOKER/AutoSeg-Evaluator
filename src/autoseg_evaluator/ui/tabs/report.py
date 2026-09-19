@@ -42,8 +42,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from PySide6.QtCore import QRect, QSizeF, Qt
-from PySide6.QtGui import QColor, QPageLayout, QPageSize, QPdfWriter, QPen, QTextDocument
+from PySide6.QtCore import QPointF, QRect, QSizeF, Qt
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QLinearGradient,
+    QPageLayout,
+    QPageSize,
+    QPainter,
+    QPdfWriter,
+    QPen,
+    QTextDocument,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -91,7 +101,18 @@ from autoseg_evaluator.ui.widgets.stat_plots import (
 
 _ALPHA = 0.05
 
-#: Where the masthead logo lives.
+#: A4 landscape at 150 dpi less the printer's margins. Only a fallback: the real
+#: geometry comes from the writer, and this is what the HTML is built against
+#: when it is produced on its own, without a page to print onto.
+_PAGE_WIDTH = 1754
+_PAGE_HEIGHT = 1240
+
+#: The most of a page one figure may take. Held well under a full page so two
+#: figures can share one: a figure that cannot share a page spends whatever is
+#: left of that page as white space.
+_FIGURE_PAGE_SHARE = 0.46
+
+#: Where the packaged artwork lives.
 _ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 #: Rows a section shows before it starts scrolling. Below this a table sizes to
@@ -1594,18 +1615,25 @@ class ReportTab(QWidget):
         document = QTextDocument()
         document.setDefaultStyleSheet(_PDF_STYLE)
         with TemporaryDirectory() as scratch:
-            document.setHtml(self._pdf_html(Path(scratch)))
+            # The real page geometry, so the banner, the tables and the figures
+            # are sized to the paper rather than to a guess about it.
+            document.setHtml(self._pdf_html(Path(scratch), writer.width(), writer.height()))
             document.setPageSize(QSizeF(writer.width(), writer.height()))
             document.print_(writer)
 
-    def _pdf_html(self, scratch: Path) -> str:
+    def _pdf_html(self, scratch: Path, width: int = _PAGE_WIDTH, height: int = _PAGE_HEIGHT) -> str:
         """The page as HTML, with the figures written beside it as PNGs.
 
-        Laid out as a report rather than as a dump of the screen: a masthead,
+        Laid out as a report rather than as a dump of the screen: the banner,
         the conditions it was produced under, then the sections in reading
         order, then a sign-off saying what produced it and when. The figures go
-        in exactly as drawn — they have their own typography, and restyling them
-        to match the page would trade legibility for a matching palette.
+        in exactly as drawn — they have their own typography, and restyling
+        them to match the page would trade legibility for a matching palette.
+
+        ``width`` and ``height`` are the paintable page in device pixels.
+        Everything that can fill the measure does, because a table or a figure
+        set to a fixed width leaves a column of white beside it that reads as a
+        missing second column.
         """
         axis = self._axis()
         metric = self._selected_metric()
@@ -1621,8 +1649,10 @@ class ReportTab(QWidget):
         if self._acquisition.available:
             sections.append("Acquisition")
 
-        parts = [_masthead_html(produced), "<hr/>", "<h1>Auto-contouring evaluation report</h1>"]
+        parts = [_banner_html(scratch, width)]
+        parts.append("<h1>Auto-contouring evaluation report</h1>")
         parts.append("<p class='subtitle'>" + "  ·  ".join(sections) + "</p>")
+        parts.append(f"<p class='provenance'>version {__version__} · generated {produced}</p>")
         parts.append(
             _panel_html(
                 [
@@ -1648,9 +1678,9 @@ class ReportTab(QWidget):
         parts.append(_section("Paired comparison") + _table_html(self._comparison_table))
 
         for name, canvas in self._figures():
-            image = scratch / f"{name}.png"
-            canvas.figure.savefig(image, dpi=150, bbox_inches="tight", facecolor="white")
-            parts.append(_section(name) + f"<img src='{image.as_uri()}' width='940'/>")
+            figure = self._figure_html(name, canvas, scratch, width, height)
+            if figure:
+                parts.append(_section(_FIGURE_TITLES.get(name, name)) + figure)
 
         if self._acquisition.available:
             parts.append(
@@ -1671,10 +1701,33 @@ class ReportTab(QWidget):
         parts.append(_signoff_html(produced))
         return "<html><body>" + "".join(parts) + "</body></html>"
 
+    def _figure_html(self, name: str, canvas: Any, scratch: Path, width: int, height: int) -> str:
+        """One figure, filling the measure without outgrowing the page.
 
-#: The PDF follows a clinical-report idiom rather than the screen's: spaced
-#: small-caps section labels, a serif title, a teal rule under a masthead, and a
-#: sign-off block. It is the visual language of a document that gets printed,
+        Rendered at the resolution the page will show it at, so a figure
+        stretched to the full width is not an upscaled screenshot of itself. The
+        height cap is what keeps the document dense: a figure that would take
+        two thirds of a page cannot share one with anything else, and the
+        leftover is spent as white space above the next page break.
+        """
+        image = scratch / f"{name}.png"
+        inches = canvas.figure.get_size_inches()[0] or 1.0
+        canvas.figure.savefig(
+            image, dpi=max(150, width / inches), bbox_inches="tight", facecolor="white"
+        )
+        drawn = QImage(str(image))
+        if drawn.isNull():
+            return ""
+        scale = min(width / drawn.width(), height * _FIGURE_PAGE_SHARE / drawn.height())
+        return (
+            f"<img src='{image.as_uri()}' width='{round(drawn.width() * scale)}' "
+            f"height='{round(drawn.height() * scale)}'/>"
+        )
+
+
+#: The PDF follows a clinical-report idiom rather than the screen's: a banner
+#: dissolving into the page, spaced small-caps section labels, a serif title and
+#: a sign-off block. It is the visual language of a document that gets printed,
 #: filed and read months later, which is what this one is for.
 #:
 #: The figures are exempt. They carry their own typography, chosen for what they
@@ -1685,39 +1738,62 @@ _ACCENT = "#15606E"
 _MUTED = "#6B7B85"
 _RULE = "#C9D6DC"
 _PANEL = "#E8EFF2"
-_ROW_TINT = "#F5F8F9"
+
+#: What each figure is called in the document. The keys are the filename stems
+#: used when the figures are saved on their own, which are not titles.
+_FIGURE_TITLES = {
+    "distributions": "Distributions",
+    "paired": "Paired differences",
+    "forest": "Forest plot",
+}
+
+#: The band lifted out of the splash artwork for the masthead: the wordmark, the
+#: dice and the top of the head, leaving the strapline behind because the page's
+#: own title already says what the document is. Measured against the shipped
+#: 1000x563 image, so it moves if that artwork is replaced.
+_BANNER_CROP_TOP = 150
+_BANNER_CROP_HEIGHT = 198
+
+#: How far in from each edge the banner dissolves into the page, as a fraction
+#: of that edge. The bottom is shallowest because the wordmark sits close to it
+#: and a fade that reaches the letters reads as a printing fault; the top is
+#: deepest because there is nothing up there but backdrop.
+_BANNER_FADE = {"left": 0.06, "right": 0.14, "top": 0.30, "bottom": 0.13}
 
 _PDF_STYLE = f"""
 body {{ color: {_INK}; font-family: "Segoe UI", Calibri, Arial, sans-serif; }}
 td, th, p {{ font-family: "Segoe UI", Calibri, Arial, sans-serif; }}
+p.banner {{ margin: 0; }}
 h1 {{ font-family: Georgia, "Times New Roman", serif; font-size: 19pt;
-      color: {_INK}; margin: 2px 0 2px 0; font-weight: normal; }}
+      color: {_INK}; margin: 4px 0 1px 0; font-weight: normal; }}
 p.subtitle {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
-              color: {_ACCENT}; font-size: 9.5pt; margin: 0 0 14px 0; }}
-p.masthead {{ color: {_ACCENT}; font-size: 12pt; font-weight: bold; margin: 0; }}
-p.masthead-sub {{ color: {_MUTED}; font-size: 7.5pt; margin: 3px 0 0 0; }}
+              color: {_ACCENT}; font-size: 9.5pt; margin: 0 0 2px 0; }}
+p.provenance {{ color: {_MUTED}; font-size: 7.5pt; margin: 0 0 9px 0; }}
 p.section {{ color: {_ACCENT}; font-size: 8pt; font-weight: bold;
-             margin: 16px 0 5px 0; }}
-p.note {{ color: {_MUTED}; font-size: 7.5pt; margin: 0 0 5px 0; }}
+             margin: 13px 0 4px 0; }}
+p.note {{ color: {_MUTED}; font-size: 7.5pt; margin: 0 0 4px 0; }}
 p.methods {{ color: {_INK}; font-size: 8pt; margin: 0; }}
 p.sign-name {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
-               color: {_ACCENT}; font-size: 16pt; margin: 14px 0 0 0; }}
-p.sign-role {{ color: {_INK}; font-size: 8.5pt; font-weight: bold; margin: 3px 0 0 0; }}
+               color: {_ACCENT}; font-size: 15pt; margin: 10px 0 0 0; }}
+p.sign-role {{ color: {_INK}; font-size: 8.5pt; font-weight: bold; margin: 2px 0 0 0; }}
 p.sign-meta {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
                color: {_MUTED}; font-size: 7.5pt; margin: 2px 0 0 0; }}
-table.data {{ border-collapse: collapse; width: 100%; font-size: 7.5pt; }}
+table.data {{ border-collapse: collapse; font-size: 7.5pt; }}
 table.data th {{ background-color: {_ACCENT}; color: #FFFFFF; font-size: 7pt;
                  padding: 5px 6px; text-align: left; border: 1px solid {_ACCENT}; }}
 table.data td {{ padding: 4px 6px; border: 1px solid {_RULE}; }}
-table.panel {{ border-collapse: collapse; width: 100%; margin: 0 0 4px 0; }}
-table.panel td {{ padding: 9px 12px; font-size: 8pt;
+table.panel {{ border-collapse: collapse; margin: 0 0 3px 0; }}
+table.panel td {{ padding: 8px 12px; font-size: 8pt;
                   background-color: {_PANEL}; }}
-table.masthead {{ border-collapse: collapse; width: 100%; }}
-table.comments {{ border-collapse: collapse; width: 100%; }}
-table.comments td {{ padding: 4px 0 8px 0; vertical-align: top; }}
-td.comment-label {{ color: {_ACCENT}; font-size: 7pt; font-weight: bold; width: 22%; }}
+table.comments {{ border-collapse: collapse; }}
+table.comments td {{ padding: 3px 0 7px 0; vertical-align: top; }}
+td.comment-label {{ color: {_ACCENT}; font-size: 7pt; font-weight: bold; }}
 td.comment-body {{ color: {_INK}; font-size: 8pt; }}
 """
+
+#: Word gap inside a letter-spaced label. HTML collapses runs of whitespace, so
+#: ordinary spaces would close ``COMPARED AGAINST`` up into one unreadable run.
+_WORD_GAP = "&#160;&#160;&#160;"
 
 
 def _spaced(text: str) -> str:
@@ -1728,26 +1804,87 @@ def _spaced(text: str) -> str:
     is the same effect by other means; it costs nothing because these labels are
     never read as words, only recognised as section markers.
     """
-    return "   ".join(" ".join(word) for word in str(text).upper().split())
+    return _WORD_GAP.join(" ".join(word) for word in str(text).upper().split())
 
 
 def _section(title: str) -> str:
     return f"<p class='section'>{_spaced(title)}</p>"
 
 
-def _masthead_html(produced: str) -> str:
-    """Product name left, logo right, above a rule."""
-    logo = _ASSET_DIR / "icon.png"
-    badge = f"<img src='{logo.as_uri()}' width='52' height='52'/>" if logo.exists() else ""
+def _banner_image(width: int) -> QImage | None:
+    """The masthead band, dissolving into white at all four edges.
+
+    Drawn here rather than shipped as a second file so it follows the page
+    width, and so the artwork stays a single asset: the splash screen and this
+    are the same image.
+    """
+    source = _ASSET_DIR / "splash.png"
+    art = QImage(str(source)) if source.exists() else QImage()
+    if art.isNull():
+        return None
+    band = art.copy(QRect(0, _BANNER_CROP_TOP, art.width(), _BANNER_CROP_HEIGHT))
+    height = max(1, round(width * band.height() / band.width()))
+    band = band.scaled(
+        width,
+        height,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    canvas = QImage(width, height, QImage.Format.Format_RGB32)
+    canvas.fill(QColor("#FFFFFF"))
+    painter = QPainter(canvas)
+    painter.drawImage(0, 0, band)
+    for origin, inward, rect in _fade_spans(width, height):
+        wash = QLinearGradient(origin, inward)
+        wash.setColorAt(0.0, QColor(255, 255, 255, 255))
+        wash.setColorAt(0.45, QColor(255, 255, 255, 110))
+        wash.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.fillRect(rect, wash)
+    painter.end()
+    return canvas
+
+
+def _fade_spans(width: int, height: int) -> list[tuple[QPointF, QPointF, QRect]]:
+    """Where each edge's white wash runs from, to, and over.
+
+    Four straight washes rather than one radial vignette: the corners take two
+    each and so go whiter, which is what a corner should do.
+    """
+    left = int(width * _BANNER_FADE["left"])
+    right = int(width * _BANNER_FADE["right"])
+    top = int(height * _BANNER_FADE["top"])
+    bottom = int(height * _BANNER_FADE["bottom"])
+    return [
+        (QPointF(0, 0), QPointF(left, 0), QRect(0, 0, left + 1, height)),
+        (
+            QPointF(width, 0),
+            QPointF(width - right, 0),
+            QRect(width - right, 0, right + 1, height),
+        ),
+        (QPointF(0, 0), QPointF(0, top), QRect(0, 0, width, top + 1)),
+        (
+            QPointF(0, height),
+            QPointF(0, height - bottom),
+            QRect(0, height - bottom, width, bottom + 1),
+        ),
+    ]
+
+
+def _banner_html(scratch: Path, width: int) -> str:
+    """The banner as an ``<img>``, or nothing at all if the artwork is missing.
+
+    A missing asset costs the document its masthead and nothing else — the title
+    underneath still says what the report is.
+    """
+    banner = _banner_image(width)
+    if banner is None:
+        return ""
+    target = scratch / "banner.png"
+    if not banner.save(str(target)):
+        return ""
     return (
-        "<table class='masthead'><tr>"
-        "<td>"
-        f"<p class='masthead'>{_spaced('AutoSeg Evaluator')}</p>"
-        f"<p class='masthead-sub'>Auto-contouring evaluation · version {__version__} · "
-        f"generated {produced}</p>"
-        "</td>"
-        f"<td align='right'>{badge}</td>"
-        "</tr></table>"
+        f"<p class='banner'><img src='{target.as_uri()}' "
+        f"width='{banner.width()}' height='{banner.height()}'/></p>"
     )
 
 
@@ -1758,6 +1895,7 @@ def _panel_html(*columns: list[tuple[str, str]]) -> str:
     ground truth, which sources — so they sit above the data rather than in a
     footnote under it.
     """
+    share = 100 // max(1, len(columns))
     cells = []
     for column in columns:
         entries = "".join(
@@ -1765,33 +1903,33 @@ def _panel_html(*columns: list[tuple[str, str]]) -> str:
             f"<p style='margin:0 0 8px 0; font-size:8.5pt'>{value}</p>"
             for label, value in column
         )
-        cells.append(f"<td>{entries}</td>")
-    return "<table class='panel'><tr>" + "".join(cells) + "</tr></table>"
+        cells.append(f"<td width='{share}%'>{entries}</td>")
+    return "<table class='panel' width='100%'><tr>" + "".join(cells) + "</tr></table>"
 
 
 def _comments_html(entries: list[tuple[str, str]]) -> str:
     """Label on the left, prose on the right — the interpretation idiom."""
     rows = "".join(
-        f"<tr><td class='comment-label'>{_spaced(label)}</td>"
-        f"<td class='comment-body'>{body}</td></tr>"
+        f"<tr><td class='comment-label' width='14%'>{_spaced(label)}</td>"
+        f"<td class='comment-body' width='86%'>{body}</td></tr>"
         for label, body in entries
     )
-    return f"<table class='comments'>{rows}</table>"
+    return f"<table class='comments' width='100%'>{rows}</table>"
 
 
 def _signoff_html(produced: str) -> str:
     """Who produced it and from what — the report's provenance, not a signature.
 
-    Deliberately not styled as an authorising signature: nothing here has been
-    reviewed by a person, and a document that looks signed invites the reader to
-    assume it was.
+    Deliberately not styled as an authorising signature, and it claims nothing
+    about review: it names the software, its version and when it ran, which is
+    all this document can honestly attest to.
     """
     return (
         "<hr/>"
-        f"<p class='sign-name'>AutoSeg Evaluator</p>"
+        "<p class='sign-name'>AutoSeg Evaluator</p>"
         f"<p class='sign-role'>Generated report · version {__version__}</p>"
-        "<p class='sign-meta'>Produced automatically from the computed metrics. "
-        "Not reviewed or approved by a person.</p>"
+        f"<p class='sign-meta'>Produced automatically from the computed metrics "
+        f"on {produced}.</p>"
     )
 
 
@@ -1812,10 +1950,13 @@ def _table_html(table: QTableWidget) -> str:
             weight = " style='font-weight:bold'" if item is not None and item.font().bold() else ""
             cells.append(f"<td{weight}>{value}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
+    # ``width`` as an attribute, not as CSS: QTextDocument's stylesheet subset
+    # ignores a percentage width on a table and sizes it to its contents, which
+    # leaves a long table sitting in the left third of the page.
     return (
-        "<table class='data'><tr>"
+        "<table class='data' width='100%'><thead><tr>"
         + "".join(f"<th>{header}</th>" for header in headers)
-        + "</tr>"
+        + "</tr></thead>"
         + "".join(rows)
         + "</table>"
     )

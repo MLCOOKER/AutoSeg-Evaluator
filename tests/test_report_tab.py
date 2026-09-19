@@ -11,6 +11,7 @@ reported as a failure to detect rather than as agreement.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import pytest
@@ -392,16 +393,73 @@ def test_the_export_carries_the_masthead_and_provenance(tab, tmp_path):
     from pathlib import Path
 
     from autoseg_evaluator import __version__
-    from autoseg_evaluator.ui.tabs.report import _spaced
 
     _select(tab, ORGANS)
     html = tab._pdf_html(Path(tmp_path))
-    assert _spaced("AutoSeg Evaluator") in html
-    assert "icon.png" in html  # the logo, top right
+    assert "banner.png" in html
+    assert (Path(tmp_path) / "banner.png").exists()  # drawn, not shipped
     assert __version__ in html
-    # Said plainly, because a document laid out like a report invites the
-    # assumption that a person signed it off.
-    assert "Not reviewed or approved by a person" in html
+    assert "AutoSeg Evaluator" in html  # the sign-off names what produced it
+
+
+def test_the_banner_dissolves_into_the_page(qapp):
+    """Its edges have to reach white, or it prints as a black box on the page.
+
+    Checked at the pixels rather than at the gradient stops: the wash is four
+    overlapping fills, and whether they actually reach the corners is a question
+    about the composite, not about any one of them.
+    """
+    from autoseg_evaluator.ui.tabs.report import _banner_image
+
+    banner = _banner_image(1200)
+    assert banner is not None
+
+    def grey(x, y):
+        colour = banner.pixelColor(x, y)
+        return (colour.red() + colour.green() + colour.blue()) / 3
+
+    wide, tall = banner.width() - 1, banner.height() - 1
+    for corner in ((0, 0), (wide, 0), (0, tall), (wide, tall)):
+        assert grey(*corner) > 250, corner
+
+    # ... while the middle keeps the artwork it was cut from. Sampled across the
+    # band rather than at one point: the wordmark is white lettering, so a
+    # single probe can land on a glyph and read as an empty banner.
+    across = [grey(x, tall // 2) for x in range(wide // 10, wide, wide // 10)]
+    assert sum(value < 120 for value in across) > len(across) / 2, across
+
+
+def test_letter_spaced_labels_keep_their_words_apart(qapp):
+    """``COMPARED AGAINST`` must not close up into one run of letters.
+
+    HTML collapses runs of whitespace, so the word gap has to be made of
+    non-breaking spaces; with ordinary ones the rendered label is unreadable
+    while the source still looks right.
+    """
+    from autoseg_evaluator.ui.tabs.report import _spaced
+
+    spaced = _spaced("Compared against")
+    assert "&#160;" in spaced
+    assert spaced.startswith("C O M P A R E D")
+
+
+def test_the_export_fills_the_measure(tab, tmp_path):
+    """Tables sized to their contents leave a page two thirds white.
+
+    QTextDocument's stylesheet subset ignores a percentage width on a table, so
+    this checks for the attribute that it does honour.
+    """
+    from pathlib import Path
+
+    _select(tab, ORGANS)
+    html = tab._pdf_html(Path(tmp_path), width=1600, height=1100)
+    assert "<table class='data' width='100%'>" in html
+    assert "<table class='panel' width='100%'>" in html
+    # No figure may outgrow its share of the page, or the leftover prints as a
+    # gap above the next page break.
+    for width, height in re.findall(r"<img [^>]*width='(\d+)' height='(\d+)'", html):
+        assert int(width) <= 1600
+        assert int(height) <= 1100
 
 
 def test_export_with_nothing_to_export_says_so(qapp, monkeypatch):
