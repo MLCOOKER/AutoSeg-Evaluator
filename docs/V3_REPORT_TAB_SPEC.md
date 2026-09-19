@@ -11,9 +11,10 @@ _Status: implemented and under test. Written 2026-09-17._
 Two things in the built tab departed from this spec as written, both recorded in
 the register:
 
-- **The Holm family is selected in the UI, not fixed by the metric and source
-  pair** (D8). This makes the confirmatory/exploratory distinction expressible
-  rather than implied.
+- **No multiplicity correction is applied at all** (D8). This spec's Holm
+  design was built, used, and withdrawn: correcting across the organs selected
+  in the UI made the divisor a view setting, so the same data gave a significant
+  result with one organ shown and a non-significant one with four.
 - **The Hodges–Lehmann interval and the signed-rank p-value are not
   unconditionally in agreement** (D6). Under Pratt's zero handling they can
   diverge at exact ties, so each row carries a flag and the tab warns instead of
@@ -58,7 +59,7 @@ pivot of organ against vendor. The report absorbs both and adds the inference.
 | Primary descriptive | **Median [Q1, Q3] with a 95% CI for the median.** Mean (SD) and min/max are supplementary. |
 | Paired test | **Wilcoxon signed-rank**, exact, Pratt zeros. For three or more sources, a source-wise correction family rather than Friedman — see 4.3. |
 | Point estimate | **Hodges–Lehmann**, with its exact Wilcoxon-derived CI — so estimate and test can never disagree. |
-| Multiplicity | **Holm**, applied per metric per source-pair across organs. Raw and adjusted p both shown. |
+| Multiplicity | **None.** Each organ is its own question and its p-value is reported unadjusted; the expected number of chance findings across the displayed rows is stated instead. See 4.4. |
 | Distribution figure | **Violin with overlaid points and median/IQR marks.** No bare box plots. |
 | Comparison figure | **Forest plot** against a user-chosen reference source. |
 | Coverage | A first-class result, distinguishing "declined to contour" from "never ran". |
@@ -142,7 +143,7 @@ better/worse wording.
 All of this lives in `core/statistics.py` as pure functions on sequences of
 floats — no Qt, no pandas, no I/O — so it is testable against hand-computed
 values. `scipy` and `numpy` are already hard dependencies; nothing new is added.
-Holm is about fifteen lines and is not worth a `statsmodels` dependency in an
+Holm was about fifteen lines and was not worth a `statsmodels` dependency in an
 application that ships as a portable executable.
 
 ### 4.1 Descriptive summary
@@ -208,7 +209,7 @@ the selection bias the coverage columns exist to expose.
 
 What is built instead is a **source-wise correction family**: every other source
 compared with one chosen reference, on one organ, each comparison paired and
-exact, Holm-corrected across the sources. No patient needs to have been
+exact, and reported unadjusted like every other row. No patient needs to have been
 contoured by everybody — each pairwise comparison uses whatever that pair
 shares.
 
@@ -220,20 +221,21 @@ nothing whatever the data show.
 
 ### 4.4 Multiplicity
 
-**Holm–Bonferroni**, applied **per metric, per source-pair, across organs**.
+**None.** Each organ, for one metric and one pair of sources, is reported with an
+unadjusted p-value.
 
-That family is the set interpreted together: *"across these organs, where does
-vendor X differ from vendor Y on Dice?"* Extending the family across metrics as
-well would be badly over-conservative — Dice, surface-DSC and mean surface
-distance on the same contours are strongly correlated, and Holm assumes nothing
-about dependence.
+This section previously specified Holm across organs. It was implemented and
+then withdrawn, because the family was whatever the user had selected: one organ
+selected gave a significant result and four gave a non-significant one, on the
+same data. A correction whose divisor is a view setting invites the selection it
+exists to prevent.
 
-The family definition is printed beside the table. A correction whose scope is
-not stated is not auditable.
+What multiplicity costs is stated rather than applied — the tab reports how many
+of the displayed comparisons would fall below 0.05 by chance alone. The
+safeguard is that every comparison is shown, never a selected subset.
 
-Implementation: sort p ascending; `p_adj[i] = max(p_adj[i−1], (m − i) · p[i])`,
-clipped at 1.0. The running maximum enforces monotonicity, which a naive
-implementation gets wrong.
+`holm()` and `with_holm()` remain in the statistics core, tested, for a
+confirmatory analysis with a family registered in advance.
 
 ### 4.5 Coverage
 
@@ -291,10 +293,10 @@ and asks the real question — *should we move off what we currently use?*
 ```
 Dice — vendors vs Limbus (reference)
 
-Parotid_L    n=10  ├────●────┤                     +0.04   p=0.002  p_holm=0.012
-Parotid_R    n=10     ├───●───┤                    +0.03   p=0.014  p_holm=0.056
-Brainstem     n=9  ├──●──┤                         +0.01   p=0.38   p_holm=1.00
-SpinalCord   n=10        ├──────○──────┤           +0.02   p=0.31   p_holm=1.00
+Parotid_L    n=10  ├────●────┤                     +0.04   p=0.002
+Parotid_R    n=10     ├───●───┤                    +0.03   p=0.014
+Brainstem     n=9  ├──●──┤                         +0.01   p=0.38
+SpinalCord   n=10        ├──────○──────┤           +0.02   p=0.31
                      ╎          ╎
               favours MVision   0   favours Limbus
 ```

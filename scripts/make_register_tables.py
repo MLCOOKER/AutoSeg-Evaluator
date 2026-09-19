@@ -21,13 +21,12 @@ sys.path.insert(0, "src")
 from autoseg_evaluator.core.statistics import (  # noqa: E402
     describe,
     paired_comparison,
-    with_holm,
 )
 from autoseg_evaluator.data.report import interval_text  # noqa: E402
 
 # Synthetic Dice, chosen to exercise each state the report must show:
 #   Parotid (L)        clear, consistent difference
-#   Parotid (R)        real but smaller — Holm removes it
+#   Parotid (R)        marginal: significant alone, and worth a second look
 #   Brainstem          no detectable difference, one patient short
 #   SpinalCord         slight edge the other way
 #   Glnd Submand (R)   the challenger declined 6 of 10 -> n = 4
@@ -53,8 +52,6 @@ for organ in organs:
     a, b = MVISION[organ], LIMBUS[organ]
     n = min(len(a), len(b))
     results[organ] = paired_comparison(a[:n], b[:n], n_a=len(a), n_b=len(b), alpha=0.05)
-adjusted = with_holm(list(results.values()))
-results = dict(zip(organs, adjusted, strict=True))
 
 
 def fmt(value, spec="+.4f"):
@@ -73,24 +70,26 @@ for organ in ("Parotid (L)", "Brainstem", "Glnd Submand (R)"):
             f"{ci} | {d.mean:.3f} ({d.sd:.3f}) | {d.minimum:.3f} / {d.maximum:.3f} |"
         )
 
-print(f"\n\n## Paired comparison · Dice · MVision vs Limbus  (family = {len(organs)} organs)\n")
+print(
+    f"\n\n## Paired comparison · Dice · MVision vs Limbus  ({len(organs)} organs, each its own question)\n"
+)
 print(
     "| Organ | n pairs | n chall. / n ref. | HL difference | 95% CI (unadjusted) "
-    "| r | zeros | p | p (Holm) | Sign test | Reading |"
+    "| r | zeros | p | Sign test | Reading |"
 )
-print("|---|---|---|---|---|---|---|---|---|---|---|")
+print("|---|---|---|---|---|---|---|---|---|---|")
 for organ, r in results.items():
     # Rendered by the same function the Report tab uses, so the published table
     # cannot drift away from what the software actually prints.
     ci = interval_text(r.ci) if r.ci.available else f"**{interval_text(r.ci)}**"
     reading = (
         "no detectable difference"
-        if r.p_adjusted > 0.05
+        if r.p_value > 0.05
         else ("favours Limbus" if (r.hl_estimate or 0) < 0 else "favours MVision")
     )
     print(
         f"| {organ} | {r.n_pairs} | {r.n_a} / {r.n_b} | {fmt(r.hl_estimate)} | {ci} | "
-        f"{fmt(r.effect_r, '+.2f')} | {r.n_zero} | {r.p_value:.4f} | {r.p_adjusted:.4f} | "
+        f"{fmt(r.effect_r, '+.2f')} | {r.n_zero} | {r.p_value:.4f} | "
         f"{r.sign.n_positive}/{r.sign.n_nonzero} · p={r.sign.p_value:.3f} | {reading} |"
     )
 
@@ -105,7 +104,7 @@ smallest_attainable = {n: 2.0 / (2**n) for n in (4, 9, 10)}
 print(
     "\n  smallest attainable two-sided p:", {n: round(p, 6) for n, p in smallest_attainable.items()}
 )
-print(f"  Holm threshold for the most significant of {len(organs)}: {0.05 / len(organs):.4f}")
+print(f"  expected below 0.05 by chance across {len(organs)} rows: {len(organs) * 0.05:.2f}")
 
 
 # ---- ASCII forest, drawn from the same results -----------------------------
@@ -131,11 +130,11 @@ for organ, r in ordered:
             line[c] = "─"
         line[col(r.ci_low)] = "├"
         line[col(r.ci_high)] = "┤"
-    line[col(r.hl_estimate)] = "●" if r.p_adjusted <= 0.05 else "○"
+    line[col(r.hl_estimate)] = "●" if r.p_value <= 0.05 else "○"
     tail = (
-        f"{r.hl_estimate:+.4f}   p_holm {r.p_adjusted:.4f}"
+        f"{r.hl_estimate:+.4f}   p {r.p_value:.4f}"
         if r.ci_available
-        else f"{r.hl_estimate:+.4f}   p_holm {r.p_adjusted:.4f}   no interval at n=4"
+        else f"{r.hl_estimate:+.4f}   p {r.p_value:.4f}   no interval at n=4"
     )
     print(f"  {organ:<18} n={r.n_pairs:<3}" + "".join(line) + "  " + tail)
 print()
@@ -147,5 +146,5 @@ for value in (-0.05, -0.04, -0.03, -0.02, -0.01, 0.0, 0.01):
 print(" " * 25 + "".join(axis))
 print(" " * 25 + "Hodges–Lehmann difference in Dice   (MVision − Limbus)")
 print()
-print("  ● significant after Holm correction        ○ not significant")
+print("  ● p <= 0.05 for that organ alone        ○ not significant")
 print("```")

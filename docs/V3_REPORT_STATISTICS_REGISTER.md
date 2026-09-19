@@ -294,78 +294,49 @@ difference rather than instead of it.
   compatible with the smallest attainable p. An r of ±1.00 beside a large p is arithmetic,
   not a contradiction.
 
-## D8 — Holm correction, applied per metric per source-pair across organs, in two tiers
+## D8 — No multiplicity correction; each organ is reported as its own question
 
-Both raw and adjusted p are shown. The family definition is printed beside the table and
-recorded in the auto-written methods paragraph.
+Every comparison answers one question — *for this organ and this metric, is there evidence
+that these two sources differ?* — and its p-value is reported **unadjusted**. Two organs are
+two studies that happen to share a screen, and a question is not made harder to answer by
+another question being asked beside it.
 
-The family is **chosen by the user, not inferred from the view**, which makes two tiers
-possible and keeps them honestly separate:
+**This reverses an earlier decision, and the reason is worth recording.** The tab previously
+applied Holm across whichever organs were selected in the family list. A user found the
+consequence in ordinary use: with one organ selected a comparison was significant, and
+selecting more organs took the significance away — on identical data. The divisor was a
+**view setting**.
 
-| Tier | Family | What it supports |
-|---|---|---|
-| **Confirmatory** | A small set of organs named *before* looking at results — typically the two or three that would actually change practice. | A familywise claim. This is the tier a conclusion may be drawn from. |
-| **Exploratory** | Everything else, including "all organs". | Hypothesis generation. Adjusted p is still shown, but a finding here is a candidate for the next cohort, not a result. |
+That is worse than not correcting at all. A correction that can be dialled by a list widget
+invites precisely the selection it exists to prevent, and lends it the appearance of rigour.
+The choice was never really between corrected and uncorrected; it was between a correction
+whose family was fixed in advance and one whose family was whatever happened to be on screen.
+Only the first is honest, and this software cannot enforce it, because it cannot know what was
+declared before the data were seen.
 
-Nothing in the software can tell which tier the user is in — that is a matter of what they
-declared beforehand. What the software does is make the family an explicit, visible choice
-rather than a silent consequence of a filter, so the distinction is at least recordable.
-Narrowing the family from four organs to two moved a Holm-adjusted p from 0.0078 to 0.0039
-in testing; that sensitivity is exactly why the choice cannot be left implicit.
+- **Rationale** — The analysis this tool exists for is per-organ: *is vendor A better than
+  vendor B for the parotid?* then, separately, *for the brainstem?* Correcting across organs
+  answers a different question — *does vendor A differ from vendor B anywhere among these
+  organs?* — which nobody asked.
+- **Rejected** — *Holm across a declared family.* Correct where the family genuinely is
+  declared in advance and reported whole. Rejected because nothing here can verify that it
+  was, and the failed implementation showed what happens when it is not.
+- **Rejected** — *Benjamini–Hochberg FDR.* Same objection: the family is still whatever is
+  selected.
+- **Assumes** — That every comparison is reported, not only the ones below 0.05. This is the
+  entire safeguard, and it is the reader's to keep.
+- **Costs** — Scanning many organs for the significant ones inflates the error rate, and
+  nothing in the p-values accounts for it.
+- **Revisit if** — A confirmatory analysis is needed with a family registered in advance, at
+  which point `holm()` and `with_holm()` are still in the statistics core and still tested.
+- **In code** — `ReportModel._correct()` is deliberately a no-op that documents why;
+  `PairedResult.p_adjusted` stays `None` throughout the report.
 
-**The family runs along one axis at a time.** The tab offers two, and they answer
-different questions:
-
-| Axis | Family | Question |
-|---|---|---|
-| Organs | one challenger vs the reference, across the selected organs | *Where does this vendor differ from the one we use?* |
-| Sources | every other source vs the reference, on one organ | *For this organ, how does each vendor compare to the one we use?* |
-
-Varying both at once is deliberately not offered. At ten pairs the smallest attainable p is
-0.001953, so Holm can reject nothing in a family larger than 25 (D13) — five challengers
-across more than five organs is already past that, and the whole table would read
-`p = 1.000` whatever the data showed. The budget, at n = 10:
-
-| Challengers | Organs affordable |
-|---|---|
-| 1 | 25 |
-| 3 | 8 |
-| 5 | 5 |
-
-The source-wise family has a property the organ-wise one lacks: *"every other source"* is
-fixed by the data rather than chosen, so it cannot be accused of cherry-picking. It also has
-a trap the organ-wise one lacks — **every row shares the same reference arm**, so the rows
-are correlated. A patient the reference handled badly makes every source look good on that
-patient. Holm holds the familywise rate under arbitrary dependence, so the correction stays
-valid; what is not valid is reading consistency down the column as corroboration, or reading
-two rows against each other as a comparison between those two sources. The figure footer and
-the methods paragraph both say so.
-
-**The divisor is the declared family, not the estimable part of it.** An organ selected into
-the family but with no patient contoured by both sources is a hypothesis that was posed and
-could not be answered. It stays in the denominator, is shown as
-`not estimable: no matched patients`, and the methods paragraph records how many there were.
-
-Letting the divisor shrink to whatever the data supported would be anti-conservative in the
-worst available direction: a source that produced fewer organs would earn a **gentler**
-correction on the organs it did produce. That is the same perverse incentive the coverage
-columns exist to expose (D10), arriving through the back door of the multiplicity adjustment.
-
-- **Rationale** — That family is the set read as one question: *"across these organs, where
-  does vendor X differ from vendor Y on Dice?"*. Extending it across metrics would be badly
-  over-conservative, since Dice, surface-DSC and mean surface distance on the same contours
-  are strongly correlated and Holm assumes nothing about dependence.
-- **Rejected** — *Benjamini–Hochberg FDR.* More powerful and common in this literature. Holm
-  controls the familywise error rate, which is the stricter claim and the more appropriate one
-  when a single organ's result could change practice.
-- **Assumes** — The family is the right one. **This is a judgement, not a fact, and is the
-  decision most open to challenge.**
-- **Costs** — A finding selected across several families does not carry familywise control,
-  and nothing in the software can detect that it was selected that way.
-- **Revisit if** — A reviewer argues the whole report is one family. That is defensible and
-  substantially harsher; the two-tier structure below is the answer offered instead.
-- **In code** — `ReportModel.family()` takes the organ list explicitly. The Holm family is
-  never inferred from what happens to be on screen.
+**What multiplicity costs is stated rather than applied.** The tab reports how many of the
+displayed comparisons would be expected below 0.05 by chance alone —
+`expected_false_positives(n, α) = n × α` — so a reader scanning for significant rows knows
+what that scan costs. Across five organs that is 0.25 rows; across twenty it is one. Stating
+the number leaves the judgement with the reader instead of silently enlarging every p-value.
 
 ## D9 — No post-hoc power; interval width answers "do I need more data"
 
@@ -435,32 +406,35 @@ reports `n_pairs` against each source's own n.
 
 ## D13 — When the design cannot reach significance, say so before showing p-values
 
-If the smallest attainable p at the available sample sizes exceeds the Holm threshold for the
-declared family, no result in that family can be significant however the data fall. The tab
-says this above the table rather than letting a column of adjusted p = 1.000 be read as
-evidence of agreement.
+If the smallest attainable p at the available sample size exceeds α, no comparison can be
+significant however the data fall. The tab says this above the table rather than letting a
+column of large p-values be read as evidence of agreement.
 
-At n = 10 the smallest attainable two-sided p is `2/2¹⁰ = 0.001953`. A Holm family of 26 or
-more organs therefore cannot reject at α = 0.05 — the first threshold is 0.05/26 = 0.00192 —
-regardless of how different the sources are.
+Uncorrected, the bound is arithmetic and has nothing to do with how many organs are shown:
 
-- **Rationale** — This is a property of the design, knowable before the data are seen, and it
-  is the honest answer to "why is nothing significant?". Without it, an under-powered analysis
-  is indistinguishable on screen from a genuine null result.
-- **Rejected** — *Silently reporting the adjusted p-values.* Formally correct and routinely
-  misread.
+| Paired patients | Smallest attainable two-sided p | Can reach 0.05? |
+|---|---|---|
+| 4 | 0.125 | no |
+| 5 | 0.0625 | no |
+| **6** | **0.03125** | **yes** |
+| 10 | 0.001953 | yes |
+
+So **six paired patients** is the floor. Five or fewer cannot produce a significant result
+whatever the contours look like, and their large p-values are not evidence of similarity.
+
+- **Rationale** — A property of the design, knowable before the data are seen, and the honest
+  answer to "why is nothing significant?". Without it an under-powered comparison is
+  indistinguishable on screen from a genuine null.
+- **Rejected** — *Silently reporting the p-values.* Formally correct and routinely misread.
 - **Assumes** — Nothing. The bound is arithmetic.
-- **Costs** — The warning is blunt: it says the family cannot detect anything, not how much
-  larger a cohort would need to be. That is deliberate — the latter is a power calculation,
-  which D9 rejects.
-- **Revisit if** — Cohorts grow past the point where the ceiling can bind, making the check
-  dead code.
-- **In code** — `statistics.holm_detection_ceiling()`, surfaced by `family_can_detect()`. The
-  check is judged on the family's **most favourable** member, not its thinnest: Holm's
-  strictest threshold applies to the smallest p in the family, so the comparison with the most
-  pairs decides. Judging it on the thinnest member produced a banner announcing that nothing
-  could reach significance while a ten-patient organ sat two rows below at adjusted p = 0.008.
-  Two regression tests fail against that version.
+- **Costs** — The warning says a comparison cannot detect anything, not how many more
+  patients would be needed. That is a power calculation, which D9 rejects.
+- **Revisit if** — Cohorts grow past the point where the floor can bind on any organ.
+- **In code** — `statistics.holm_detection_ceiling(n, 1, alpha)`, surfaced by
+  `family_can_detect()`. Judged on the table's **most favourable** row, not its thinnest —
+  otherwise one four-patient organ would announce that nothing on screen could reach
+  significance while a ten-patient organ sat two rows below at p = 0.002. Rows individually
+  below the floor are counted separately in the banner.
 
 ## D14 — An exact sign test is reported beside every comparison
 
@@ -509,21 +483,22 @@ absence it is — `— unbounded at this n`, meaning no shift is rejectable rath
 the data were missing. Quartiles are still shown, because they are descriptive rather
 than inferential.
 
-## Paired comparison · Dice · MVision vs Limbus  (family = 5 organs)
+## Paired comparison · Dice · MVision vs Limbus  (5 organs, each its own question)
 
-| Organ | n pairs | n chall. / n ref. | HL difference | 95% CI (unadjusted) | r | zeros | p | p (Holm) | Sign test | Reading |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Parotid (L) | 10 | 10 / 10 | -0.0360 | -0.0380, -0.0340 | -1.00 | 0 | 0.0020 | 0.0098 | 0/10 · p=0.002 | favours Limbus |
-| Parotid (R) | 10 | 10 / 10 | -0.0105 | -0.0175, -0.0010 | -0.71 | 0 | 0.0488 | 0.1953 | 2/10 · p=0.109 | no detectable difference |
-| Brainstem | 9 | 9 / 9 | -0.0025 | -0.0080, +0.0000 | -0.60 | 0 | 0.1172 | 0.3516 | 3/9 · p=0.508 | no detectable difference |
-| SpinalCord | 10 | 10 / 10 | +0.0025 | -0.0040, +0.0090 | +0.56 | 0 | 0.1289 | 0.3516 | 6/10 · p=0.754 | no detectable difference |
-| Glnd Submand (R) | 4 | 4 / 10 | -0.0453 | **— unbounded at this n** | -1.00 | 0 | 0.1250 | 0.3516 | 0/4 · p=0.125 | no detectable difference |
+| Organ | n pairs | n chall. / n ref. | HL difference | 95% CI (unadjusted) | r | zeros | p | Sign test | Reading |
+|---|---|---|---|---|---|---|---|---|---|
+| Parotid (L) | 10 | 10 / 10 | -0.0360 | -0.0380, -0.0340 | -1.00 | 0 | 0.0020 | 0/10 · p=0.002 | favours Limbus |
+| Parotid (R) | 10 | 10 / 10 | -0.0105 | -0.0175, -0.0010 | -0.71 | 0 | 0.0488 | 2/10 · p=0.109 | favours Limbus |
+| Brainstem | 9 | 9 / 9 | -0.0025 | -0.0080, +0.0000 | -0.60 | 0 | 0.1172 | 3/9 · p=0.508 | no detectable difference |
+| SpinalCord | 10 | 10 / 10 | +0.0025 | -0.0040, +0.0090 | +0.56 | 0 | 0.1289 | 6/10 · p=0.754 | no detectable difference |
+| Glnd Submand (R) | 4 | 4 / 10 | -0.0453 | **— unbounded at this n** | -1.00 | 0 | 0.1250 | 0/4 · p=0.125 | no detectable difference |
 
 Four things in that table are worth reading carefully.
 
-- **Parotid (R)** — raw p = 0.0488 would be reported as "significant" on its own; Holm across
-  five organs moves it to 0.195. That is **D8** doing its job, and it is why the family has to
-  be declared rather than discovered.
+- **Parotid (R)** — p = 0.0488, just under the line. Reported as it stands, because this
+  organ is its own question (**D8**); an earlier version corrected it to 0.195 on the strength
+  of four other organs being on screen, and to 0.049 when they were not. Read it as what it
+  is: a marginal result on ten patients, worth a larger cohort rather than a conclusion.
 - **Glnd Submand (R)** — the largest effect in the table, on the fewest patients, with no
   interval. The challenger declined this organ for six of ten patients and is compared only on
   the four it attempted — very likely the four it found easiest (**D10**).
@@ -538,22 +513,22 @@ Four things in that table are worth reading carefully.
 ```
                       ← favours Limbus                favours MVision →
 
-  Glnd Submand (R)   n=4       ○                                            │            -0.0453   p_holm 0.3516   no interval at n=4
-  Parotid (L)        n=10             ├─●─┤                                 │            -0.0360   p_holm 0.0098
-  Parotid (R)        n=10                                 ├──────○─────────┤│            -0.0105   p_holm 0.1953
-  Brainstem          n=9                                            ├─────○─┤            -0.0025   p_holm 0.3516
-  SpinalCord         n=10                                               ├─────○──────┤   +0.0025   p_holm 0.3516
+  Glnd Submand (R)   n=4       ○                                            │            -0.0453   p 0.1250   no interval at n=4
+  Parotid (L)        n=10             ├─●─┤                                 │            -0.0360   p 0.0020
+  Parotid (R)        n=10                                 ├──────●─────────┤│            -0.0105   p 0.0488
+  Brainstem          n=9                                            ├─────○─┤            -0.0025   p 0.1172
+  SpinalCord         n=10                                               ├─────○──────┤   +0.0025   p 0.1289
 
                          -0.05   -0.04     -0.03     -0.02     -0.01     +0.00     +0.01
                          Hodges–Lehmann difference in Dice   (MVision − Limbus)
 
-  ● significant after Holm correction        ○ not significant
+  ● p <= 0.05 for that organ alone        ○ not significant
 ```
 
-Rows sorted by effect size. Markers are filled on Holm significance while the intervals are
-**unadjusted**, so the two can legitimately disagree — an interval excluding zero beside a
-non-significant adjusted p is the correction working, not an inconsistency. The figure states
-this in its footer rather than leaving a reader to reconcile it.
+Rows sorted by effect size. A filled marker means p ≤ 0.05 **for that organ alone**, and the
+interval comes from inverting that same test, so marker and interval agree by construction.
+Nothing about a row changes because another row is on screen — which was not true of the
+Holm-corrected version this replaced (**D8**).
 
 ## Coverage · organs × sources
 
@@ -589,9 +564,12 @@ into one.
 
 # Unresolved, and most open to challenge
 
-1. **Is the Holm family right?** Correcting per metric per source-pair across organs is a
-   judgement (D8). A reviewer could reasonably argue the whole report is one family, which
-   would be substantially harsher.
+1. **Is reporting unadjusted p-values right?** It is defensible only because every
+   comparison is shown and each is its own question (D8). A reviewer could reasonably argue
+   that a reader scanning twenty organs for the significant ones is running a family whether
+   or not the software says so. The counter-argument is that a correction whose family is a
+   view setting — which is what was tried — is worse than none, and that the expected count
+   of chance findings is stated instead. **This is the decision most open to challenge.**
 2. **Should a clinically important difference be user-supplied?** It would let each result be
    classified as meaningful, trivial, equivalent, or inconclusive — answering the practice
    question directly, at the cost of asking clinicians for a number they may not have.
@@ -602,9 +580,9 @@ into one.
    see whether the conclusion depends on the assumption.
 5. **Does the reference-source choice need recording?** Partly resolved — the methods
    paragraph names it (D12) — but nothing prevents choosing it after seeing results.
-6. **Should the confirmatory family be recorded before the data are seen?** The two-tier
-   structure in D8 only works if the confirmatory family is declared in advance, and the
-   software currently has no way to record that it was.
+6. **Should the organ list be recorded with the results?** Nothing now depends on it
+   statistically (D8), but it still says which comparisons were looked at, and that is what a
+   reader needs in order to judge the expected count of chance findings.
 
 ---
 
