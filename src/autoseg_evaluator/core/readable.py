@@ -1,147 +1,21 @@
-"""Prose names for figures.
+"""Prose names for metrics, for figure titles and axes.
 
-Tables can carry ``OpticNrv_L`` because a reader has the column header, the
-tooltip and the rest of the row to orient them. A figure has none of that: an
-axis label is read alone, often out of context, and frequently in a slide or a
-manuscript where the abbreviation has never been defined.
+``surface_dice`` is a dictionary key, not a label. Figures get "Surface Dice",
+with the unit on the axis and the tolerance in the subtitle, so a title stays a
+name rather than a specification.
 
-So figures get prose — "Left optic nerve", "Spinal cord", "Surface Dice" — and
-tables keep the canonical labels, which stay the thing the software matches on.
+**Organ names are deliberately not here.** They come from the canonical organ
+the Matching tab assigned — the same value the Results table shows in its Organ
+column and the CSV exports — so a figure, a table and an export all name a
+structure identically. An expansion dictionary living here would have been a
+second naming authority, free to drift from the one the user curated.
+
 This module only ever *renders*; nothing here feeds a comparison.
-
-The expansion table is deliberately incomplete. An unknown stem falls through
-title-cased and readable, which is the right failure: inventing an expansion for
-a name nobody recognised would be worse than showing it as written.
 """
 
 from __future__ import annotations
 
 import re
-
-#: Canonical stem (lowercased, spaces collapsed) -> prose. Laterality is handled
-#: separately, so these are all sideless.
-ORGAN_PROSE: dict[str, str] = {
-    # Head and neck
-    "brainstem": "brainstem",
-    "brain": "brain",
-    "cochlea": "cochlea",
-    "opticnrv": "optic nerve",
-    "optic nrv": "optic nerve",
-    "opticnerve": "optic nerve",
-    "opticchiasm": "optic chiasm",
-    "chiasm": "optic chiasm",
-    "parotid": "parotid",
-    "glnd submand": "submandibular gland",
-    "glndsubmand": "submandibular gland",
-    "submang": "submandibular gland",
-    "glnd lacrimal": "lacrimal gland",
-    "glnd thyroid": "thyroid gland",
-    "thyroid": "thyroid",
-    "lens": "lens",
-    "eye": "eye",
-    "retina": "retina",
-    "lips": "lips",
-    "cavity oral": "oral cavity",
-    "oralcavity": "oral cavity",
-    "musc constrict": "constrictor muscle",
-    "larynx": "larynx",
-    "esophagus": "oesophagus",
-    "oesophagus": "oesophagus",
-    "trachea": "trachea",
-    "mandible": "mandible",
-    "pituitary": "pituitary",
-    "spinalcord": "spinal cord",
-    "spinal cord": "spinal cord",
-    "cord": "spinal cord",
-    "brachialplex": "brachial plexus",
-    "lobe temporal": "temporal lobe",
-    # Thorax
-    "lung": "lung",
-    "lungs": "lungs",
-    "heart": "heart",
-    "breast": "breast",
-    "a lad": "left anterior descending artery",
-    "chestwall": "chest wall",
-    # Abdomen and pelvis
-    "liver": "liver",
-    "kidney": "kidney",
-    "kidneys": "kidneys",
-    "stomach": "stomach",
-    "spleen": "spleen",
-    "pancreas": "pancreas",
-    "duodenum": "duodenum",
-    "bowel small": "small bowel",
-    "bowel large": "large bowel",
-    "bowel": "bowel",
-    "colon sigmoid": "sigmoid colon",
-    "rectum": "rectum",
-    "anorectum": "anorectum",
-    "bladder": "bladder",
-    "prostate": "prostate",
-    "seminalves": "seminal vesicles",
-    "uterus": "uterus",
-    "cervix uteri": "cervix",
-    "ovary": "ovary",
-    "femur": "femur",
-    "femur head": "femoral head",
-    "femurhead": "femoral head",
-    "bone pelvic": "pelvic bone",
-    "canal anal": "anal canal",
-    "penilebulb": "penile bulb",
-    "urethra": "urethra",
-    "sacrum": "sacrum",
-    "skin": "skin",
-    "body": "body",
-    "external": "external",
-}
-
-_SIDE_PROSE = {"L": "Left", "R": "Right", "LT": "Left", "RT": "Right"}
-
-#: Matches the trailing ``(L)`` / ``(R)`` an organ key's label carries.
-_SIDE = re.compile(r"\s*\(([^)]+)\)\s*$")
-
-#: Matches a trailing ``[qualifier]`` such as ``[target]``.
-_QUALIFIER = re.compile(r"\s*\[([^\]]+)\]\s*$")
-
-
-def readable_organ(label: str) -> str:
-    """``Opticnrv (L)`` -> ``Left optic nerve``.
-
-    Falls through with the stem intact when it is not recognised, since an
-    invented expansion would read as authoritative and be wrong.
-    """
-    text = str(label).strip()
-    if not text:
-        return ""
-
-    qualifier = ""
-    match = _QUALIFIER.search(text)
-    if match:
-        qualifier = match.group(1).strip()
-        text = text[: match.start()].strip()
-
-    side = ""
-    match = _SIDE.search(text)
-    if match:
-        side = _SIDE_PROSE.get(match.group(1).strip().upper(), match.group(1).strip())
-        text = text[: match.start()].strip()
-
-    stem = re.sub(r"[_\s]+", " ", text).strip().lower()
-    prose = ORGAN_PROSE.get(stem) or ORGAN_PROSE.get(stem.replace(" ", ""))
-    if prose is None:
-        prose = text.strip()
-        name = prose if prose[:1].isupper() else prose.capitalize()
-    else:
-        name = prose
-
-    if side:
-        name = f"{side} {name}"
-    else:
-        name = name[:1].upper() + name[1:]
-    if qualifier and qualifier.lower() != "oar":
-        name = f"{name} ({qualifier})"
-    return name
-
 
 #: Metric key -> prose, without units or tolerance. Units belong on the axis and
 #: the tolerance in the subtitle, so a title stays a name.
@@ -245,10 +119,8 @@ def tolerance_note(
 __all__ = [
     "METRIC_PROSE",
     "METRIC_UNITS",
-    "ORGAN_PROSE",
     "TOLERANCE_METRICS",
     "metric_units",
     "readable_metric",
-    "readable_organ",
     "tolerance_note",
 ]

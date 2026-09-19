@@ -22,7 +22,6 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtWidgets import QSizePolicy
 
-from autoseg_evaluator.core.readable import readable_organ
 from autoseg_evaluator.data.report import metric_direction
 
 #: Below this many observations a kernel density estimate says more about the
@@ -52,11 +51,10 @@ _PALETTE = [
 MIN_CANVAS_WIDTH = 360
 MIN_CANVAS_HEIGHT = 260
 
-#: The forest needs more width than the distributions do. Its row labels are
-#: prose — "Right submandibular gland" rather than "Glnd Submand (R)" — which is
-#: the point of them, but prose is long, and it competes with the interval for
-#: the same horizontal space. Measured: the layout collapses at 540 px and
-#: survives at 600, so the floor sits above that.
+#: The forest needs more width than the distributions do: its row labels sit
+#: beside the interval rather than under it, so the two compete for the same
+#: horizontal space. Measured with labels at the 30-character elision limit —
+#: clean from 540 px, collapsing below 500 — so the floor keeps some headroom.
 MIN_FOREST_WIDTH = 620
 
 #: Organ labels longer than this are elided on the axis. Long TG-263 names
@@ -350,7 +348,7 @@ class ForestCanvas(_Canvas):
 
         axes.set_yticks(list(positions))
         axes.set_yticklabels(
-            [f"{readable_organ(label)}   n={result.n_pairs}" for label, result in usable],
+            [f"{_elide(label, 30)}   n={result.n_pairs}" for label, result in usable],
             fontsize=10,
             color=_TEXT,
         )

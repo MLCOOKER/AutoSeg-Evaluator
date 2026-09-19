@@ -1488,13 +1488,11 @@ def test_the_forest_height_follows_the_row_count(tab):
     assert tab._forest.minimumHeight() == tab._forest.maximumHeight()
 
 
-def test_the_forest_uses_prose_names(tab):
-    """An axis label is read alone, often where the abbreviation was never defined."""
+def test_the_forest_uses_the_curated_organ_names(tab):
+    """The same names the Results table shows, not a second rendering of them."""
     _select(tab, ORGANS)
-    labels = [t.get_text() for t in tab._forest.figure.axes[0].get_yticklabels()]
-    assert any(label.startswith("Right submandibular gland") for label in labels)
-    assert any(label.startswith("Left parotid") for label in labels)
-    assert not any("Glnd" in label or "(R)" in label for label in labels)
+    labels = [t.get_text().split("   n=")[0] for t in tab._forest.figure.axes[0].get_yticklabels()]
+    assert sorted(labels) == sorted(ORGANS)
 
 
 def test_the_across_organs_title_names_the_pair(tab):
@@ -1508,7 +1506,7 @@ def test_the_across_sources_title_names_the_organ(tab):
     """Without it the figure does not say which organ it describes."""
     _across_sources(tab, "Parotid (L)")
     axes = tab._forest.figure.axes[0]
-    assert axes.get_title(loc="left") == "Left parotid: Dice"
+    assert axes.get_title(loc="left") == "Parotid (L): Dice"
 
 
 def test_the_caption_sits_below_the_axis(tab):

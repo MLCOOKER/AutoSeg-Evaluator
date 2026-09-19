@@ -65,7 +65,6 @@ from PySide6.QtWidgets import (
 from autoseg_evaluator.core.readable import (
     metric_units,
     readable_metric,
-    readable_organ,
     tolerance_note,
 )
 from autoseg_evaluator.core.statistics import IntervalStatus, smallest_attainable_p
@@ -858,7 +857,7 @@ class ReportTab(QWidget):
 
         self._distribution.plot(
             {
-                readable_organ(organ): {
+                organ: {
                     source: list(self._model.values(organ, source, metric).values())
                     for source in self._model.sources()
                 }
@@ -875,7 +874,7 @@ class ReportTab(QWidget):
         tolerance = tolerance_note(metric, *self._tolerances())
         metric_name = readable_metric(metric)
         if axis is FamilyAxis.SOURCES:
-            organ_name = readable_organ(organs[0]) if organs else ""
+            organ_name = organs[0] if organs else ""
             forest_title = f"{organ_name}: {metric_name}"
             forest_subtitle = f"Each source minus baseline {reference}"
         else:

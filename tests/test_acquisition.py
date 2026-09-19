@@ -350,30 +350,17 @@ def test_pydicom_is_the_only_dicom_reader_involved():
 # ---- Prose names for figures ----------------------------------------------
 
 
-def test_organ_names_become_prose():
-    """A figure's axis label is read alone, where the abbreviation is undefined."""
-    from autoseg_evaluator.core.readable import readable_organ
+def test_organ_names_are_not_rendered_here():
+    """They come from the canonical organ the Matching tab assigned.
 
-    assert readable_organ("Opticnrv (L)") == "Left optic nerve"
-    assert readable_organ("Spinalcord") == "Spinal cord"
-    assert readable_organ("Glnd Submand (R)") == "Right submandibular gland"
-    assert readable_organ("Parotid (L)") == "Left parotid"
-    assert readable_organ("Brainstem") == "Brainstem"
+    A figure, the Results table and the CSV must name a structure identically,
+    so there is one naming authority and it is the one the user curated. An
+    expansion dictionary in this module would have been a second.
+    """
+    import autoseg_evaluator.core.readable as readable
 
-
-def test_an_unrecognised_organ_is_shown_as_written():
-    """Inventing an expansion would read as authoritative and be wrong."""
-    from autoseg_evaluator.core.readable import readable_organ
-
-    assert readable_organ("Wibble_Xyz") == "Wibble_Xyz"
-    assert readable_organ("Wibble (L)") == "Left Wibble"
-    assert readable_organ("") == ""
-
-
-def test_a_qualifier_survives_the_rendering():
-    from autoseg_evaluator.core.readable import readable_organ
-
-    assert readable_organ("Parotid (L) [target]") == "Left parotid (target)"
+    assert not hasattr(readable, "readable_organ")
+    assert not hasattr(readable, "ORGAN_PROSE")
 
 
 def test_metric_names_become_prose():
