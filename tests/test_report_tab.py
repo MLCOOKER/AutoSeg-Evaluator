@@ -1192,93 +1192,6 @@ def test_a_metric_shared_by_both_references_survives_the_switch(consensus_tab):
     assert consensus_tab._selected_metric() == "dice"
 
 
-# ---- Descriptive heatmap --------------------------------------------------
-
-
-def _shades(tab, column=3):
-    """``{(organ, source): rgb}`` for the shaded median column."""
-    table = tab._descriptive_table
-    found = {}
-    for row in range(table.rowCount()):
-        item = table.item(row, column)
-        colour = item.background().color()
-        found[(_row_organ(table, row), table.item(row, 1).text())] = (
-            colour.red(),
-            colour.green(),
-            colour.blue(),
-        )
-    return found
-
-
-def test_the_best_source_and_the_worst_shade_differently(tab):
-    """Higher Dice is better, so the top median gets the best shade."""
-    tab._metric_combo.setCurrentText("dice")
-    _select(tab, ["Parotid (L)"])
-    shades = _shades(tab)
-    # Limbus has the highest Dice in the fixture, MVision the lowest.
-    assert shades[("Parotid (L)", REFERENCE)] != shades[("Parotid (L)", CHALLENGER)]
-
-
-def test_the_scale_flips_for_a_lower_is_better_metric(tab):
-    """A source cannot be best on Dice and best on Hausdorff with the same shade."""
-    _select(tab, ["Parotid (L)"])
-    tab._metric_combo.setCurrentText("dice")
-    on_dice = _shades(tab)
-    tab._metric_combo.setCurrentText("hausdorff95")
-    on_hd = _shades(tab)
-    # In the fixture the same source wins on both metrics, so the shade of the
-    # winner must be the same colour despite the raw values moving opposite ways.
-    assert on_dice[("Parotid (L)", REFERENCE)] == on_hd[("Parotid (L)", REFERENCE)]
-
-
-def test_an_undirected_metric_is_not_shaded(qapp):
-    """Signed volume difference is best at a target, not at an extreme."""
-    rows = []
-    for patient in range(4):
-        for source, value in ((REFERENCE, 2.0), (CHALLENGER, -3.0)):
-            row = _row_for(f"P{patient}", "Parotid (L)", source, 0.8)
-            row["metrics"] = {"volume_diff_cc": value}
-            rows.append(row)
-    widget = ReportTab()
-    manager = ResultsManager()
-    manager.add_rows(rows)
-    widget.set_results_manager(manager)
-    widget.refresh()
-
-    from PySide6.QtCore import Qt as _Qt
-
-    table = widget._descriptive_table
-    assert table.rowCount() == 2
-    for row in range(table.rowCount()):
-        # An unset background is a NoBrush brush; its colour is opaque black,
-        # so the brush style is what says "nothing was painted here".
-        assert table.item(row, 3).background().style() == _Qt.BrushStyle.NoBrush
-    widget.deleteLater()
-
-
-def test_shading_is_per_organ_not_across_the_table(tab):
-    """A Dice excellent for one organ can be poor for another.
-
-    A scale spanning the whole table would rank organs rather than sources,
-    which is not the comparison anyone is making here.
-    """
-    tab._metric_combo.setCurrentText("dice")
-    _select(tab, ORGANS)
-    shades = _shades(tab)
-    # The best source in each organ gets the identical "best" shade, even
-    # though the organs sit at different absolute Dice levels.
-    best = {shades[(organ, REFERENCE)] for organ in ORGANS if (organ, REFERENCE) in shades}
-    assert len(best) == 1
-
-
-def test_the_shading_is_explained_where_it_is_applied(tab):
-    tab._metric_combo.setCurrentText("dice")
-    _select(tab, ["Parotid (L)"])
-    tip = tab._descriptive_table.item(0, 3).toolTip()
-    assert "higher is better" in tip
-    assert "never spans organs" in tip
-
-
 # ---- Distribution legend --------------------------------------------------
 
 
@@ -1331,7 +1244,7 @@ def test_each_group_is_marked_for_the_separator_rule(tab):
     assert starts == len(ORGANS)
 
 
-def test_the_shading_legend_states_the_direction(tab):
+def test_the_descriptive_note_states_the_direction(tab):
     tab._metric_combo.setCurrentText("dice")
     _select(tab, ORGANS)
     assert "higher is better" in tab._descriptive_note.text()
@@ -1339,8 +1252,8 @@ def test_the_shading_legend_states_the_direction(tab):
     assert "lower is better" in tab._descriptive_note.text()
 
 
-def test_an_undirected_metric_says_why_it_is_not_shaded(qapp):
-    """Silence looked like a bug: no colour, and nothing saying why."""
+def test_an_undirected_metric_says_it_has_no_direction(qapp):
+    """A reader comparing two sources needs to know which way is up."""
     rows = []
     for patient in range(4):
         for source in (REFERENCE, CHALLENGER):

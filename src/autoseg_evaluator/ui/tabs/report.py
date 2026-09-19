@@ -955,41 +955,16 @@ class ReportTab(QWidget):
                     table.setItem(row, column, item)
         self._fit_table(table)
 
-    @staticmethod
-    def _heat_colour(fraction: float) -> QColor:
-        """Worst to best, saturated enough to read at a glance.
-
-        An earlier pair sat around 85% lightness. Both were legible behind
-        black text and neither was *visible* — on a light table, in one narrow
-        column, a pastel wash reads as no wash at all, and the mid-range tint
-        was indistinguishable from white.
-
-        Deliberately not red-to-green: roughly one man in twelve cannot
-        separate those, the ranking is the entire message here, and these
-        tables get printed in greyscale, where amber and teal still differ in
-        lightness while red and green do not.
-        """
-        low = (0xE8, 0x9A, 0x3C)  # amber
-        high = (0x3F, 0xA8, 0x94)  # teal
-        blend = [round(a + (b - a) * fraction) for a, b in zip(low, high, strict=True)]
-        return QColor(*blend)
-
     def _fill_descriptive(self, metric: str, organs: list[str]) -> None:
         table = self._descriptive_table
         table.setRowCount(0)
         direction = metric_direction(metric)
-        median_column = 3
         for organ in organs:
             summaries = {
                 source: self._model.describe_cell(organ, source, metric)
                 for source in self._model.sources()
             }
             present = {s: d for s, d in summaries.items() if d is not None}
-            # Shaded within the organ, never across organs. A Dice of 0.6 can be
-            # excellent for a cochlea and poor for a parotid, so a scale spanning
-            # the whole table would rank organs rather than sources.
-            medians = [d.median for d in present.values()]
-            span = (min(medians), max(medians)) if medians else (0.0, 0.0)
             for position, (source, summary) in enumerate(present.items()):
                 row = table.rowCount()
                 table.insertRow(row)
@@ -998,11 +973,6 @@ class ReportTab(QWidget):
                     if summary.ci_available
                     else "— not estimable"
                 )
-                shade: QColor | None = None
-                if direction and span[1] > span[0] and len(present) > 1:
-                    fraction = (summary.median - span[0]) / (span[1] - span[0])
-                    # Lower is better for distances, so the scale flips.
-                    shade = self._heat_colour(fraction if direction > 0 else 1.0 - fraction)
                 # The organ is named once per group. Repeating it down every row
                 # is the bulk of the clutter and carries no information — the
                 # eye needs the boundary, not the label six times.
@@ -1029,16 +999,16 @@ class ReportTab(QWidget):
                             font = item.font()
                             font.setBold(True)
                             item.setFont(font)
-                    if shade is not None and column == median_column:
-                        item.setBackground(shade)
                     table.setItem(row, column, item)
         self._fit_table(table)
         self._descriptive_note.setText(
-            f"Median shaded within each organ — teal best, amber worst — "
-            f"for {metric}, where {'higher' if direction > 0 else 'lower'} is better."
-            if direction
-            else f"<b>{metric}</b> has no better or worse direction (it is best at a "
-            "target, not at an extreme), so the medians are not shaded."
+            f"Every source, on {metric}"
+            + (
+                f", where {'higher' if direction > 0 else 'lower'} is better."
+                if direction
+                else " — a metric with no better or worse direction, since it is best at "
+                "a target rather than at an extreme."
+            )
         )
 
     @staticmethod
@@ -1046,21 +1016,12 @@ class ReportTab(QWidget):
         if not direction:
             reading = (
                 f"<b>{metric}</b> has no better or worse direction — it is best at a "
-                "target rather than at an extreme — so these rows are not shaded."
+                "target rather than at an extreme."
             )
         else:
             better = "higher" if direction > 0 else "lower"
-            reading = (
-                f"Shading ranks the sources on <b>{organ}</b> alone, where {better} is "
-                "better. Teal is the best median for this organ, amber the worst."
-            )
-        return _tip(
-            f"<b>{source}</b> on <b>{organ}</b>.",
-            reading,
-            "Shading never spans organs: a Dice that is excellent for a cochlea "
-            "would be poor for a parotid, so a single scale across the table "
-            "would rank organs instead of sources.",
-        )
+            reading = f"On <b>{metric}</b>, {better} is better."
+        return _tip(f"<b>{source}</b> on <b>{organ}</b>.", reading)
 
     def _fill_comparison(
         self,
