@@ -8,11 +8,15 @@ the supplied reference are reviewable rather than discovered later.
 
 **Status: not implemented.** Nothing here is in the application yet.
 
-**Revision 2, 2026-09-20.** Revised for the compiled `0.2.0.dev1` engine
-delivered that morning. It removes the decision this spec previously made about
-precision, changes the output schema entirely, and drops the cost of a polygon
-pair by roughly two orders of magnitude. Revision 1 (2026-09-19) planned around
-the v0.1 sampling engine alone.
+**Revision 3, 2026-09-20.** Updated for `0.2.0.dev2`, which answers the
+portability review: a platform-aware loader, explicit floating-point build
+flags, platform wheels and refreshed manifests. The numerical kernel is
+unchanged. D6 is rewritten — the packaging half is delivered, the binaries half
+is Windows-only.
+
+*Revision 2 (2026-09-20)* moved to the compiled `0.2.0.dev1` engine, withdrawing
+D2 and replacing the output schema. *Revision 1 (2026-09-19)* planned around the
+v0.1 sampling engine alone.
 
 ---
 
@@ -24,9 +28,9 @@ Two packages implementing the same definitions, from
 > calculations and synthetic shapes for validation of quantitative contour
 > comparison software.* PIRO 26 (2023), 100436.
 
-| | `native_contour_metrics` 0.1.0 | `native_contour_metrics_fast` 0.2.0.dev1 |
+| | `native_contour_metrics` 0.1.0 | `native_contour_metrics_fast` 0.2.0.dev2 |
 |---|---|---|
-| Delivered | 16 Sep 2026 | 20 Sep 2026 |
+| Delivered | 16 Sep 2026 | 20 Sep 2026 (`dev1` engine, `dev2` packaging) |
 | Method | uniform arclength sampling at `2·error_mm` | compiled continuous distance envelope |
 | Implementation | pure Python + Shapely | Python + a 219-line C++17 library via `ctypes` |
 | Output bounds | discretisation intervals, provable in exact arithmetic | **none** — analytic floating evaluation |
@@ -43,15 +47,28 @@ example where those differ by 2.57 mm. We follow the paper.
 On this project's environment — **Shapely 2.0.6**, which the 0.2 supplier
 explicitly flags as not rerun on their side:
 
-| Check | v0.1 | v0.2 |
-|---|---|---|
-| Unit tests | 56/56 pass | 25/25 pass |
-| Public acceptance | 150/150 | 150/150, 3,000 comparisons |
-| Max distance error vs audited golden | — | 4.856e-10 mm (their claim: 4.86e-10) |
-| Suite wall time | 399 s (supplier's machine) | 31.7 s (this machine) |
+| Check | v0.1 | v0.2 `dev1` | v0.2 `dev2` |
+|---|---|---|---|
+| Unit tests | 56/56 | 25/25 | **49/49** (24 new loader tests) |
+| Public acceptance | 150/150 | 150/150 | 150/150, 3,000 comparisons |
+| Max distance error vs audited golden | — | 4.856186563984011e-10 mm | **identical to `dev1`** |
+| Stress cases | — | 44/44 | 44/44, 0 failures |
+| Integrity manifests | 97 entries clean | — | 70 + 39 entries, 0 mismatched |
+| Suite wall time | 399 s (supplier's machine) | 31.7 s | 32.3 s (this machine) |
 
-The shipped DLL's SHA-256 matches the supplier's release record, and every
-`*_failures.json` in their evidence folder is an empty list.
+Every `*_failures.json` in both evidence folders is an empty list.
+
+**The `dev2` Windows binary is a different file from `dev1`'s** — `b1b4f6f…`
+became `037c2f0…` — while the C++ source is byte-identical (`5e723e0…` in both).
+They rebuilt it with the same flags; output is bit-identical, so it is a
+non-reproducible link rather than a change. It matters only because "validated"
+attaches to a hash: the integrity test pins **`037c2f0352aa05e03c1bccab569a1746
+c7acf958cd533db57704dbe18ae6e1ca`**, and a rebuild invalidates that assertion
+even when the numbers do not move.
+
+A differential re-run against v0.1 on this project's own geometry still holds:
+all four distance metrics inside v0.1's intervals, APL agreeing to 5.5e-12 mm,
+38.3 ms per parotid-scale pair.
 
 ---
 
@@ -204,33 +221,65 @@ supplier asks us to keep, it is the differential check behind §3.3, and it is t
 automatic fallback on any platform with no compiled binary. Its brain-scale
 limitation is stated where a user can meet it.
 
-`0.2.0.dev1` is a prototype by its own label. Shipping it as the default is
+`0.2.0.dev2` is a prototype by its own label. Shipping it as the default is
 defensible because it reproduces the published acceptance set exactly and agrees
 with the independently-written v0.1 to 1e-12 mm — but the version is recorded on
 every result row so a number can always be traced to the engine that produced it.
 
-### D6 — Platform binaries are a supplier deliverable, with a fallback
+### D6 — Windows ships a supplied binary; Linux is built and validated in CI
 
-The C++ is portable by inspection: one translation unit, standard headers only,
-a single `#ifdef _WIN32` for the export macro that already has a non-Windows
-branch, no MSVC intrinsics, and a plain C ABI. Building `.so` / `.dylib` is
-routine; the supplier has offered to provide precompiled libraries, which keeps
-"no compiler needed" true for users and leaves revalidation with the people who
-wrote the kernel.
+`0.2.0.dev2` resolved the portability review. Delivered and verified here:
 
-Needed: **Windows x64, Linux x86-64, macOS arm64 and x86-64**, each with the
-150-pair suite rerun on that platform.
+- **A platform-aware loader.** `platforms.py` maps the running interpreter to one
+  of four targets and `loader.py` loads only `bin/<target>/<library>` — it never
+  searches system paths. A test plants a legacy `bin/fast_native.dll`, sets the
+  host to Linux and fails if `CDLL` is called at all, so a missing binary can
+  never silently load the wrong one. Initialisation takes a lock and publishes
+  the handle only after every ctypes binding succeeds, which matters because the
+  metrics worker runs on a QThread. Failed initialisation is not cached.
+- **The floating-point contract.** `-fno-fast-math -ffp-contract=off` on
+  GCC/Clang, `/fp:strict` on MSVC, the intentional `std::fma` retained, no
+  `-march=native`, and no interpolation of inherited `CXXFLAGS` / `CL`. A test
+  pins the flags *and their order* — fast-math would otherwise re-enable
+  contraction, so the negation must precede the explicit off.
+- **Platform wheels and refreshed manifests**, so nothing in the vendored package
+  needs patching. `api.py` no longer hardcodes a Windows filename.
 
-Two things to hold them to:
+**What is not delivered is three of the four binaries.** The supplier states this
+plainly — `platform_status.json` records `binary_included: false` and
+`native_validation_passed: false` for Linux x86-64, macOS arm64 and macOS
+x86-64, and the README says "this is not a delivery of four validated binaries".
+Their selection tests for those targets mock the OS, which is explicitly not the
+same as running the algorithm on it.
 
-- The loader hardcodes `bin/fast_native.dll`; it needs platform dispatch. Better
-  fixed upstream than patched in our vendored copy.
-- MSVC built with `/fp:strict`. gcc and clang default to `-ffp-contract=fast`,
-  which fuses `a*b+c` into an FMA and moves the last bits. Platform builds need
-  **`-ffp-contract=off`**, alongside the supplier's existing instruction never to
-  enable fast-math. The code calls `std::fma` explicitly for a discriminant, so
-  the author is alert to this; the 150-pair suite at 4.86e-10 mm has the headroom
-  to detect a drifting build.
+So:
+
+| Target | Binary from | Validated by |
+|---|---|---|
+| Windows x86-64 | supplier, vendored | supplier + reproduced here |
+| Linux x86-64 | **built in CI** on `ubuntu-latest` | their validation scripts, per push |
+| macOS arm64 / x86-64 | none | — falls back to the reference engine |
+
+**Linux is built in CI rather than requested from the supplier.** `ubuntu-latest`
+ships g++; `tools/build_native_library.py` is one command and refuses cross-host
+builds, which is correct on a native runner; `scripts/validate_public.py` and
+`validate_stress.py` are one command each and run in well under a minute. That is
+strictly better than a handed-over binary: it revalidates on the actual platform
+on every change, which is the only way to catch the per-OS math-library
+differences the supplier warns about — `hypot`, `asinh` and `fma` come from the
+platform, and they are explicit that the build flags do **not** promise bitwise
+equality across operating systems. It also keeps binaries out of git. Anyone who
+needs a prebuilt Linux copy takes the CI artifact.
+
+The consequence to accept: a CI-built Linux binary is validated by us, not by
+them. Our CI must therefore run *their* acceptance scripts, not merely our own
+test suite.
+
+macOS is not in CI today and is left to the fallback engine until someone needs
+it; adding `macos-latest` later is cheap and the build script already supports
+both architectures. **`linux-aarch64` is not a supported target** — `platforms.py`
+maps `aarch64 → arm64` but has no `linux-arm64` entry, so ARM Linux raises and
+falls back rather than loading anything wrong.
 
 Where no binary matches the platform, D5's reference engine runs instead and the
 UI says which engine produced the numbers.
@@ -242,19 +291,28 @@ UI says which engine produced the numbers.
 ```
 src/autoseg_evaluator/
   vendor/
-    native_contour_metrics/          v0.1, 11 files, byte-identical  (reference engine)
-    native_contour_metrics_fast/     v0.2, + bin/<platform>/         (default engine)
-    README.md                        provenance, versions, "do not edit"
+    native_contour_metrics/               v0.1, 11 files (reference engine)
+    native_contour_metrics_fast/          v0.2.0.dev2   (default engine)
+      bin/windows-x86_64/fast_native.dll    vendored, hash-pinned
+      bin/linux-x86_64/libfast_native.so    built in CI, gitignored
+    README.md                             provenance, versions, "do not edit"
   core/
-    contour_grid.py                  NEW  CT headers -> grid, cached per series
-    polygon_metrics.py               NEW  ROI -> planes -> engine -> row keys
+    contour_grid.py                       NEW  CT headers -> grid, cached per series
+    polygon_metrics.py                    NEW  ROI -> planes -> engine -> row keys
 ```
 
 **Vendored, not restyled.** Acceptance is 1e-10 mm on APL; reformatting code that
 dense is how a silent numerical change happens. The repo already has this pattern
-— the continuous rasteriser adapted from dcmrtstruct2nii, with `NOTICE`. Both
-packages ship a `MANIFEST.sha256.json`, so a test asserts the vendored copies and
-the compiled binaries are unmodified.
+— the continuous rasteriser adapted from dcmrtstruct2nii, with `NOTICE`.
+
+Integrity is pinned two ways, because they answer different questions. The
+supplier's `SOURCE_MANIFEST.sha256.json` (39 entries) covers the
+platform-independent sources, so a platform build can add its binary without
+invalidating it; `MANIFEST.sha256.json` (70 entries) covers the whole release.
+Our test asserts the vendored sources against the source manifest and the
+Windows binary against its own recorded hash. A CI-built Linux binary is not
+hash-pinned — it is validated by running the supplier's acceptance suite against
+it, which is the check that actually matters for a freshly compiled library.
 
 `shapely>=2.0,<3` becomes a **declared** dependency. It is currently installed
 only transitively.
@@ -418,8 +476,14 @@ scale/direction for each new key.
 Four layers. Passing a supplier's own tests proves their kernel works and nothing
 about our adapter.
 
-1. **Vendored kernels** — v0.1's 56 tests and v0.2's 25, plus manifest-integrity
-   tests over both packages and every compiled binary.
+0. **Per platform, in CI** — on `ubuntu-latest`, build the library with
+   `tools/build_native_library.py`, then run the supplier's own
+   `scripts/validate_public.py` and `validate_stress.py` before our suite. This
+   is the layer that catches a platform whose math library moves a result, and
+   it is the only validation a CI-built binary gets. The existing
+   `if: runner.os == 'Linux'` step idiom in `ci.yml` is where it goes.
+1. **Vendored kernels** — v0.1's 56 tests and v0.2's 49, plus integrity tests
+   over the vendored sources and the pinned Windows binary.
 2. **Adapter** — synthetic polygons with analytic answers, D1's composition and
    its partial-overlap guard, empty ROIs, no common planes, consensus
    unavailability, irregular slice spacing, engine selection and fallback.
@@ -471,7 +535,7 @@ an ROI compared against five sources should be prepared once.
 
 | Phase | Lands | Behaviour change |
 |---|---|---|
-| 1 | Both engines vendored, integrity tests, 81 supplier tests, `shapely` declared | none |
+| 1 | Both engines vendored, integrity tests, 105 supplier tests, CI Linux build step, `shapely` declared | none |
 | 2 | `contour_grid.py`, `polygon_metrics.py`, engine selection + fallback, tests | none |
 | 3 | Differential and end-to-end acceptance, `docs/POLYGON_VALIDATION_REPORT.md` | none |
 | 4 | Worker integration, availability, `prepare()` caching | metrics computed |
@@ -483,8 +547,9 @@ Phases 1–3 change nothing a user can see, deliberately: the numerical path is
 proven against the published reference, through our own adapter, before it is
 wired to a button.
 
-**Phase 1 is blocked on D6** for platforms other than Windows x64. It is not
-blocked for Windows, and the reference engine covers the others meanwhile.
+**Phase 1 is no longer blocked.** Windows ships the supplied binary, Linux is
+built and validated in the CI job that phase 1 adds, and macOS falls back to the
+reference engine. Nothing further is needed from the supplier to start.
 
 ---
 
@@ -493,8 +558,9 @@ blocked for Windows, and the reference engine covers the others meanwhile.
 | # | Deviation | Why |
 |---|---|---|
 | D1 | Nested `CLOSED_PLANAR` rings composed even-odd, per exporter, opt-in | Recovers 22 real ROIs and matches what both of our mask backends have always done; refusing would make the two streams disagree. Uses the supplier's own guarded parser, not a local reimplementation |
-| D5 | Ships a `0.2.0.dev1` prototype as the default engine | Reproduces the published acceptance set exactly and agrees with the independent v0.1 to 1e-12 mm; the v0.1 engine is retained as audit reference and fallback, and the engine version is recorded on every row |
-| — | Shapely 2.0.6 rather than 2.1.2 | Permitted by both packages' ranges; 56/56 and 25/25 tests plus the full 150-pair suite verified on ours |
+| D5 | Ships a `0.2.0.dev2` prototype as the default engine | Reproduces the published acceptance set exactly and agrees with the independent v0.1 to 1e-12 mm; the v0.1 engine is retained as audit reference and fallback, and the engine version is recorded on every row |
+| D6 | Builds the Linux binary ourselves rather than taking one from the supplier | Per-platform revalidation on every push is what catches an OS whose math library moves a result; the supplier is explicit the flags do not promise bitwise cross-OS equality. Accepts that the Linux binary is validated by us |
+| — | Shapely 2.0.6 rather than 2.1.2 | Permitted by both packages' ranges; 56/56 and 49/49 tests plus the full 150-pair suite and 44 stress cases verified on ours |
 | ~~D2~~ | ~~`error_mm` 0.05~~ | Withdrawn in revision 2 — the setting no longer affects cost or value |
 
 Nothing else in the numerical path is changed. The kernels are vendored
