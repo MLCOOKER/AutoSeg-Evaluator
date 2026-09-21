@@ -54,3 +54,41 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+Native contour metrics (src/autoseg_evaluator/vendor/)
+================================================================================
+Two packages computing planar contour metrics directly on RTSTRUCT polygons are
+VENDORED BYTE-IDENTICAL under `src/autoseg_evaluator/vendor/`:
+
+  native_contour_metrics       0.1.0        pure Python reference engine
+  native_contour_metrics_fast  0.2.0.dev2   compiled engine (default)
+
+They implement the definitions in Boukerroui D, Vasquez Osorio E, Brunenberg E,
+Gooding MJ, "Analytic calculations and synthetic shapes for validation of
+quantitative contour comparison software", Physics and Imaging in Radiation
+Oncology 26 (2023) 100436, https://doi.org/10.1016/j.phro.2023.100436.
+
+They are NOT Gooding's Chapter-15 implementation and do not reproduce it; they
+follow the paper where the two differ (notably the symmetric median, which
+Chapter 15 averages and the paper maximises). Both were developed for this
+project and are covered by this project's Apache 2.0 licence.
+
+Synthetic validation fixtures under `third_party/native_contour_metrics/v0.2/
+data/` are derived from Boukerroui D and Gooding MJ (2022), "The Vitruvian Man
+Dataset of Analytic calculations and synthetic shapes for validation of
+quantitative contour comparison software", version 1, Mendeley Data,
+https://doi.org/10.17632/9xjyrftzth.1, licensed CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/). Retained source metadata is in
+`data/DATASET_ATTRIBUTION.json`. The golden values computed from them are ours
+and are not author-endorsed results.
+
+The bundled Windows library `vendor/native_contour_metrics_fast/bin/
+windows-x86_64/fast_native.dll` was compiled from the C++17 source preserved at
+`src/autoseg_evaluator/vendor/cpp/fast_native.cpp` with the Microsoft C++
+toolchain and its static runtime (/MT); that runtime retains Microsoft's own
+redistribution terms. The library is OPTIONAL — if it is absent or refused, the
+application falls back to the pure-Python reference engine.
+
+NumPy and Shapely, which both packages require at runtime, retain their own
+licences and are not bundled here.

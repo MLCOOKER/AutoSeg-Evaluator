@@ -46,6 +46,9 @@ dependencies = [
     "scikit-image>=0.22",
     "matplotlib>=3.8",
     "dicompyler-core>=0.5.6",
+    # Backs the vendored native polygon-metric kernels
+    # (src/autoseg_evaluator/vendor). Previously present only transitively.
+    "shapely>=2.0,<3",
 ]
 
 [project.optional-dependencies]
@@ -70,12 +73,32 @@ Citation = "https://zenodo.org/records/17383138"
 where = ["src"]
 
 [tool.setuptools.package-data]
-autoseg_evaluator = ["resources/**/*", "assets/**/*"]
+autoseg_evaluator = [
+    "resources/**/*",
+    "assets/**/*",
+    # The vendored compiled metric libraries. Without these the wheel builds
+    # happily and the fast engine is missing at runtime on every install.
+    "vendor/native_contour_metrics_fast/bin/*/*.dll",
+    "vendor/native_contour_metrics_fast/bin/*/*.so",
+    "vendor/native_contour_metrics_fast/bin/*/*.dylib",
+    # The library is opaque; the source that produced it travels with it.
+    "vendor/cpp/*.cpp",
+    "vendor/README.md",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 src = ["src", "tests"]
+# Vendored third-party kernels and the suppliers' own test suites. These are
+# reproduced byte-identical on purpose — ``tests/test_vendor_integrity.py``
+# fails if they are not — so linting them proposes 346 changes that must never
+# be made. Their correctness is enforced by their own acceptance suites, not by
+# our style rules.
+extend-exclude = [
+    "src/autoseg_evaluator/vendor",
+    "tests/vendor",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]

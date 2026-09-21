@@ -73,6 +73,24 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      # Only the validated Windows x64 library is committed. Linux builds its
+      # own from the same C++17 source, on the platform it will run on, with
+      # the flags the build script fixes (-fno-fast-math -ffp-contract=off).
+      # Leaving contraction at the compiler default would let a*b+c fuse into
+      # an FMA and move results in the last bits.
+      - name: Build the native polygon-metric library (Linux)
+        if: runner.os == 'Linux'
+        run: python src/autoseg_evaluator/vendor/tools/build_native_library.py
+
+      # A freshly compiled library has no recorded acceptance, so it gets one
+      # here. The suppliers are explicit that the build flags do not promise
+      # bitwise equality across operating systems - hypot, asinh and fma come
+      # from each platform's own math library - so this is the check that
+      # catches a platform whose results drift, and it is the only validation a
+      # CI-built library receives.
+      - name: Validate the native polygon-metric library
+        run: python scripts/validate_polygon_metrics.py
+
       - name: Install equivalence-test reference packages
         # PlatiPy backs tests/test_platipy_equivalence.py (the legacy mask
         # rasteriser) and the APL half of tests/test_metrics_equivalence.py.

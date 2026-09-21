@@ -45,3 +45,17 @@ desktop.ini
 # Distribution archives
 *.zip
 *.tar.gz
+
+# Polygon-metric acceptance runs. The suppliers' scripts write a JSON/CSV
+# record per platform; the record of a run on someone's laptop is not a repo
+# artefact. CI re-runs them on every push.
+third_party/native_contour_metrics/*/validation_runs/
+
+# Compiled metric libraries built locally or in CI for a platform we do not
+# ship a validated binary for. Only the supplied Windows library is committed,
+# and it is pinned by hash in tests/test_vendor_integrity.py.
+src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/linux-*/
+src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/macos-*/
+
+# Intermediate objects from a local native-library build.
+src/autoseg_evaluator/vendor/build/

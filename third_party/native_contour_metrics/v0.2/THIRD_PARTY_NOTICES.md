@@ -1,0 +1,7 @@
+# Attribution
+
+The compact synthetic fixtures are derived from Boukerroui and Gooding (2022), *The Vitruvian Man Dataset of Analytic calculations and synthetic shapes for validation of quantitative contour comparison software*, version 1, [Mendeley Data](https://doi.org/10.17632/9xjyrftzth.1), under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). See `data/DATASET_ATTRIBUTION.json` for retained metadata. These fixtures project the public DICOM contours into a local orthonormal plane; repeated identical XY planes are stored once and reconstructed with support counts from the golden table. Our golden values and transformations are not author-endorsed results.
+
+The continuous metric engine, C++ optimization, wrappers and tests were developed with an AI assistant for this project. They implement the same definitions as the original handoff but are not Gooding/Chapter-15 code. The Decimal capsule fallback is reused from the previous assistant-authored reference. No new public license for project-owned code is selected here; use the owner's project license/internal distribution terms. No third-party Chapter-15 implementation is copied into this update.
+
+NumPy, Shapely, optional pydicom/pytest and the Microsoft toolchain retain their own licenses. Python dependencies are not bundled. The included Windows x64 DLL was compiled with the installed Microsoft C++ toolchain and static runtime; receiving teams should build and distribute it under their normal toolchain terms.

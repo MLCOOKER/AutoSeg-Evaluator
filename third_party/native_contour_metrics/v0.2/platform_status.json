@@ -1,0 +1,26 @@
+{
+  "windows-x86_64": {
+    "binary_included": true,
+    "native_validation_passed": true,
+    "loader_selection_tested": true,
+    "build_recipe_included": true
+  },
+  "linux-x86_64": {
+    "binary_included": false,
+    "native_validation_passed": false,
+    "loader_selection_tested": true,
+    "build_recipe_included": true
+  },
+  "macos-arm64": {
+    "binary_included": false,
+    "native_validation_passed": false,
+    "loader_selection_tested": true,
+    "build_recipe_included": true
+  },
+  "macos-x86_64": {
+    "binary_included": false,
+    "native_validation_passed": false,
+    "loader_selection_tested": true,
+    "build_recipe_included": true
+  }
+}

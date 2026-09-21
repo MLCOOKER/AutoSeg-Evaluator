@@ -6,7 +6,7 @@ RTSTRUCT stores, with no rasterisation anywhere in the path.
 Written before the code, so the decisions and every deliberate deviation from
 the supplied reference are reviewable rather than discovered later.
 
-**Status: not implemented.** Nothing here is in the application yet.
+**Status: phase 1 landed 2026-09-22.** Both engines are vendored and their suites run in CI; nothing is wired to the application yet. Phases 2-7 below are still to do.
 
 **Revision 3, 2026-09-20.** Updated for `0.2.0.dev2`, which answers the
 portability review: a platform-aware loader, explicit floating-point build
@@ -288,18 +288,35 @@ UI says which engine produced the numbers.
 
 ## 5. Where the code goes
 
+As built in phase 1:
+
 ```
-src/autoseg_evaluator/
-  vendor/
-    native_contour_metrics/               v0.1, 11 files (reference engine)
-    native_contour_metrics_fast/          v0.2.0.dev2   (default engine)
-      bin/windows-x86_64/fast_native.dll    vendored, hash-pinned
-      bin/linux-x86_64/libfast_native.so    built in CI, gitignored
-    README.md                             provenance, versions, "do not edit"
-  core/
-    contour_grid.py                       NEW  CT headers -> grid, cached per series
-    polygon_metrics.py                    NEW  ROI -> planes -> engine -> row keys
+src/autoseg_evaluator/vendor/          __init__.py + README.md are ours; the rest is not
+  native_contour_metrics/                v0.1 reference engine, 10 files
+  native_contour_metrics_fast/           v0.2.0.dev2 default engine
+    bin/windows-x86_64/fast_native.dll     vendored, pinned by hash
+    bin/linux-x86_64/libfast_native.so     built in CI, gitignored
+  cpp/fast_native.cpp                    the library's source, 219 lines
+  tools/build_native_library.py          rebuilds it, per platform
+third_party/native_contour_metrics/    manifests, notices, acceptance data, scripts
+tests/vendor/                          both suppliers' suites, 105 tests
+tests/test_vendor_integrity.py         enforces "byte-identical", both directions
+scripts/validate_polygon_metrics.py    runs the acceptance suites against our copy
 ```
+
+To come in phase 2:
+
+```
+src/autoseg_evaluator/core/
+  contour_grid.py                       CT headers -> grid, cached per series
+  polygon_metrics.py                    ROI -> planes -> engine -> row keys
+```
+
+`cpp/` and `tools/` sit **inside** the vendor tree rather than with the other
+audit material, because the supplier's build script resolves the source and the
+destination package from one root. Separating them would leave a platform build
+writing its library into a tree the loader never reads — a wrong answer rather
+than an error. Both are covered by the v0.2 manifest either way.
 
 **Vendored, not restyled.** Acceptance is 1e-10 mm on APL; reformatting code that
 dense is how a silent numerical change happens. The repo already has this pattern
@@ -535,7 +552,7 @@ an ROI compared against five sources should be prepared once.
 
 | Phase | Lands | Behaviour change |
 |---|---|---|
-| 1 | Both engines vendored, integrity tests, 105 supplier tests, CI Linux build step, `shapely` declared | none |
+| 1 | ✅ **Done.** Both engines vendored, integrity tests, 105 supplier tests, acceptance wrapper, CI Linux build step, `shapely` declared | none |
 | 2 | `contour_grid.py`, `polygon_metrics.py`, engine selection + fallback, tests | none |
 | 3 | Differential and end-to-end acceptance, `docs/POLYGON_VALIDATION_REPORT.md` | none |
 | 4 | Worker integration, availability, `prepare()` caching | metrics computed |
