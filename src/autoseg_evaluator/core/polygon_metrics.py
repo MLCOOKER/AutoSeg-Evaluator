@@ -398,6 +398,79 @@ def compare_structures(
     )
 
 
+#: What each selectable metric puts in a row. APL and NAPL fill two columns
+#: each because both are directional and both directions are meaningful: one is
+#: the boundary an editor would have to draw, the other what they would have to
+#: remove.
+METRIC_COLUMNS: dict[str, tuple[str, ...]] = {
+    "apl": ("poly_apl_mm", "poly_apl_reverse_mm"),
+    "napl": ("poly_napl", "poly_napl_reverse"),
+    "hd100": ("poly_hd100_mm",),
+    "hd95": ("poly_hd95_mm",),
+    "mean": ("poly_mean_distance_mm",),
+    "median": ("poly_median_distance_mm",),
+}
+
+#: Emitted whenever anything is. They say what the numbers were measured over,
+#: and a distance computed on three shared planes out of thirty means something
+#: different from one computed on all thirty.
+CONTEXT_COLUMNS: tuple[str, ...] = (
+    "poly_planes_joint",
+    "poly_planes_gt_only",
+    "poly_planes_test_only",
+)
+
+
+@dataclass(frozen=True)
+class PolygonConfig:
+    """Which polygon metrics to report, and how to read the contours.
+
+    Selecting a subset saves no computation: all six come out of one call and
+    share the same distance distribution, so the choice is about how wide the
+    results table is, not how long the run takes. Everything is computed and the
+    unselected columns are dropped.
+    """
+
+    metrics: frozenset[str] = frozenset()
+    tolerance_mm: float = 3.0
+    #: Compose nested ordinary ``CLOSED_PLANAR`` rings as holes. Per exporter,
+    #: off by default — see :func:`parse_structure`.
+    allow_nested_rings: bool = False
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> PolygonConfig:
+        data = data or {}
+        selected = data.get("metrics", {}) or {}
+        if isinstance(selected, Mapping):
+            chosen = {str(k) for k, v in selected.items() if v}
+        else:
+            chosen = {str(k) for k in selected}
+        return cls(
+            metrics=frozenset(chosen & set(METRIC_COLUMNS)),
+            tolerance_mm=float(data.get("tolerance_mm", 3.0)),
+            allow_nested_rings=bool(data.get("allow_nested_rings", False)),
+        )
+
+    def any_enabled(self) -> bool:
+        return bool(self.metrics)
+
+    def columns(self) -> tuple[str, ...]:
+        """The row keys this configuration fills, in display order."""
+        if not self.metrics:
+            return ()
+        chosen = [
+            column
+            for key, columns in METRIC_COLUMNS.items()
+            if key in self.metrics
+            for column in columns
+        ]
+        return tuple(chosen) + CONTEXT_COLUMNS
+
+    def select(self, values: Mapping[str, float]) -> dict[str, float]:
+        """Keep only what was asked for, from a full set of results."""
+        return {key: values[key] for key in self.columns() if key in values}
+
+
 #: The columns a successful comparison fills, in the order they are shown.
 ROW_KEYS: Sequence[str] = (
     "poly_apl_mm",
@@ -415,9 +488,11 @@ ROW_KEYS: Sequence[str] = (
 
 
 __all__ = [
+    "CONTEXT_COLUMNS",
     "ENGINE_FAST",
     "ENGINE_REFERENCE",
     "ENGINE_VARIABLE",
+    "METRIC_COLUMNS",
     "MISSING_PLANE_POLICY",
     "QUANTILE_GUARD_MM",
     "REFERENCE_ACCEPTANCE_SAMPLING_MM",
@@ -426,6 +501,7 @@ __all__ = [
     "STATUS_NO_CONTOURS",
     "ContourRegions",
     "ContoursUnavailableError",
+    "PolygonConfig",
     "PolygonMetrics",
     "compare_structures",
     "library_available",

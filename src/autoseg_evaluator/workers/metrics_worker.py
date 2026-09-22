@@ -20,6 +20,7 @@ from typing import Any
 import pydicom
 from PySide6.QtCore import QObject, Signal, Slot
 
+from autoseg_evaluator.core.contour_grid import GridUnavailableError, build_grid
 from autoseg_evaluator.core.dvh import DVHConfig, DVHError, _fmt_num, compute_dvh_metrics
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
@@ -30,6 +31,13 @@ from autoseg_evaluator.core.masks import (
     truncate_to_gt_z_extent,
 )
 from autoseg_evaluator.core.metrics import compute_geometric_metrics
+from autoseg_evaluator.core.polygon_metrics import (
+    STATUS_NO_CONTOURS,
+    ContoursUnavailableError,
+    PolygonConfig,
+    parse_structure,
+    select_engine,
+)
 from autoseg_evaluator.core.staple import (
     DRAWER_POOL_LABEL,
     StapleConfig,
@@ -84,6 +92,12 @@ class MetricsWorker(QObject):
         self._config = dict(config or {})
         self._dvh_config = DVHConfig.from_dict(self._config.get("dvh", {}) or {})
         self._staple_config = StapleConfig.from_dict(self._config.get("staple", {}) or {})
+        self._polygon_config = PolygonConfig.from_dict(self._config.get("polygon", {}))
+        # Resolved once on first use, then reused: selection reads an
+        # environment variable and probes for a compiled library, and doing that
+        # per ROI pair would be noise in a profile and noise in a log.
+        self._polygon_engine: Any = None
+        self._polygon_engine_error = ""
         self._cancelled = False
         # Caches keyed by SOP UID / patient ID to avoid redundant DICOM I/O
         self._rtstruct_cache: dict[str, Any] = {}
@@ -94,6 +108,13 @@ class MetricsWorker(QObject):
         # set that followed.
         self._ct_cache: dict[tuple[str, str], Any] = {}
         self._mask_cache: dict[tuple[str, str, int], Any] = {}
+        # Polygon stream. Grids are per image series and structures are per ROI,
+        # so both outlive the pair that first needed them: one ROI compared
+        # against five sources is parsed and prepared once, not five times.
+        # Failures are cached as their reason string, because a series that
+        # cannot yield a grid will not yield one on the next attempt either.
+        self._grid_cache: dict[tuple[str, str], Any] = {}
+        self._polygon_cache: dict[tuple[str, str, int], Any] = {}
         self._dose_cache: dict[tuple[str, str], Any] = {}
         # STAPLE summary scalars captured while synthesising a multi-observer
         # consensus GT (Tab 2), keyed by (patient_id, synthetic_sop, roi_number).
@@ -490,6 +511,14 @@ class MetricsWorker(QObject):
                         )
                     except DVHError as dvh_exc:
                         row["error"] = f"DVH: {dvh_exc}"
+            # The polygon stream, measured on the stored contours rather than
+            # on the rasterised masks above. It is a separate measurement of the
+            # same pair, so a failure here leaves the mask metrics standing and
+            # lands in its own status column instead of the row's error.
+            if self._polygon_config.any_enabled():
+                values, status = self._polygon_metrics(group, record)
+                row["metrics"].update(values)
+                row["metrics"]["poly_status"] = status
             # Per-DVH-metric difference from the GT (test − GT), so the table
             # carries both absolutes and the deviation from the reference.
             if gt_dvh:
@@ -499,6 +528,112 @@ class MetricsWorker(QObject):
         except Exception as exc:  # noqa: BLE001
             row["error"] = f"{type(exc).__name__}: {exc}"
         return row
+
+    # ---- Polygon stream ---------------------------------------------------
+
+    def _polygon_engine_for_run(self) -> Any:
+        """The engine for this run, chosen once.
+
+        A failure to choose one is cached as well. If no compiled library exists
+        and the environment demanded one, every pair fails the same way, and
+        saying so once per pair is more useful than raising out of the run.
+        """
+        if self._polygon_engine is None and not self._polygon_engine_error:
+            try:
+                self._polygon_engine = select_engine()
+            except Exception as exc:  # noqa: BLE001 — becomes a per-row status
+                self._polygon_engine_error = f"unavailable: {exc}"
+        return self._polygon_engine
+
+    def _polygon_grid(self, patient_id: str, rtstruct_sop_uid: str) -> Any:
+        """The contour frame for the series this structure set was drawn on.
+
+        Resolved through the same linkage the rest of the run uses, so a
+        two-course patient gets the frame belonging to the course in hand rather
+        than whichever series happened to be first.
+        """
+        key = (patient_id, rtstruct_sop_uid)
+        if key in self._grid_cache:
+            return self._grid_cache[key]
+        try:
+            resolution = resolve_image_series(self._library, patient_id, rtstruct_sop_uid)
+            series = resolution.target
+            if series is None or not getattr(series, "files", None):
+                raise GridUnavailableError(
+                    "No image series resolved for this structure set, so contours "
+                    "cannot be placed in a frame."
+                )
+            grid = build_grid(list(series.files))
+        except GridUnavailableError as exc:
+            grid = f"unavailable: {exc}"
+        self._grid_cache[key] = grid
+        return grid
+
+    def _polygon_structure(
+        self, patient_id: str, sop_uid: str, roi_number: int, dataset: Any, grid: Any
+    ) -> Any:
+        """One ROI as prepared regions, cached across every pair that uses it."""
+        key = (patient_id, sop_uid, roi_number)
+        if key in self._polygon_cache:
+            return self._polygon_cache[key]
+        try:
+            regions = parse_structure(
+                dataset,
+                roi_number,
+                grid,
+                allow_nested=self._polygon_config.allow_nested_rings,
+            )
+            if regions.empty:
+                prepared = "undefined: this structure has no contours on any plane"
+            else:
+                prepared = self._polygon_engine_for_run().prepare(regions)
+        except ContoursUnavailableError as exc:
+            prepared = f"unavailable: {exc}"
+        except Exception as exc:  # noqa: BLE001 — becomes a per-row status
+            prepared = f"unavailable: {type(exc).__name__}: {exc}"
+        self._polygon_cache[key] = prepared
+        return prepared
+
+    def _polygon_metrics(self, group: dict[str, Any], record: dict[str, Any]) -> tuple[dict, str]:
+        """Polygon metrics for one GT-versus-test pair, or why there are none.
+
+        Availability is a property of the **pair**, not of either structure: a
+        consensus ground truth is born as a binary mask and has no contours at
+        all, so no amount of parsing the test side makes the comparison defined.
+        """
+        if group.get("_gt_synthetic"):
+            return {}, STATUS_NO_CONTOURS
+        engine = self._polygon_engine_for_run()
+        if engine is None:
+            return {}, self._polygon_engine_error
+
+        grid = self._polygon_grid(group["patient_id"], group["gt_sop"])
+        if isinstance(grid, str):
+            return {}, grid
+
+        test = record["meta"]
+        gt_rtss = self._load_rtstruct(group["patient_id"], group["gt_sop"])
+        reference = self._polygon_structure(
+            group["patient_id"], group["gt_sop"], group["gt_roi_number"], gt_rtss, grid
+        )
+        if isinstance(reference, str):
+            return {}, reference
+        candidate = self._polygon_structure(
+            group["patient_id"],
+            test["rtstruct_sop_uid"],
+            test["roi_number"],
+            record["rtss"],
+            grid,
+        )
+        if isinstance(candidate, str):
+            return {}, candidate
+
+        result = engine.compare(
+            reference, candidate, tolerance_mm=self._polygon_config.tolerance_mm
+        )
+        if not result.available:
+            return {}, result.status
+        return self._polygon_config.select(result.values), ""
 
     @staticmethod
     def _dvh_diff_metrics(
@@ -1251,6 +1386,12 @@ class MetricsWorker(QObject):
                 for ctx in patient.contexts:
                     for rtss in ctx.rtstructs:
                         self._rtstruct_cache.pop(rtss.sop_instance_uid, None)
+        # The polygon caches key on the same patient, and a prepared structure
+        # holds its edge arrays; dropping them here keeps peak memory tied to
+        # one patient rather than to the whole cohort.
+        for cache in (self._grid_cache, self._polygon_cache):
+            for key in [k for k in cache if k[0] == patient_id]:
+                cache.pop(key, None)
         # Encourage Python to actually reclaim the C++-backed SimpleITK
         # image memory before the next patient's CT loads.
         gc.collect()
