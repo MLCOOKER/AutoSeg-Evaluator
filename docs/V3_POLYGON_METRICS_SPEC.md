@@ -6,11 +6,12 @@ RTSTRUCT stores, with no rasterisation anywhere in the path.
 Written before the code, so the decisions and every deliberate deviation from
 the supplied reference are reviewable rather than discovered later.
 
-**Status: phases 1–3 landed 2026-09-22.** Both engines are vendored, the adapter
-reads real RTSTRUCTs and measures them, and every acceptance layer passes —
+**Status: phases 1–4 landed 2026-09-22.** Both engines are vendored, the adapter
+reads real RTSTRUCTs and measures them, every acceptance layer passes —
 including the published archives driven from DICOM through our own grid builder
-and parser. Nothing is wired to the application yet: no metric is computed in a
-run and no tab has changed. Phases 4–7 below are still to do.
+and parser — and the worker computes the metrics in a run, verified on the real
+multi-vendor sample cohort. No tab has changed yet, so nothing is selectable
+from the interface. Phases 5–7 below are still to do.
 
 **Revision 3, 2026-09-20.** Updated for `0.2.0.dev2`, which answers the
 portability review: a platform-aware loader, explicit floating-point build
@@ -563,6 +564,23 @@ audited reference for v0.1, APL within 1e-8 mm; v0.2 measured 4.86e-10 mm and
 
 ---
 
+## 10a. Measured in the worker, on real data
+
+13 ground-truth-versus-vendor comparisons across three organs of the sample
+cohort, driven through the worker's own linkage resolution, grid builder,
+parser, caching and engine selection:
+
+| | |
+|---|---|
+| Per pair | 32–269 ms |
+| Grids built | 1, reused across all 13 pairs |
+| Structures prepared | 16 — three ground truths and thirteen vendor contours, each once |
+
+The plane bookkeeping shows the asymmetry it exists to show: most pairs share
+every ground-truth plane while the vendor reaches 2–7 further, and one
+(Radformation on the right parotid) leaves two ground-truth planes uncovered.
+Those are exactly the slices a distance metric would otherwise average away.
+
 ## 11. Performance
 
 Rewritten for v0.2. ~37 ms per parotid-scale pair, ~524 ms for a brain, against
@@ -595,7 +613,7 @@ an ROI compared against five sources should be prepared once.
 | 1 | ✅ **Done.** Both engines vendored, integrity tests, 105 supplier tests, acceptance wrapper, CI Linux build step, `shapely` declared | none |
 | 2 | ✅ **Done.** `contour_grid.py`, `polygon_metrics.py`, engine selection + fallback, 30 tests | none |
 | 3 | ✅ **Done.** Four acceptance layers, differential, `docs/POLYGON_VALIDATION_REPORT.md` | none |
-| 4 | Worker integration, availability, `prepare()` caching | metrics computed |
+| 4 | ✅ **Done.** Worker integration, availability, caching, 8 tests | metrics computed |
 | 5 | Tab 5 split, session v7 | metrics selectable |
 | 6 | Results columns, sidecar, Report tab families | metrics reportable |
 | 7 | *(separate, per D3)* mask APL removed, docs rewritten | numbers move |
