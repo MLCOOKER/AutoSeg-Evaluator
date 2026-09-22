@@ -169,7 +169,7 @@ control, and not a speed control.
 
 ## 4. Decisions
 
-### D1 — Nested rings are composed as holes, via the supplier's opt-in parser
+### D1 — Nested rings are composed as holes, unconditionally
 
 `polygon_compat.parse_compatible(..., allow_nested=True)` composes rings that are
 strictly nested, after checking every ring is valid and either strictly nested or
@@ -193,9 +193,32 @@ with the mask path reporting a donut and the polygon path reporting nothing.
 This is not a new interpretation — it is the one this application has applied
 since v1, now applied consistently.
 
-**Before enabling it per exporter**, compare representative brain, lung and
-larynx cases against the exporting system or a confirmed export specification,
-as the supplier advises. The option is per-exporter and off by default.
+**Revised 2026-09-22: there is no toggle.** The composition is unconditional.
+
+The opt-in was the wrong shape, and the question that exposed it was simply *if
+the mask path already does this automatically, why does the polygon path need a
+switch?* It does not. The toggle could never prevent the assumption — the mask
+path makes it on every run — it could only decide whether the two streams made
+the **same** assumption. Off, they did not: 22 structures carried mask metrics
+and no polygon metrics, which is a backend difference wearing the costume of a
+metric difference. That is precisely what the supplier warned against, and the
+opt-in caused it rather than avoiding it.
+
+Confirmed by measurement rather than by reading the rasteriser: MVision's
+`Brain`, one of the 22, rasterises to a mask containing genuine enclosed
+background — 10 voxels across 2 slices. The mask path has produced holes for
+these structures since v1, so every published result from this software already
+rests on the interpretation.
+
+With composition unconditional, the polygon adapter accepts **357 of 389** ROIs
+on the reference cohort — exactly the mask path's count, with the only remaining
+refusals being the 32 genuinely empty ROIs.
+
+**One divergence remains, and is documented rather than hidden.** Rings that
+touch, cross or partially overlap are refused here and silently combined by the
+mask path. Those have no single reading, and refusing beats guessing — but it
+means a structure can carry mask metrics and no polygon metrics. None were found
+in the reference cohort.
 
 ### D2 — *Withdrawn.* `error_mm` is no longer a precision or speed setting
 
@@ -496,11 +519,10 @@ reads as two ways of measuring rather than two lists of names:
 - **2D contour metrics (native RTSS polygons)** — APL, NAPL, HD100, HD95, mean,
   median. Computed on the stored contour segments; no rasterisation. One control
   only: tolerance τ. **No precision control** — per D2 there is nothing for it to
-  set. The engine in use is shown, not chosen, unless the environment override is
-  set.
-
-Plus the nested-ring opt-in from D1, with its warning that the interpretation
-applies to every source and should be confirmed against the exporting system.
+  set. **No nested-ring toggle** either, per the D1 revision — the mask path
+  composes them unconditionally, so a switch here could only put the two streams
+  out of step. The engine in use is shown, not chosen, unless the environment
+  override is set.
 
 **Default off**, against this section's earlier "can now default on". Cost is no
 longer the argument — a pair is milliseconds — but this is a second way of
@@ -516,6 +538,19 @@ stream adds `compute_polygon` beside them. Settings carry no schema version and
 an absent key reads as its default, so an existing install upgrades silently.
 
 ---
+
+## 8a. Naming the two Hausdorffs
+
+Both streams report a Hausdorff, and in a results table the two sit side by side
+with no group heading to separate them. They are different measurements — one
+between rasterised 3D surfaces, one between 2D contour segments on a plane — and
+they do not agree, so neither may appear without saying which it is.
+
+Every user-facing label therefore carries its dimension: **3D Hausdorff** for the
+mask stream, **2D Hausdorff** for the polygon stream, in Tab 5, the results
+table, the CSV export, the Report tab's prose and the consensus tab's
+inter-observer table. The metric keys are unchanged — this is naming, not schema
+— but **exported CSV headers change**, which matters to anyone parsing them.
 
 ## 9. Report tab
 
@@ -642,7 +677,7 @@ reference engine. Nothing further is needed from the supplier to start.
 
 | # | Deviation | Why |
 |---|---|---|
-| D1 | Nested `CLOSED_PLANAR` rings composed even-odd, per exporter, opt-in | Recovers 22 real ROIs and matches what both of our mask backends have always done; refusing would make the two streams disagree. Uses the supplier's own guarded parser, not a local reimplementation |
+| D1 | Nested `CLOSED_PLANAR` rings composed even-odd, unconditionally | The mask path has done this since v1 — verified on a real structure whose mask contains holes — so an opt-in could not avoid the assumption, only decide whether the two streams shared it. Uses the supplier's own guarded parser; partial overlaps still refuse |
 | D5 | Ships a `0.2.0.dev2` prototype as the default engine | Reproduces the published acceptance set exactly and agrees with the independent v0.1 to 1e-12 mm; the v0.1 engine is retained as audit reference and fallback, and the engine version is recorded on every row |
 | D6 | Builds the Linux binary ourselves rather than taking one from the supplier | Per-platform revalidation on every push is what catches an OS whose math library moves a result; the supplier is explicit the flags do not promise bitwise cross-OS equality. Accepts that the Linux binary is validated by us |
 | D7 | Separate `error_mm` for each engine | The argument names one thing and means two; one value for both costs three orders of magnitude |

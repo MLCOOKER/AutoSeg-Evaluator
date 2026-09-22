@@ -3,7 +3,7 @@
 The second of the two metric streams. Where :mod:`autoseg_evaluator.core.metrics`
 rasterises contours onto the CT lattice and measures the resulting binary masks,
 this measures the contour line segments directly: no voxels, no sampling, no
-snapping. Six metrics — APL, NAPL, Hausdorff 100 % and 95 %, mean and median
+snapping. Six metrics — APL, NAPL, 2D Hausdorff 100 % and 95 %, mean and median
 contour distance — to the definitions in Boukerroui et al. (2023) Supplement A.
 
 This module is the boundary between the application and two vendored kernels.
@@ -139,30 +139,36 @@ class PolygonMetrics:
 # ---- Reading contours ------------------------------------------------------
 
 
-def parse_structure(
-    dataset: Any,
-    roi_number: int,
-    grid: ContourGrid,
-    *,
-    allow_nested: bool = False,
-) -> ContourRegions:
+def parse_structure(dataset: Any, roi_number: int, grid: ContourGrid) -> ContourRegions:
     """Read one ROI into planar regions in the grid's frame.
 
-    ``allow_nested`` turns on composition of nested ordinary ``CLOSED_PLANAR``
-    loops as holes. It is off by default and belongs to the exporter, not to the
-    structure: DICOM documents a hole through a keyhole contour or an explicit
-    ``CLOSEDPLANAR_XOR``, so a nested plain loop has unambiguous *geometry* and
-    ambiguous *intent*. The guarded parser still refuses anything that touches,
-    crosses or partially overlaps.
+    Some exporters write a hole as a second ordinary ``CLOSED_PLANAR`` loop
+    inside the first, instead of declaring it with a keyhole contour or
+    ``CLOSEDPLANAR_XOR``. Those are composed even-odd here, without asking.
 
-    Worth knowing when deciding: this application's mask rasterisers have always
-    composed these rings even-odd. Leaving it off here makes the two streams
-    disagree about 22 of 357 structures on the reference cohort; turning it on
-    makes them agree.
+    That was an opt-in at first, on the reasoning that such a loop has
+    unambiguous *geometry* and ambiguous *intent*. The reasoning was sound and
+    the conclusion was wrong, because it ignored what the rest of this
+    application already does: **both mask rasterisers have composed these rings
+    even-odd since v1** — verified on a real structure, whose mask comes out with
+    holes in it — so every published result from this software already rests on
+    that interpretation. Making the polygon path stricter did not avoid the
+    assumption; it made 22 of 357 structures appear in one stream and vanish from
+    the other, which is a backend difference wearing the costume of a metric
+    difference.
+
+    So the interpretation is shared, and stated once, rather than offered as a
+    switch that can only ever put the two streams out of step.
+
+    What is *not* shared: rings that touch, cross or partially overlap are
+    refused here and silently combined by the mask path. Those have no single
+    reading, and refusing one is better than picking one — but it does mean a
+    structure can carry mask metrics and no polygon metrics. None were found in
+    the reference cohort.
     """
     try:
         parsed = _compat.parse_compatible(
-            dataset, int(roi_number), grid.as_parser_grid(), allow_nested=allow_nested
+            dataset, int(roi_number), grid.as_parser_grid(), allow_nested=True
         )
     except _fast_geometry.Unsupported as exc:
         raise ContoursUnavailableError(f"contours not readable: {exc}") from exc
@@ -433,9 +439,6 @@ class PolygonConfig:
 
     metrics: frozenset[str] = frozenset()
     tolerance_mm: float = 3.0
-    #: Compose nested ordinary ``CLOSED_PLANAR`` rings as holes. Per exporter,
-    #: off by default — see :func:`parse_structure`.
-    allow_nested_rings: bool = False
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> PolygonConfig:
@@ -448,7 +451,6 @@ class PolygonConfig:
         return cls(
             metrics=frozenset(chosen & set(METRIC_COLUMNS)),
             tolerance_mm=float(data.get("tolerance_mm", 3.0)),
-            allow_nested_rings=bool(data.get("allow_nested_rings", False)),
         )
 
     def any_enabled(self) -> bool:

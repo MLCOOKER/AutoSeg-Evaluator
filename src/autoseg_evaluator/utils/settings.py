@@ -58,10 +58,6 @@ _DEFAULTS: dict[str, Any] = {
             "median": False,
         },
         "tolerance_mm": 3.0,
-        # Compose nested ordinary CLOSED_PLANAR rings as holes. Applies to every
-        # source, so it stays off until the interpretation has been confirmed
-        # against the exporting system.
-        "allow_nested_rings": False,
     },
     "custom_source_labels": {},  # keyed by SOP Instance UID
     # Source labels designated as manual observers for the Build Consensus GT

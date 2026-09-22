@@ -81,13 +81,13 @@ _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "hausdorff100",
-        "Hausdorff (100%)",
+        "3D Hausdorff (100%)",
         "Maximum closest-point surface distance between GT and test, "
         "symmetric (mm). Very sensitive to single outlier voxels.",
     ),
     (
         "hausdorff95",
-        "Hausdorff (95%)",
+        "3D Hausdorff (95%)",
         "95th-percentile of the closest-point surface distances (mm). "
         "Robust to isolated outliers; the standard reporting form.",
     ),
@@ -187,13 +187,13 @@ _POLYGON_METRICS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "hd100",
-        "Hausdorff (100%)",
+        "2D Hausdorff (100%)",
         "Largest distance from either contour to the other, measured "
         "continuously along the segments rather than at vertices (mm).",
     ),
     (
         "hd95",
-        "Hausdorff (95%)",
+        "2D Hausdorff (95%)",
         "95th percentile of contour-to-contour distance, weighted by arc "
         "length rather than by vertex count (mm).",
     ),
@@ -259,7 +259,6 @@ class ComputeTab(QWidget):
             "polygon": {
                 "metrics": {key: cb.isChecked() for key, cb in self._poly_checks.items()},
                 "tolerance_mm": float(self._poly_tau_spin.value()),
-                "allow_nested_rings": self._poly_nested_check.isChecked(),
             },
             "dvh": {
                 "include_dmean": self._dose_checks["dmean"].isChecked(),
@@ -406,19 +405,6 @@ class ComputeTab(QWidget):
         self._poly_tau_spin.valueChanged.connect(self._emit_config_changed)
         tol_form.addRow("APL tolerance τ:", self._poly_tau_spin)
         layout.addLayout(tol_form)
-
-        self._poly_nested_check = QCheckBox("Treat nested contours as holes", box)
-        self._poly_nested_check.setToolTip(
-            "Some exporters write a hole as a second closed contour inside the "
-            "first, rather than declaring it. Off, those structures are refused "
-            "rather than guessed — the geometry is unambiguous but the intent is "
-            "not. On, they are composed the way this application's mask "
-            "rasterisers have always composed them, which makes the two streams "
-            "agree.\n\nApplies to every source. Confirm the interpretation "
-            "against the exporting system before relying on it."
-        )
-        self._poly_nested_check.toggled.connect(self._emit_config_changed)
-        layout.addWidget(self._poly_nested_check)
 
         self._poly_engine_label = QLabel(_polygon_engine_note(), box)
         self._poly_engine_label.setWordWrap(True)
@@ -630,9 +616,6 @@ class ComputeTab(QWidget):
         self._poly_tau_spin.blockSignals(True)
         self._poly_tau_spin.setValue(float(stored_poly.get("tolerance_mm", 3.0)))
         self._poly_tau_spin.blockSignals(False)
-        self._poly_nested_check.blockSignals(True)
-        self._poly_nested_check.setChecked(bool(stored_poly.get("allow_nested_rings", False)))
-        self._poly_nested_check.blockSignals(False)
 
         # Tolerances
         tol = (self._settings.get("tolerances") or {}) if self._settings else {}

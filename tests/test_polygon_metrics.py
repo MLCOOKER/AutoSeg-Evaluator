@@ -143,30 +143,36 @@ def test_a_structure_with_no_contour_sequence_is_a_reason_not_a_crash(grid):
         parse_structure(dataset, 1, grid)
 
 
-def test_nested_rings_are_refused_until_the_interpretation_is_asked_for(grid):
-    """A ring inside a ring is unambiguous geometry and ambiguous intent.
+def test_a_ring_inside_a_ring_is_a_hole(grid):
+    """Composed without asking, because the mask path already composes them.
 
-    DICOM says "hole" with a keyhole contour or an explicit XOR. A nested plain
-    loop says only that one ring contains another, so composing it is a claim
-    about the exporter, and claims are opted into.
+    Such a loop has unambiguous geometry and ambiguous intent, which was the
+    original argument for making it an opt-in. That argument ignored the rest of
+    the application: both mask rasterisers have read these as holes since v1, so
+    every published result already rests on the interpretation. An opt-in could
+    not avoid the assumption — it could only put the two streams out of step.
     """
     dataset = _rtss({3: [_square(0, 0, 40), _square(10, 10, 10)]})
 
-    with pytest.raises(ContoursUnavailableError, match="Ambiguous overlapping"):
-        parse_structure(dataset, 1, grid)
+    composed = parse_structure(dataset, 1, grid)
 
-    composed = parse_structure(dataset, 1, grid, allow_nested=True)
     assert composed.nested_planes == 1
-    # 40x40 outer less the 10x10 ring that sits wholly inside it.
+    # 40x40 outer, less the 10x10 ring sitting wholly inside it.
     assert composed.planes[3].area == pytest.approx(1600.0 - 100.0)
 
 
-def test_partially_overlapping_rings_stay_refused_even_when_nesting_is_allowed(grid):
-    """The opt-in covers containment only; a partial overlap has no reading."""
+def test_partially_overlapping_rings_are_still_refused(grid):
+    """Containment has one reading; a partial overlap has none.
+
+    This is the one place the two streams genuinely diverge: the mask path
+    combines these silently, and here the structure is refused. Refusing beats
+    guessing, and it means a structure can carry mask metrics and no polygon
+    metrics — none did in the reference cohort.
+    """
     dataset = _rtss({3: [_square(0, 0, 20), _square(10, 10, 20)]})
 
     with pytest.raises(ContoursUnavailableError):
-        parse_structure(dataset, 1, grid, allow_nested=True)
+        parse_structure(dataset, 1, grid)
 
 
 def test_an_explicit_xor_needs_no_opt_in(grid):

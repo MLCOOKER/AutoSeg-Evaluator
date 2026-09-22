@@ -98,8 +98,8 @@ _METRIC_LABELS: dict[str, str] = {
     "dice": "Dice",
     "surface_dice": "Surface Dice",
     # Surface distances
-    "hausdorff100": "Hausdorff 100% (mm)",
-    "hausdorff95": "Hausdorff 95% (mm)",
+    "hausdorff100": "3D Hausdorff 100% (mm)",
+    "hausdorff95": "3D Hausdorff 95% (mm)",
     "mean_surface_distance": "Mean Surface Distance (mm)",
     # Added Path Length
     "apl_mean": "Mean APL (mm)",

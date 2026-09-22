@@ -367,7 +367,7 @@ def test_metric_names_become_prose():
     from autoseg_evaluator.core.readable import readable_metric
 
     assert readable_metric("surface_dice") == "Surface Dice"
-    assert readable_metric("hausdorff95") == "Hausdorff 95%"
+    assert readable_metric("hausdorff95") == "3D Hausdorff 95%"
     assert readable_metric("mean_surface_distance") == "Mean surface distance"
     assert readable_metric("dice") == "Dice"
     assert readable_metric("something_odd") == "Something odd"
@@ -377,7 +377,7 @@ def test_units_are_separated_from_the_name():
     """The name belongs in the title and the unit on the axis."""
     from autoseg_evaluator.core.readable import metric_units, readable_metric
 
-    assert readable_metric("hausdorff95") == "Hausdorff 95%"  # no "(mm)"
+    assert readable_metric("hausdorff95") == "3D Hausdorff 95%"  # no "(mm)"
     assert metric_units("hausdorff95") == "mm"
     assert metric_units("dice") == ""
     assert metric_units("dmean_gy") == "Gy"

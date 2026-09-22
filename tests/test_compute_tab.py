@@ -268,7 +268,6 @@ def test_the_polygon_block_reaches_the_config(qapp):
     assert polygon["metrics"]["apl"] is True
     assert polygon["metrics"]["median"] is False
     assert polygon["tolerance_mm"] == 2.5
-    assert polygon["allow_nested_rings"] is False
     tab.deleteLater()
 
 
@@ -314,7 +313,6 @@ def test_the_selection_survives_a_restart(qapp):
             "compute_polygon": {
                 "metrics": {"hd95": True, "median": True},
                 "tolerance_mm": 5.0,
-                "allow_nested_rings": True,
             }
         }
     )
@@ -322,7 +320,6 @@ def test_the_selection_survives_a_restart(qapp):
     config = PolygonConfig.from_dict(tab.config()["polygon"])
     assert config.metrics == {"hd95", "median"}
     assert config.tolerance_mm == 5.0
-    assert config.allow_nested_rings is True
     tab.deleteLater()
 
 

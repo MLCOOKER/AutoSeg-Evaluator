@@ -22,8 +22,8 @@ import re
 METRIC_PROSE: dict[str, str] = {
     "dice": "Dice",
     "surface_dice": "Surface Dice",
-    "hausdorff95": "Hausdorff 95%",
-    "hausdorff100": "Hausdorff (maximum)",
+    "hausdorff95": "3D Hausdorff 95%",
+    "hausdorff100": "3D Hausdorff (maximum)",
     "mean_surface_distance": "Mean surface distance",
     "apl_mean": "Mean added path length",
     "apl_total": "Total added path length",

@@ -2080,8 +2080,8 @@ class _InterObserverSettingsDialog(QDialog):
         labels = {
             "dice": "Dice",
             "surface_dice": "Surface Dice (uses τ below)",
-            "hausdorff100": "Hausdorff 100%",
-            "hausdorff95": "Hausdorff 95%",
+            "hausdorff100": "3D Hausdorff 100%",
+            "hausdorff95": "3D Hausdorff 95%",
             "mean_surface_distance": "Mean Surface Distance",
             "apl_mean": "Mean APL (uses τ below)",
             "apl_total": "Total APL (uses τ below)",

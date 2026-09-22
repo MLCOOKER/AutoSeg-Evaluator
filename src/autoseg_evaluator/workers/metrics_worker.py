@@ -577,12 +577,7 @@ class MetricsWorker(QObject):
         if key in self._polygon_cache:
             return self._polygon_cache[key]
         try:
-            regions = parse_structure(
-                dataset,
-                roi_number,
-                grid,
-                allow_nested=self._polygon_config.allow_nested_rings,
-            )
+            regions = parse_structure(dataset, roi_number, grid)
             if regions.empty:
                 prepared = "undefined: this structure has no contours on any plane"
             else:
