@@ -6,12 +6,12 @@ RTSTRUCT stores, with no rasterisation anywhere in the path.
 Written before the code, so the decisions and every deliberate deviation from
 the supplied reference are reviewable rather than discovered later.
 
-**Status: phases 1–4 landed 2026-09-22.** Both engines are vendored, the adapter
+**Status: phases 1–5 landed 2026-09-22.** Both engines are vendored, the adapter
 reads real RTSTRUCTs and measures them, every acceptance layer passes —
 including the published archives driven from DICOM through our own grid builder
 and parser — and the worker computes the metrics in a run, verified on the real
-multi-vendor sample cohort. No tab has changed yet, so nothing is selectable
-from the interface. Phases 5–7 below are still to do.
+multi-vendor sample cohort, and Tab 5 offers them. Phases 6–7 below remain: the
+columns are dynamic rather than declared, and mask APL is untouched.
 
 **Revision 3, 2026-09-20.** Updated for `0.2.0.dev2`, which answers the
 portability review: a platform-aware loader, explicit floating-point build
@@ -499,11 +499,21 @@ reads as two ways of measuring rather than two lists of names:
   set. The engine in use is shown, not chosen, unless the environment override is
   set.
 
-Polygon metrics can now default **on**: at ~37 ms per pair they are no longer the
-expensive option they were under v0.1.
+Plus the nested-ring opt-in from D1, with its warning that the interpretation
+applies to every source and should be confirmed against the exporting system.
 
-Session schema **v6 → v7** adds the polygon selections and the τ list. Older
-sessions load unchanged. There is no `error_mm` to persist.
+**Default off**, against this section's earlier "can now default on". Cost is no
+longer the argument — a pair is milliseconds — but this is a second way of
+measuring the same structures rather than a refinement of the first, and it adds
+up to eleven columns. An install should start producing them because someone
+asked, not because it was upgraded.
+
+**No session change.** This spec previously said v6 → v7; that was wrong. Metric
+selections have never lived in the session file, which carries matching state —
+drawers, rules, template, organ assignments. They live in the application
+settings alongside `compute_geometric`, `tolerances` and `dvh`, and the polygon
+stream adds `compute_polygon` beside them. Settings carry no schema version and
+an absent key reads as its default, so an existing install upgrades silently.
 
 ---
 
@@ -614,7 +624,7 @@ an ROI compared against five sources should be prepared once.
 | 2 | ✅ **Done.** `contour_grid.py`, `polygon_metrics.py`, engine selection + fallback, 30 tests | none |
 | 3 | ✅ **Done.** Four acceptance layers, differential, `docs/POLYGON_VALIDATION_REPORT.md` | none |
 | 4 | ✅ **Done.** Worker integration, availability, caching, 8 tests | metrics computed |
-| 5 | Tab 5 split, session v7 | metrics selectable |
+| 5 | ✅ **Done.** Tab 5 split, settings round-trip, 6 tests | metrics selectable |
 | 6 | Results columns, sidecar, Report tab families | metrics reportable |
 | 7 | *(separate, per D3)* mask APL removed, docs rewritten | numbers move |
 
