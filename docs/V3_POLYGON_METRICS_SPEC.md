@@ -6,7 +6,7 @@ RTSTRUCT stores, with no rasterisation anywhere in the path.
 Written before the code, so the decisions and every deliberate deviation from
 the supplied reference are reviewable rather than discovered later.
 
-**Status: phase 1 landed 2026-09-22.** Both engines are vendored and their suites run in CI; nothing is wired to the application yet. Phases 2-7 below are still to do.
+**Status: phases 1-2 landed 2026-09-22.** Both engines are vendored, and the adapter reads real RTSTRUCTs and measures them. Nothing is wired to the application yet - no metric is computed in a run, no tab has changed. Phases 3-7 below are still to do.
 
 **Revision 3, 2026-09-20.** Updated for `0.2.0.dev2`, which answers the
 portability review: a platform-aware loader, explicit floating-point build
@@ -209,6 +209,29 @@ session-key migration together.
 ### D4 — Tab 5 puts the two geometry methods side by side
 
 Two rows: 3D mask and 2D contour as equal columns, DVH full width beneath.
+
+### D7 — The two engines get separate precision settings
+
+Both kernels take an argument called `error_mm` and it does not mean the same
+thing in either one. Passing the same value to both — which this integration did
+at first — costs three orders of magnitude.
+
+In the compiled engine it is only the width at which a quantile sitting on a
+rounding-sensitive gap is refused rather than resolved arbitrarily. Measured
+from 0.001 to 0.5 it changes neither cost nor result by a single bit, so the
+strictest setting is free: **`QUANTILE_GUARD_MM = 0.001`**.
+
+In the reference engine it is the *sampling step*, and cost is inversely
+proportional to it. At 0.001 a single real parotid pair took **29.7 seconds**
+against the compiled engine's 34 ms, and a brain-sized structure exhausts the
+two-million-sample budget outright. **`REFERENCE_SAMPLING_MM = 0.02`** brings
+that pair to 1.94 s while holding the discretisation interval to ±0.02 mm —
+still an order of magnitude finer than the voxel the mask metrics are quantised
+to. Measured against the compiled engine on that same parotid: HD100 exact, mean
+within 1.6e-6 mm, median within 1.3e-4 mm, APL within 2.8e-14 mm.
+
+The engine and its settings are recorded with every result, because a number
+that cannot be traced to the precision it was measured at cannot be reproduced.
 
 ### D5 — Two engines ship; the compiled one is the default
 
@@ -553,7 +576,7 @@ an ROI compared against five sources should be prepared once.
 | Phase | Lands | Behaviour change |
 |---|---|---|
 | 1 | ✅ **Done.** Both engines vendored, integrity tests, 105 supplier tests, acceptance wrapper, CI Linux build step, `shapely` declared | none |
-| 2 | `contour_grid.py`, `polygon_metrics.py`, engine selection + fallback, tests | none |
+| 2 | ✅ **Done.** `contour_grid.py`, `polygon_metrics.py`, engine selection + fallback, 30 tests | none |
 | 3 | Differential and end-to-end acceptance, `docs/POLYGON_VALIDATION_REPORT.md` | none |
 | 4 | Worker integration, availability, `prepare()` caching | metrics computed |
 | 5 | Tab 5 split, session v7 | metrics selectable |
@@ -577,6 +600,7 @@ reference engine. Nothing further is needed from the supplier to start.
 | D1 | Nested `CLOSED_PLANAR` rings composed even-odd, per exporter, opt-in | Recovers 22 real ROIs and matches what both of our mask backends have always done; refusing would make the two streams disagree. Uses the supplier's own guarded parser, not a local reimplementation |
 | D5 | Ships a `0.2.0.dev2` prototype as the default engine | Reproduces the published acceptance set exactly and agrees with the independent v0.1 to 1e-12 mm; the v0.1 engine is retained as audit reference and fallback, and the engine version is recorded on every row |
 | D6 | Builds the Linux binary ourselves rather than taking one from the supplier | Per-platform revalidation on every push is what catches an OS whose math library moves a result; the supplier is explicit the flags do not promise bitwise cross-OS equality. Accepts that the Linux binary is validated by us |
+| D7 | Separate `error_mm` for each engine | The argument names one thing and means two; one value for both costs three orders of magnitude |
 | — | Shapely 2.0.6 rather than 2.1.2 | Permitted by both packages' ranges; 56/56 and 49/49 tests plus the full 150-pair suite and 44 stress cases verified on ours |
 | ~~D2~~ | ~~`error_mm` 0.05~~ | Withdrawn in revision 2 — the setting no longer affects cost or value |
 
