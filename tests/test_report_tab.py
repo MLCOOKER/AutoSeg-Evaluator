@@ -1198,7 +1198,7 @@ def test_the_metric_selector_groups_geometric_and_dosimetric(dose_tab):
     combo = dose_tab._metric_combo
     entries = [(combo.itemText(i), combo.model().item(i).isEnabled()) for i in range(combo.count())]
     assert entries == [
-        ("— Geometric —", False),
+        ("— 3D mask —", False),
         ("dice", True),
         ("hausdorff95", True),
         ("— Dosimetric —", False),

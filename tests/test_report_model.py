@@ -550,20 +550,20 @@ def test_the_axis_nouns_are_usable_for_prose():
 @pytest.mark.parametrize(
     ("metric", "expected"),
     [
-        ("dice", "Geometric"),
-        ("surface_dice", "Geometric"),
-        ("hausdorff95", "Geometric"),
-        ("volume_diff_cc", "Geometric"),
-        ("com_offset_mm", "Geometric"),
-        ("precision", "Geometric"),
+        ("dice", "3D mask"),
+        ("surface_dice", "3D mask"),
+        ("hausdorff95", "3D mask"),
+        ("volume_diff_cc", "3D mask"),
+        ("com_offset_mm", "3D mask"),
+        ("precision", "3D mask"),
         ("dmin_gy", "Dosimetric"),
         ("dmean_gy", "Dosimetric"),
         ("D95_gy", "Dosimetric"),
         ("V20gy_cc", "Dosimetric"),
         ("V40Gy_pct", "Dosimetric"),
         # Per-vendor agreement with the consensus, so comparable like Dice.
-        ("staple_sensitivity", "Geometric"),
-        ("staple_specificity", "Geometric"),
+        ("staple_sensitivity", "3D mask"),
+        ("staple_specificity", "3D mask"),
         # Properties of how the consensus was built, one per organ.
         ("mean_entropy", "Consensus"),
         ("n_raters", "Consensus"),
@@ -583,14 +583,14 @@ def test_metrics_are_grouped_for_the_selector():
     ]
     model = build_report_model(rows)
     assert model.metrics_by_family() == [
-        ("Geometric", ["dice", "hausdorff95"]),
+        ("3D mask", ["dice", "hausdorff95"]),
         ("Dosimetric", ["dmean_gy"]),
     ]
 
 
 def test_a_cohort_with_no_dose_offers_no_dose_group():
     model = build_report_model([_row("P1", "Parotid (L)", "VendorA", {"dice": 0.8})])
-    assert model.metrics_by_family() == [("Geometric", ["dice"])]
+    assert model.metrics_by_family() == [("3D mask", ["dice"])]
 
 
 # ---- A consensus is a ground truth, not a contaminant ----------------------

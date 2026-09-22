@@ -67,7 +67,8 @@ from autoseg_evaluator.core.statistics import (
 
 # ---- Metric families ------------------------------------------------------
 
-FAMILY_GEOMETRIC = "Geometric"
+FAMILY_GEOMETRIC = "3D mask"
+FAMILY_POLYGON = "2D contour"
 FAMILY_DOSIMETRIC = "Dosimetric"
 FAMILY_OTHER = "Other"
 FAMILY_STAPLE = "Consensus"
@@ -169,9 +170,20 @@ def metric_family(metric: str) -> str:
     Geometric and dosimetric metrics answer different questions and are not
     comparable, so grouping them is not decoration: a reader scanning one list
     can otherwise slide from Dice to D95 without noticing the change of subject.
+
+    The two geometry families exist for a sharper version of the same problem.
+    Both report a Hausdorff 95%, measured on the same structures, and the two
+    do not agree — one is a distance between rasterised surfaces quantised to
+    the voxel lattice, the other a continuous distance between contour segments
+    on shared planes. Sliding between them is easier than sliding from Dice to
+    D95, and the consequence is worse: the numbers look comparable.
     """
     name = str(metric).strip()
     lower = name.lower()
+    # Checked first: several polygon keys would otherwise be swallowed by the
+    # geometric set or by the dose suffix rules.
+    if lower.startswith("poly_"):
+        return FAMILY_POLYGON
     if lower in GEOMETRIC_METRICS:
         return FAMILY_GEOMETRIC
     if lower in STAPLE_METRICS or lower.startswith("staple_"):
@@ -182,7 +194,12 @@ def metric_family(metric: str) -> str:
 
 
 #: Selector order. Consensus is absent because it never reaches the report.
-FAMILY_ORDER: tuple[str, ...] = (FAMILY_GEOMETRIC, FAMILY_DOSIMETRIC, FAMILY_OTHER)
+FAMILY_ORDER: tuple[str, ...] = (
+    FAMILY_GEOMETRIC,
+    FAMILY_POLYGON,
+    FAMILY_DOSIMETRIC,
+    FAMILY_OTHER,
+)
 
 
 # ---- Metric direction -----------------------------------------------------
@@ -890,6 +907,7 @@ __all__ = [
     "FAMILY_GEOMETRIC",
     "FAMILY_ORDER",
     "FAMILY_OTHER",
+    "FAMILY_POLYGON",
     "FAMILY_STAPLE",
     "GEOMETRIC_METRICS",
     "HIGHER_IS_BETTER",

@@ -6,12 +6,12 @@ RTSTRUCT stores, with no rasterisation anywhere in the path.
 Written before the code, so the decisions and every deliberate deviation from
 the supplied reference are reviewable rather than discovered later.
 
-**Status: phases 1–5 landed 2026-09-22.** Both engines are vendored, the adapter
+**Status: phases 1–6 landed 2026-09-22.** Both engines are vendored, the adapter
 reads real RTSTRUCTs and measures them, every acceptance layer passes —
 including the published archives driven from DICOM through our own grid builder
 and parser — and the worker computes the metrics in a run, verified on the real
-multi-vendor sample cohort, and Tab 5 offers them. Phases 6–7 below remain: the
-columns are dynamic rather than declared, and mask APL is untouched.
+multi-vendor sample cohort, Tab 5 offers them, and the results table, Report tab
+and audit sidecar all carry them. Phase 7 remains: mask APL is untouched.
 
 **Revision 3, 2026-09-20.** Updated for `0.2.0.dev2`, which answers the
 portability review: a platform-aware loader, explicit floating-point build
@@ -505,7 +505,18 @@ Every row also records the engine name and version, the tolerances and the plane
 policy, per both suppliers' requirement that numerical settings travel with the
 numbers.
 
-*Open:* whether the sidecar is written automatically beside the CSV or on request.
+**Settled:** the sidecar is written automatically beside the CSV whenever the
+run kept the detail, and is silently absent otherwise. Prompting at export would
+ask about something already decided — the detail is produced while metrics are
+computed and cannot be recovered from a finished table — so the decision lives on
+Tab 5 as *Record audit detail*, off by default.
+
+**It covers both streams.** The mask stream turned out to have as much to say as
+the polygon stream: `compute_surface_distances` already returns both directions
+with per-surfel areas and the aggregator discards one, and neither the rasteriser
+backend nor the voxel spacing leaves the application in any export today —
+although switching the backend moves every mask-derived number. So each record
+carries a `mask` block and a `polygon` block, about 4 KB per comparison.
 
 ---
 
@@ -660,7 +671,7 @@ an ROI compared against five sources should be prepared once.
 | 3 | ✅ **Done.** Four acceptance layers, differential, `docs/POLYGON_VALIDATION_REPORT.md` | none |
 | 4 | ✅ **Done.** Worker integration, availability, caching, 8 tests | metrics computed |
 | 5 | ✅ **Done.** Tab 5 split, settings round-trip, 6 tests | metrics selectable |
-| 6 | Results columns, sidecar, Report tab families | metrics reportable |
+| 6 | ✅ **Done.** Declared columns, `2D`/`3D` naming, Report families, definitions dialog, optional two-stream sidecar | metrics reportable |
 | 7 | *(separate, per D3)* mask APL removed, docs rewritten | numbers move |
 
 Phases 1–3 change nothing a user can see, deliberately: the numerical path is

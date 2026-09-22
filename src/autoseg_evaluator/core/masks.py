@@ -376,6 +376,16 @@ def gt_z_extent_mm(gt_mask: sitk.Image) -> tuple[float, float] | None:
     return lo - half, hi + half
 
 
+def default_rasteriser_name() -> str:
+    """Which rasteriser backend is active for this process.
+
+    Read through a function rather than imported as a value: the backend is
+    reassigned by ``set_default_rasteriser`` and by the environment, so a caller
+    holding the name from import time would report the wrong one.
+    """
+    return str(_default_rasteriser)
+
+
 def find_reference_image_folder(library, patient_id: str, rtstruct_sop_uid: str) -> str | None:
     """Locate the folder containing the CT/MR/PT series referenced by an RTSTRUCT.
 

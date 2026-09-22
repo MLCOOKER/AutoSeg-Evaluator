@@ -58,6 +58,22 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
     # Added Path Length
     "apl_mean",
     "apl_total",
+    # 2D contour metrics, measured on the RTSTRUCT polygons rather than on a
+    # rasterised mask. Kept together and after the mask block, because the two
+    # streams answer the same question by different means and a reader has to be
+    # able to see which is which at a glance.
+    "poly_apl_mm",
+    "poly_napl",
+    "poly_apl_reverse_mm",
+    "poly_napl_reverse",
+    "poly_hd100_mm",
+    "poly_hd95_mm",
+    "poly_mean_distance_mm",
+    "poly_median_distance_mm",
+    "poly_planes_joint",
+    "poly_planes_gt_only",
+    "poly_planes_test_only",
+    "poly_status",
     # Volume + centre-of-mass
     "volume_gt_cc",
     "volume_test_cc",
@@ -104,6 +120,21 @@ _METRIC_LABELS: dict[str, str] = {
     # Added Path Length
     "apl_mean": "Mean APL (mm)",
     "apl_total": "Total APL (mm)",
+    # 2D contour metrics. Every one says "2D" because the mask stream reports
+    # metrics with the same names, and in a table there is no group heading
+    # between them.
+    "poly_apl_mm": "2D APL (mm)",
+    "poly_napl": "2D NAPL",
+    "poly_apl_reverse_mm": "2D APL reverse (mm)",
+    "poly_napl_reverse": "2D NAPL reverse",
+    "poly_hd100_mm": "2D Hausdorff 100% (mm)",
+    "poly_hd95_mm": "2D Hausdorff 95% (mm)",
+    "poly_mean_distance_mm": "2D Mean Contour Distance (mm)",
+    "poly_median_distance_mm": "2D Median Contour Distance (mm)",
+    "poly_planes_joint": "2D planes compared",
+    "poly_planes_gt_only": "2D planes GT only",
+    "poly_planes_test_only": "2D planes test only",
+    "poly_status": "2D status",
     # Volume + centre-of-mass
     "volume_gt_cc": "Volume GT (cc)",
     "volume_test_cc": "Volume Test (cc)",
@@ -134,11 +165,19 @@ _METRIC_LABELS: dict[str, str] = {
 }
 
 
+#: Polygon columns whose value depends on the tolerance they were computed at.
+#: The distance metrics do not use it, so decorating them would imply otherwise.
+_POLYGON_TOLERANCE_KEYS = frozenset(
+    {"poly_apl_mm", "poly_napl", "poly_apl_reverse_mm", "poly_napl_reverse"}
+)
+
+
 def metric_display_label(
     key: str,
     *,
     sd_tau_mm: float | None = None,
     apl_tau_mm: float | None = None,
+    poly_tau_mm: float | None = None,
 ) -> str:
     """Return the user-facing column header for a metric key (with units).
 
@@ -156,7 +195,9 @@ def metric_display_label(
     base metric's label suffixed with ``Δ vs GT`` (the value is test − GT).
     """
     if key.endswith("_diff"):
-        base = metric_display_label(key[:-5], sd_tau_mm=sd_tau_mm, apl_tau_mm=apl_tau_mm)
+        base = metric_display_label(
+            key[:-5], sd_tau_mm=sd_tau_mm, apl_tau_mm=apl_tau_mm, poly_tau_mm=poly_tau_mm
+        )
         return f"{base} Δ vs GT"
     if key == "surface_dice" and sd_tau_mm is not None:
         return f"Surface Dice @ {sd_tau_mm:.2f} mm"
@@ -164,6 +205,11 @@ def metric_display_label(
         return f"Mean APL @ {apl_tau_mm:.2f} mm"
     if key == "apl_total" and apl_tau_mm is not None:
         return f"Total APL @ {apl_tau_mm:.2f} mm"
+    # The polygon stream keeps its own tolerance, so it is decorated with that
+    # one and not with the mask stream's. Two columns both headed "APL" at
+    # different tolerances would be worse than no decoration at all.
+    if key in _POLYGON_TOLERANCE_KEYS and poly_tau_mm is not None:
+        return f"{_METRIC_LABELS[key]} @ {poly_tau_mm:.2f} mm"
     if key in _METRIC_LABELS:
         return _METRIC_LABELS[key]
     # Qualitative (Likert) columns: a score per rater + assessed / blinded flags.
@@ -264,6 +310,7 @@ class ResultsManager:
         # at different tolerances can't be silently merged in Excel.
         self._sd_tau_mm: float | None = None
         self._apl_tau_mm: float | None = None
+        self._poly_tau_mm: float | None = None
         # ``{roi_name: OrganAssignment}``. Applied at read time rather than
         # baked into rows when they are computed, so changing an organ
         # assignment in the review dialog re-labels existing results instead of
@@ -299,7 +346,12 @@ class ResultsManager:
         row["organ_qualifier"] = found.key.qualifier
         row["organ_tier"] = found.tier
 
-    def set_tolerances(self, sd_tau_mm: float | None, apl_tau_mm: float | None) -> None:
+    def set_tolerances(
+        self,
+        sd_tau_mm: float | None,
+        apl_tau_mm: float | None,
+        poly_tau_mm: float | None = None,
+    ) -> None:
         """Record the τ values active for the *next* batch of rows added.
 
         Called by MainWindow when a Compute run starts. The values are
@@ -309,9 +361,10 @@ class ResultsManager:
         """
         self._sd_tau_mm = sd_tau_mm
         self._apl_tau_mm = apl_tau_mm
+        self._poly_tau_mm = poly_tau_mm
 
-    def tolerances(self) -> tuple[float | None, float | None]:
-        return (self._sd_tau_mm, self._apl_tau_mm)
+    def tolerances(self) -> tuple[float | None, float | None, float | None]:
+        return (self._sd_tau_mm, self._apl_tau_mm, self._poly_tau_mm)
 
     def add_row(self, row: dict[str, Any]) -> None:
         self._rows.append(dict(row))
@@ -432,6 +485,7 @@ class ResultsManager:
         # Tolerances are batch-scoped — drop them when the batch is cleared.
         self._sd_tau_mm = None
         self._apl_tau_mm = None
+        self._poly_tau_mm = None
 
     def rows(self) -> list[dict[str, Any]]:
         """Snapshot of all rows, with qualitative scores overlaid.
@@ -510,7 +564,12 @@ class ResultsManager:
         meta_keys = [k for k, _label in META_COLUMNS]
         meta_labels = [label for _k, label in META_COLUMNS]
         headers = meta_labels + [
-            metric_display_label(k, sd_tau_mm=self._sd_tau_mm, apl_tau_mm=self._apl_tau_mm)
+            metric_display_label(
+                k,
+                sd_tau_mm=self._sd_tau_mm,
+                apl_tau_mm=self._apl_tau_mm,
+                poly_tau_mm=self._poly_tau_mm,
+            )
             for k in metrics
         ]
 

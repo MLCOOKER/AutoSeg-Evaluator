@@ -30,8 +30,9 @@ from autoseg_evaluator.core.masks import (
     read_rtstruct,
     truncate_to_gt_z_extent,
 )
-from autoseg_evaluator.core.metrics import compute_geometric_metrics
+from autoseg_evaluator.core.metrics import compute_geometric_metrics, mask_audit_detail
 from autoseg_evaluator.core.polygon_metrics import (
+    MISSING_PLANE_POLICY,
     STATUS_NO_CONTOURS,
     ContoursUnavailableError,
     PolygonConfig,
@@ -93,6 +94,9 @@ class MetricsWorker(QObject):
         self._dvh_config = DVHConfig.from_dict(self._config.get("dvh", {}) or {})
         self._staple_config = StapleConfig.from_dict(self._config.get("staple", {}) or {})
         self._polygon_config = PolygonConfig.from_dict(self._config.get("polygon", {}))
+        # Audit detail cannot be reconstructed from a finished table, so whether
+        # to keep it is decided before computing rather than at export time.
+        self._audit = bool((self._config.get("audit") or {}).get("sidecar", False))
         # Resolved once on first use, then reused: selection reads an
         # environment variable and probes for a compiled library, and doing that
         # per ROI pair would be noise in a profile and noise in a log.
@@ -115,6 +119,11 @@ class MetricsWorker(QObject):
         # cannot yield a grid will not yield one on the next attempt either.
         self._grid_cache: dict[tuple[str, str], Any] = {}
         self._polygon_cache: dict[tuple[str, str, int], Any] = {}
+        # How many planes of each structure needed nested-ring composition, for
+        # the audit record: a structure whose topology was interpreted rather
+        # than declared is worth being able to find later.
+        self._nested_planes: dict[tuple[str, str, int], int] = {}
+        self._pending_polygon_audit: dict[str, Any] | None = None
         self._dose_cache: dict[tuple[str, str], Any] = {}
         # STAPLE summary scalars captured while synthesising a multi-observer
         # consensus GT (Tab 2), keyed by (patient_id, synthetic_sop, roi_number).
@@ -516,9 +525,15 @@ class MetricsWorker(QObject):
             # same pair, so a failure here leaves the mask metrics standing and
             # lands in its own status column instead of the row's error.
             if self._polygon_config.any_enabled():
+                self._pending_polygon_audit = None
                 values, status = self._polygon_metrics(group, record)
                 row["metrics"].update(values)
                 row["metrics"]["poly_status"] = status
+                if self._audit and self._pending_polygon_audit is not None:
+                    row.setdefault("audit", {})["polygon"] = self._pending_polygon_audit
+            if self._audit:
+                # Kept off row["metrics"], so it never becomes a column.
+                row.setdefault("audit", {})["mask"] = mask_audit_detail(gt_mask, record["mask"])
             # Per-DVH-metric difference from the GT (test − GT), so the table
             # carries both absolutes and the deviation from the reference.
             if gt_dvh:
@@ -582,6 +597,7 @@ class MetricsWorker(QObject):
                 prepared = "undefined: this structure has no contours on any plane"
             else:
                 prepared = self._polygon_engine_for_run().prepare(regions)
+                self._nested_planes[key] = int(regions.nested_planes)
         except ContoursUnavailableError as exc:
             prepared = f"unavailable: {exc}"
         except Exception as exc:  # noqa: BLE001 — becomes a per-row status
@@ -608,24 +624,30 @@ class MetricsWorker(QObject):
 
         test = record["meta"]
         gt_rtss = self._load_rtstruct(group["patient_id"], group["gt_sop"])
-        reference = self._polygon_structure(
-            group["patient_id"], group["gt_sop"], group["gt_roi_number"], gt_rtss, grid
-        )
+        reference_key = (group["patient_id"], group["gt_sop"], group["gt_roi_number"])
+        reference = self._polygon_structure(*reference_key, gt_rtss, grid)
         if isinstance(reference, str):
             return {}, reference
-        candidate = self._polygon_structure(
-            group["patient_id"],
-            test["rtstruct_sop_uid"],
-            test["roi_number"],
-            record["rtss"],
-            grid,
-        )
+        reference_nested = self._nested_planes.get(reference_key, 0)
+        candidate_key = (group["patient_id"], test["rtstruct_sop_uid"], test["roi_number"])
+        candidate = self._polygon_structure(*candidate_key, record["rtss"], grid)
         if isinstance(candidate, str):
             return {}, candidate
+        candidate_nested = self._nested_planes.get(candidate_key, 0)
 
         result = engine.compare(
             reference, candidate, tolerance_mm=self._polygon_config.tolerance_mm
         )
+        if self._audit:
+            record = dict(engine.settings)
+            record["tolerance_mm"] = self._polygon_config.tolerance_mm
+            record["missing_plane_policy"] = MISSING_PLANE_POLICY
+            record["nested_planes_composed"] = reference_nested + candidate_nested
+            if result.detail:
+                record["measurements"] = result.detail
+            if result.status:
+                record["status"] = result.status
+            self._pending_polygon_audit = record
         if not result.available:
             return {}, result.status
         return self._polygon_config.select(result.values), ""

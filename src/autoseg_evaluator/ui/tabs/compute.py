@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from autoseg_evaluator.data.linkage import collect_link_issues
+from autoseg_evaluator.ui.dialogs.metric_definitions import MetricDefinitionsDialog
 from autoseg_evaluator.ui.widgets.progress_panel import ProgressPanel
 
 
@@ -268,6 +269,7 @@ class ComputeTab(QWidget):
                 "d_at_volumes_cc": _parse_number_list(self._d_cc_edit.text()),
                 "v_at_doses_gy": _parse_number_list(self._v_gy_edit.text()),
             },
+            "audit": {"sidecar": self._audit_check.isChecked()},
             "staple": {
                 "max_iterations": int(self._staple_max_iter_spin.value()),
                 "confidence_weight": float(self._staple_conf_spin.value()),
@@ -299,8 +301,30 @@ class ComputeTab(QWidget):
         # STAPLE settings (only meaningful when ≥1 drawer has STAPLE mode on)
         outer.addWidget(self._build_staple_group())
 
-        # Run button
+        # Run button, with the definitions alongside it. Placed on the action
+        # row rather than inside either metric group, because it describes both
+        # streams and the relationship between them — which is the part nobody
+        # can infer from a checkbox list.
         run_row = QHBoxLayout()
+        self._definitions_btn = QPushButton("Metric definitions…", self)
+        self._definitions_btn.setToolTip(
+            "How every metric on this tab is computed: what each is measured on, "
+            "how the two directions are combined, which contour planes take part, "
+            "and what each is quantised to."
+        )
+        self._definitions_btn.clicked.connect(self._on_definitions_clicked)
+        run_row.addWidget(self._definitions_btn)
+        self._audit_check = QCheckBox("Record audit detail", self)
+        self._audit_check.setToolTip(
+            "Keep the full detail behind every number — both directions of each "
+            "distance, what each was measured over, the rasteriser backend and "
+            "voxel size, and the polygon engine and its settings — so an export "
+            "can be accompanied by a .audit.json file.\n\nIt has to be "
+            "collected while computing and cannot be recovered from a finished "
+            "table, so this is decided before the run, not at export."
+        )
+        self._audit_check.toggled.connect(self._emit_config_changed)
+        run_row.addWidget(self._audit_check)
         run_row.addStretch(1)
         self._validation_label = QLabel("", self)
         self._validation_label.setStyleSheet("color: #d96b00;")
@@ -617,6 +641,11 @@ class ComputeTab(QWidget):
         self._poly_tau_spin.setValue(float(stored_poly.get("tolerance_mm", 3.0)))
         self._poly_tau_spin.blockSignals(False)
 
+        stored_audit = (self._settings.get("audit") or {}) if self._settings else {}
+        self._audit_check.blockSignals(True)
+        self._audit_check.setChecked(bool(stored_audit.get("sidecar", False)))
+        self._audit_check.blockSignals(False)
+
         # Tolerances
         tol = (self._settings.get("tolerances") or {}) if self._settings else {}
         self._sd_tau_spin.blockSignals(True)
@@ -680,6 +709,19 @@ class ComputeTab(QWidget):
         self.metricConfigChanged.emit(cfg)
 
     # ---- Compute button --------------------------------------------------
+
+    def _on_definitions_clicked(self) -> None:
+        """Open the metric reference, reusing the window if it is already up.
+
+        Non-modal on purpose: the point is to read a definition while changing
+        the selection it describes, which a modal dialog would prevent.
+        """
+        existing = getattr(self, "_definitions_dialog", None)
+        if existing is None:
+            self._definitions_dialog = MetricDefinitionsDialog(self)
+        self._definitions_dialog.show()
+        self._definitions_dialog.raise_()
+        self._definitions_dialog.activateWindow()
 
     def _on_compute_clicked(self) -> None:
         try:

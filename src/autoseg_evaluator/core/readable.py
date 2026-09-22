@@ -31,6 +31,14 @@ METRIC_PROSE: dict[str, str] = {
     "volume_test_cc": "Test volume",
     "volume_diff_cc": "Volume difference",
     "volume_ratio": "Volume ratio",
+    "poly_apl_mm": "2D added path length",
+    "poly_napl": "2D normalised added path length",
+    "poly_apl_reverse_mm": "2D added path length, reverse",
+    "poly_napl_reverse": "2D normalised added path length, reverse",
+    "poly_hd100_mm": "2D Hausdorff (maximum)",
+    "poly_hd95_mm": "2D Hausdorff 95%",
+    "poly_mean_distance_mm": "2D mean contour distance",
+    "poly_median_distance_mm": "2D median contour distance",
     "com_offset_mm": "Centre-of-mass offset",
     "com_dx_mm": "Centre-of-mass offset, x",
     "com_dy_mm": "Centre-of-mass offset, y",
@@ -58,6 +66,12 @@ METRIC_UNITS: dict[str, str] = {
     "volume_gt_cc": "cc",
     "volume_test_cc": "cc",
     "volume_diff_cc": "cc",
+    "poly_apl_mm": "mm",
+    "poly_apl_reverse_mm": "mm",
+    "poly_hd100_mm": "mm",
+    "poly_hd95_mm": "mm",
+    "poly_mean_distance_mm": "mm",
+    "poly_median_distance_mm": "mm",
     "dmin_gy": "Gy",
     "dmean_gy": "Gy",
     "dmax_gy": "Gy",
@@ -66,7 +80,25 @@ METRIC_UNITS: dict[str, str] = {
 #: Metrics whose value is meaningless without the tolerance they were computed
 #: at. Surface Dice at 1 mm and at 5 mm are different measurements, and two
 #: figures that do not say which cannot be compared.
-TOLERANCE_METRICS: frozenset[str] = frozenset({"surface_dice", "apl_mean", "apl_total"})
+TOLERANCE_METRICS: frozenset[str] = frozenset(
+    {
+        "surface_dice",
+        "apl_mean",
+        "apl_total",
+        # The polygon stream's added path length takes its own tolerance, which
+        # is not the mask stream's. Reporting either without saying which would
+        # make two numbers look comparable that are not.
+        "poly_apl_mm",
+        "poly_napl",
+        "poly_apl_reverse_mm",
+        "poly_napl_reverse",
+    }
+)
+
+#: Of those, the ones whose tolerance comes from the polygon stream.
+POLYGON_TOLERANCE_METRICS: frozenset[str] = frozenset(
+    {"poly_apl_mm", "poly_napl", "poly_apl_reverse_mm", "poly_napl_reverse"}
+)
 
 
 #: Metrics bounded to [0, 1] by construction. Their axis shows the whole range,
@@ -160,7 +192,10 @@ def metric_units(metric: str) -> str:
 
 
 def tolerance_note(
-    metric: str, sd_tau_mm: float | None = None, apl_tau_mm: float | None = None
+    metric: str,
+    sd_tau_mm: float | None = None,
+    apl_tau_mm: float | None = None,
+    poly_tau_mm: float | None = None,
 ) -> str:
     """``tolerance = 3.00 mm``, or empty where the metric does not take one.
 
@@ -172,7 +207,12 @@ def tolerance_note(
     key = str(metric).strip().lower()
     if key not in TOLERANCE_METRICS:
         return ""
-    tolerance = sd_tau_mm if key == "surface_dice" else apl_tau_mm
+    if key in POLYGON_TOLERANCE_METRICS:
+        tolerance = poly_tau_mm
+    elif key == "surface_dice":
+        tolerance = sd_tau_mm
+    else:
+        tolerance = apl_tau_mm
     if tolerance is None:
         return "tolerance not recorded"
     return f"tolerance = {float(tolerance):.2f} mm"
@@ -183,6 +223,7 @@ __all__ = [
     "METRIC_PROSE",
     "METRIC_UNITS",
     "NON_NEGATIVE_METRICS",
+    "POLYGON_TOLERANCE_METRICS",
     "SCALE_BOUNDED_UNIT",
     "SCALE_FREE",
     "SCALE_NON_NEGATIVE",

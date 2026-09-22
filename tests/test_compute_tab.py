@@ -330,3 +330,38 @@ def test_the_tab_says_which_engine_will_produce_the_numbers(qapp):
     note = tab._poly_engine_label.text()
     assert note.startswith("Engine")
     tab.deleteLater()
+
+
+def test_audit_detail_is_a_decision_made_before_the_run(qapp):
+    """It cannot be recovered from a finished table, so it is not an export option.
+
+    The detail is produced while metrics are computed; offering it at export
+    time would offer something that no longer exists.
+    """
+    tab = ComputeTab()
+    assert tab.config()["audit"]["sidecar"] is False
+
+    tab._audit_check.setChecked(True)
+    assert tab.config()["audit"]["sidecar"] is True
+    tab.deleteLater()
+
+
+def test_the_definitions_reference_opens_and_explains_the_plane_rule(qapp):
+    """The one thing a reader cannot infer from the checkboxes.
+
+    Which planes take part decides what the 2D distances mean, and it is also
+    why truncation moves the 3D columns and leaves the 2D ones alone.
+    """
+    from PySide6.QtWidgets import QTextBrowser
+
+    tab = ComputeTab()
+    tab._on_definitions_clicked()
+    text = tab._definitions_dialog.findChild(QTextBrowser).toPlainText()
+
+    assert "only the planes where" in text
+    assert "truncation option in the Match Contours tab applies to the 3D mask stream" in text
+    assert "weighted by arc length" in text
+    assert "rasteriser backend" in text
+    # Non-modal on purpose: read a definition while changing what it describes.
+    assert not tab._definitions_dialog.isModal()
+    tab.deleteLater()

@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import SimpleITK as sitk
 
+from autoseg_evaluator.core.masks import default_rasteriser_name
 from autoseg_evaluator.core.surface_distance import (
     compute_average_surface_distance,
     compute_dice_coefficient,
@@ -177,6 +178,64 @@ def apl_mean(
 
 
 # ---- Aggregator ----------------------------------------------------------
+
+
+def mask_audit_detail(
+    gt_mask: sitk.Image,
+    test_mask: sitk.Image,
+) -> dict[str, Any]:
+    """What the mask metrics were measured over, for the audit record.
+
+    The table reports one symmetric number per metric; this reports the two
+    directions it came from, what each was weighted by, and the lattice it was
+    all quantised to. The asymmetry is often the finding — a ground truth
+    reaching far from anything the test drew, against a test that stays close to
+    the ground truth, is under-segmentation, and the symmetric maximum conceals
+    which side it came from.
+
+    Also records the rasteriser backend, because switching it moves every
+    mask-derived number in the run and a result that does not say which one
+    produced it cannot be reproduced.
+    """
+    gt_arr = sitk.GetArrayFromImage(gt_mask).astype(bool)
+    test_arr = sitk.GetArrayFromImage(test_mask).astype(bool)
+    spacing_xyz = tuple(float(v) for v in gt_mask.GetSpacing())
+    spacing_for_array = (spacing_xyz[2], spacing_xyz[1], spacing_xyz[0])
+    voxel_mm3 = float(np.prod(spacing_xyz))
+
+    detail: dict[str, Any] = {
+        "rasteriser_backend": str(default_rasteriser_name()),
+        "voxel_spacing_mm": list(spacing_xyz),
+        "voxel_volume_mm3": voxel_mm3,
+        "gt_voxels": int(gt_arr.sum()),
+        "test_voxels": int(test_arr.sum()),
+        "gt_slices_touched": int((gt_arr.sum(axis=(1, 2)) > 0).sum()),
+        "test_slices_touched": int((test_arr.sum(axis=(1, 2)) > 0).sum()),
+        "measure": "surface area of each surface element, mm^2",
+        "quantisation": "distances are quantised to the voxel lattice above",
+    }
+    if not gt_arr.any() or not test_arr.any():
+        detail["note"] = "one mask is empty; no surface distances to report"
+        return detail
+
+    sd = compute_surface_distances(gt_arr, test_arr, spacing_for_array)
+    for label, distances, areas in (
+        ("gt_to_test", sd["distances_gt_to_pred"], sd["surfel_areas_gt"]),
+        ("test_to_gt", sd["distances_pred_to_gt"], sd["surfel_areas_pred"]),
+    ):
+        if len(distances) == 0 or float(np.sum(areas)) == 0.0:
+            detail[label] = {"surfels": 0}
+            continue
+        cumulative = np.cumsum(areas) / np.sum(areas)
+        index = min(int(np.searchsorted(cumulative, 0.95)), len(distances) - 1)
+        detail[label] = {
+            "max_mm": float(distances.max()),
+            "hd95_mm": float(distances[index]),
+            "mean_mm": float(np.sum(distances * areas) / np.sum(areas)),
+            "surfels": int(len(distances)),
+            "surface_area_mm2": float(np.sum(areas)),
+        }
+    return detail
 
 
 def compute_geometric_metrics(

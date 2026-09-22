@@ -247,6 +247,7 @@ class MainWindow(QMainWindow):
         self._settings["tolerances"] = existing_tol
         self._settings["dvh"] = dict(config.get("dvh", {}))
         self._settings["compute_polygon"] = dict(config.get("polygon", {}))
+        self._settings["audit"] = dict(config.get("audit", {}))
         save_settings(self._settings)
 
     # ---- Qualitative assessment ------------------------------------------
@@ -324,6 +325,12 @@ class MainWindow(QMainWindow):
             else None,
             apl_tau_mm=float(tol.get("apl_tolerance_mm"))
             if tol.get("apl_tolerance_mm") is not None
+            else None,
+            # The polygon stream keeps its own tolerance rather than sharing the
+            # mask stream's; two APL columns headed with one number would be
+            # worse than none.
+            poly_tau_mm=float((config.get("polygon") or {}).get("tolerance_mm"))
+            if (config.get("polygon") or {}).get("tolerance_mm") is not None
             else None,
         )
 

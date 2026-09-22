@@ -59,6 +59,10 @@ _DEFAULTS: dict[str, Any] = {
         },
         "tolerance_mm": 3.0,
     },
+    # Keep the full detail behind every number for a .audit.json beside an
+    # export. Off by default: it is only useful if someone intends to audit
+    # or reproduce a run, and it has to be collected while computing.
+    "audit": {"sidecar": False},
     "custom_source_labels": {},  # keyed by SOP Instance UID
     # Source labels designated as manual observers for the Build Consensus GT
     # tab (v2.4). Each patient's RTSSes carrying one of these labels are
