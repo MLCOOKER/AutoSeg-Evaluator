@@ -2,8 +2,11 @@
 
 Provides:
 
-* a geometric-metric checkbox group (Dice, HD100/95, MSD, Surface Dice, APL)
+* a 3D mask-metric checkbox group (Dice, HD100/95, MSD, Surface Dice, APL)
   plus Surface-Dice τ and APL τ tolerance spinboxes,
+* a 2D contour-metric group measuring the RTSTRUCT polygons directly, with its
+  own tolerance — a separate method rather than a second list of names, so the
+  two sit side by side where a reader compares them,
 * a dosimetric-metric group (Dmean/Dmax/Dmin checkboxes, user-defined
   D@volume% list, V@dose(Gy) list, RTDOSE auto-detection note),
 * a "Compute All" button that emits a fully-populated configuration dict,
@@ -129,6 +132,85 @@ _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _method_note(text: str) -> QLabel:
+    """A line under a group title saying how its metrics are computed.
+
+    The two geometry groups measure the same structures and report metrics with
+    the same names; without this the split reads as an arbitrary division of one
+    list rather than as two methods.
+    """
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet("color: #6B7B85; font-size: 11px;")
+    return label
+
+
+def _polygon_engine_note() -> str:
+    """Which engine will run, stated rather than chosen.
+
+    There is nothing for a user to decide here — the compiled engine is used
+    wherever a library is packaged — but a number that cannot be traced to what
+    produced it cannot be reproduced, so the tab says which one that is.
+    """
+    try:
+        from autoseg_evaluator.core.polygon_metrics import select_engine
+
+        engine = select_engine()
+    except Exception as exc:  # noqa: BLE001 — a note, never a blocker
+        return f"Engine unavailable: {exc}"
+    if engine.name == "reference":
+        return (
+            f"Engine: {engine.label} — the portable implementation. No compiled "
+            "library is packaged for this platform, so large structures are "
+            "slower and the largest may not complete."
+        )
+    return f"Engine: {engine.label}"
+
+
+#: The polygon stream's selectable metrics. All six come out of one call and
+#: share a distance distribution, so a narrower selection buys a narrower table
+#: rather than a shorter run — the tooltips say so rather than implying a cost.
+_POLYGON_METRICS: tuple[tuple[str, str, str], ...] = (
+    (
+        "apl",
+        "Added Path Length",
+        "Length of ground-truth contour further than τ from the test contour "
+        "(mm) — the boundary someone would have to draw. Directional: the "
+        "reverse direction is reported alongside it.",
+    ),
+    (
+        "napl",
+        "Normalised APL",
+        "Added Path Length as a fraction of the total ground-truth contour "
+        "length; 0–1. Comparable between structures of different size, where "
+        "raw APL is not.",
+    ),
+    (
+        "hd100",
+        "Hausdorff (100%)",
+        "Largest distance from either contour to the other, measured "
+        "continuously along the segments rather than at vertices (mm).",
+    ),
+    (
+        "hd95",
+        "Hausdorff (95%)",
+        "95th percentile of contour-to-contour distance, weighted by arc "
+        "length rather than by vertex count (mm).",
+    ),
+    (
+        "mean",
+        "Mean contour distance",
+        "Arc-length-weighted mean distance between the contours, averaged over "
+        "the two directions (mm).",
+    ),
+    (
+        "median",
+        "Median contour distance",
+        "Arc-length-weighted median distance; the larger of the two directional medians (mm).",
+    ),
+)
+
+
 class ComputeTab(QWidget):
     """Configuration + progress display for batch metric computation."""
 
@@ -149,6 +231,7 @@ class ComputeTab(QWidget):
         self._library: Any | None = None  # populated when Tab 1 loads a folder
 
         self._geom_checks: dict[str, QCheckBox] = {}
+        self._poly_checks: dict[str, QCheckBox] = {}
         self._dose_checks: dict[str, QCheckBox] = {}
 
         self._build_ui()
@@ -172,6 +255,11 @@ class ComputeTab(QWidget):
             "tolerances": {
                 "surface_dice_tau_mm": float(self._sd_tau_spin.value()),
                 "apl_tolerance_mm": float(self._apl_tau_spin.value()),
+            },
+            "polygon": {
+                "metrics": {key: cb.isChecked() for key, cb in self._poly_checks.items()},
+                "tolerance_mm": float(self._poly_tau_spin.value()),
+                "allow_nested_rings": self._poly_nested_check.isChecked(),
             },
             "dvh": {
                 "include_dmean": self._dose_checks["dmean"].isChecked(),
@@ -198,12 +286,16 @@ class ComputeTab(QWidget):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
 
-        # Two-column config row
-        config_row = QHBoxLayout()
-        config_row.setSpacing(8)
-        config_row.addWidget(self._build_geometric_group(), stretch=1)
-        config_row.addWidget(self._build_dosimetric_group(), stretch=1)
-        outer.addLayout(config_row)
+        # The two geometry methods sit side by side, because that is where a
+        # reader compares them: same structures, same tolerance, two ways of
+        # measuring. Dose runs the full width below — its D@volume / V@dose
+        # lists need the room, and it answers a different question entirely.
+        geometry_row = QHBoxLayout()
+        geometry_row.setSpacing(8)
+        geometry_row.addWidget(self._build_mask_group(), stretch=1)
+        geometry_row.addWidget(self._build_polygon_group(), stretch=1)
+        outer.addLayout(geometry_row)
+        outer.addWidget(self._build_dosimetric_group())
 
         # STAPLE settings (only meaningful when ≥1 drawer has STAPLE mode on)
         outer.addWidget(self._build_staple_group())
@@ -228,10 +320,16 @@ class ComputeTab(QWidget):
 
         outer.addStretch(1)
 
-    def _build_geometric_group(self) -> QGroupBox:
-        box = QGroupBox("Geometric metrics", self)
+    def _build_mask_group(self) -> QGroupBox:
+        box = QGroupBox("3D mask metrics (rasterised)", self)
         layout = QVBoxLayout(box)
         layout.setSpacing(4)
+        layout.addWidget(
+            _method_note(
+                "Contours are filled onto the CT voxel grid and the "
+                "resulting binary masks are compared in 3D."
+            )
+        )
 
         for key, label, description in _GEOMETRIC_METRICS:
             cb = QCheckBox(label, box)
@@ -261,6 +359,71 @@ class ComputeTab(QWidget):
         self._apl_tau_spin.valueChanged.connect(self._emit_config_changed)
         tol_form.addRow("APL tolerance:", self._apl_tau_spin)
         layout.addLayout(tol_form)
+
+        layout.addStretch(1)
+        return box
+
+    def _build_polygon_group(self) -> QGroupBox:
+        """The polygon stream's controls.
+
+        No precision setting: the compiled engine's ``error_mm`` only decides
+        when an ambiguous quantile is refused, and measurement across its whole
+        useful range moves neither the cost nor the result. A spinbox for it
+        would imply a trade-off that does not exist.
+        """
+        box = QGroupBox("2D contour metrics (native RTSS polygons)", self)
+        layout = QVBoxLayout(box)
+        layout.setSpacing(4)
+        layout.addWidget(
+            _method_note(
+                "Measured on the contour line segments as stored — no voxels, no "
+                "sampling. Distances use only the planes both structures reach."
+            )
+        )
+
+        for key, label, description in _POLYGON_METRICS:
+            cb = QCheckBox(label, box)
+            cb.toggled.connect(self._emit_config_changed)
+            cb.setToolTip(description)
+            self._poly_checks[key] = cb
+            layout.addWidget(cb)
+
+        layout.addSpacing(8)
+
+        tol_form = QFormLayout()
+        tol_form.setContentsMargins(0, 0, 0, 0)
+        tol_form.setSpacing(6)
+        self._poly_tau_spin = _NoScrollSpinBox(box)
+        self._poly_tau_spin.setRange(0.0, 100.0)
+        self._poly_tau_spin.setSingleStep(0.1)
+        self._poly_tau_spin.setDecimals(2)
+        self._poly_tau_spin.setSuffix(" mm")
+        self._poly_tau_spin.setToolTip(
+            "Distance beyond which ground-truth contour counts as needing to be "
+            "redrawn. Applies to Added Path Length and its normalised form; the "
+            "distance metrics do not use it."
+        )
+        self._poly_tau_spin.valueChanged.connect(self._emit_config_changed)
+        tol_form.addRow("APL tolerance τ:", self._poly_tau_spin)
+        layout.addLayout(tol_form)
+
+        self._poly_nested_check = QCheckBox("Treat nested contours as holes", box)
+        self._poly_nested_check.setToolTip(
+            "Some exporters write a hole as a second closed contour inside the "
+            "first, rather than declaring it. Off, those structures are refused "
+            "rather than guessed — the geometry is unambiguous but the intent is "
+            "not. On, they are composed the way this application's mask "
+            "rasterisers have always composed them, which makes the two streams "
+            "agree.\n\nApplies to every source. Confirm the interpretation "
+            "against the exporting system before relying on it."
+        )
+        self._poly_nested_check.toggled.connect(self._emit_config_changed)
+        layout.addWidget(self._poly_nested_check)
+
+        self._poly_engine_label = QLabel(_polygon_engine_note(), box)
+        self._poly_engine_label.setWordWrap(True)
+        self._poly_engine_label.setStyleSheet("color: #6B7B85; font-size: 11px;")
+        layout.addWidget(self._poly_engine_label)
 
         layout.addStretch(1)
         return box
@@ -454,6 +617,22 @@ class ComputeTab(QWidget):
             cb.blockSignals(True)
             cb.setChecked(bool(stored_geom.get(key, defaults_geom[key])))
             cb.blockSignals(False)
+
+        # Polygon metrics. Default off: this is a second measurement stream that
+        # adds up to eleven columns, and an existing install should not start
+        # producing them because it was upgraded.
+        stored_poly = (self._settings.get("compute_polygon") or {}) if self._settings else {}
+        selected = stored_poly.get("metrics", {}) or {}
+        for key, cb in self._poly_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(bool(selected.get(key, False)))
+            cb.blockSignals(False)
+        self._poly_tau_spin.blockSignals(True)
+        self._poly_tau_spin.setValue(float(stored_poly.get("tolerance_mm", 3.0)))
+        self._poly_tau_spin.blockSignals(False)
+        self._poly_nested_check.blockSignals(True)
+        self._poly_nested_check.setChecked(bool(stored_poly.get("allow_nested_rings", False)))
+        self._poly_nested_check.blockSignals(False)
 
         # Tolerances
         tol = (self._settings.get("tolerances") or {}) if self._settings else {}

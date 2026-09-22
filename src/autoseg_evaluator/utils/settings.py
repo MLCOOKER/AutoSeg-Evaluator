@@ -44,6 +44,25 @@ _DEFAULTS: dict[str, Any] = {
         "apl_mean": False,
         "apl_total": False,
     },
+    # The native-polygon stream. Off by default: it is a second way of measuring
+    # the same structures, not a refinement of the first, and it adds its own
+    # columns. An install should start producing them because someone asked, not
+    # because it was upgraded.
+    "compute_polygon": {
+        "metrics": {
+            "apl": False,
+            "napl": False,
+            "hd100": False,
+            "hd95": False,
+            "mean": False,
+            "median": False,
+        },
+        "tolerance_mm": 3.0,
+        # Compose nested ordinary CLOSED_PLANAR rings as holes. Applies to every
+        # source, so it stays off until the interpretation has been confirmed
+        # against the exporting system.
+        "allow_nested_rings": False,
+    },
     "custom_source_labels": {},  # keyed by SOP Instance UID
     # Source labels designated as manual observers for the Build Consensus GT
     # tab (v2.4). Each patient's RTSSes carrying one of these labels are

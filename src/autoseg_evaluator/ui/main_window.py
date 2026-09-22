@@ -246,6 +246,7 @@ class MainWindow(QMainWindow):
         existing_tol.update(config.get("tolerances", {}))
         self._settings["tolerances"] = existing_tol
         self._settings["dvh"] = dict(config.get("dvh", {}))
+        self._settings["compute_polygon"] = dict(config.get("polygon", {}))
         save_settings(self._settings)
 
     # ---- Qualitative assessment ------------------------------------------

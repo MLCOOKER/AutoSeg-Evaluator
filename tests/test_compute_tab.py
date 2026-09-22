@@ -11,7 +11,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGroupBox
 
 from autoseg_evaluator.ui.tabs.compute import ComputeTab, _parse_number_list  # noqa: E402
 from autoseg_evaluator.ui.widgets.progress_panel import ProgressPanel, _format_hms  # noqa: E402
@@ -235,3 +235,101 @@ def test_format_hms_with_minutes():
 
 def test_format_hms_with_hours():
     assert _format_hms(3725) == "1:02:05"
+
+
+# ---- The polygon stream's controls ----------------------------------------
+
+
+def test_the_two_geometry_methods_are_separate_groups(qapp):
+    """A reader has to be able to see which method produced a number.
+
+    Both groups offer a "Hausdorff (95%)" and they are not the same measurement:
+    one is a distance between rasterised surfaces, the other a distance between
+    contour segments. Putting them in one list would invite comparing them as
+    though they were.
+    """
+    tab = ComputeTab()
+    titles = {box.title() for box in tab.findChildren(QGroupBox)}
+
+    assert "3D mask metrics (rasterised)" in titles
+    assert "2D contour metrics (native RTSS polygons)" in titles
+    tab.deleteLater()
+
+
+def test_the_polygon_block_reaches_the_config(qapp):
+    tab = ComputeTab()
+    tab._poly_checks["hd95"].setChecked(True)
+    tab._poly_checks["apl"].setChecked(True)
+    tab._poly_tau_spin.setValue(2.5)
+
+    polygon = tab.config()["polygon"]
+
+    assert polygon["metrics"]["hd95"] is True
+    assert polygon["metrics"]["apl"] is True
+    assert polygon["metrics"]["median"] is False
+    assert polygon["tolerance_mm"] == 2.5
+    assert polygon["allow_nested_rings"] is False
+    tab.deleteLater()
+
+
+def test_the_config_is_what_the_worker_reads(qapp):
+    """The dict Tab 5 emits has to be the dict PolygonConfig parses.
+
+    These are the two ends of one contract with no type between them, so a
+    renamed key would otherwise surface as metrics silently not running.
+    """
+    from autoseg_evaluator.core.polygon_metrics import PolygonConfig
+
+    tab = ComputeTab()
+    tab._poly_checks["mean"].setChecked(True)
+    tab._poly_tau_spin.setValue(4.0)
+
+    config = PolygonConfig.from_dict(tab.config()["polygon"])
+
+    assert config.any_enabled()
+    assert config.metrics == {"mean"}
+    assert config.tolerance_mm == 4.0
+    assert "poly_mean_distance_mm" in config.columns()
+    tab.deleteLater()
+
+
+def test_the_stream_stays_off_until_it_is_asked_for(qapp):
+    """Upgrading an install must not start producing a new set of columns."""
+    from autoseg_evaluator.core.polygon_metrics import PolygonConfig
+
+    tab = ComputeTab()
+    tab.set_settings({})
+
+    assert not PolygonConfig.from_dict(tab.config()["polygon"]).any_enabled()
+    tab.deleteLater()
+
+
+def test_the_selection_survives_a_restart(qapp):
+    """Settings round-trip, in the shape main_window persists."""
+    from autoseg_evaluator.core.polygon_metrics import PolygonConfig
+
+    tab = ComputeTab()
+    tab.set_settings(
+        {
+            "compute_polygon": {
+                "metrics": {"hd95": True, "median": True},
+                "tolerance_mm": 5.0,
+                "allow_nested_rings": True,
+            }
+        }
+    )
+
+    config = PolygonConfig.from_dict(tab.config()["polygon"])
+    assert config.metrics == {"hd95", "median"}
+    assert config.tolerance_mm == 5.0
+    assert config.allow_nested_rings is True
+    tab.deleteLater()
+
+
+def test_the_tab_says_which_engine_will_produce_the_numbers(qapp):
+    """Not a choice — a statement, so a result can be traced to its engine."""
+    tab = ComputeTab()
+
+    note = tab._poly_engine_label.text()
+    assert note.startswith("Engine")
+    tab.deleteLater()
