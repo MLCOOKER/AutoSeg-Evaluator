@@ -82,6 +82,14 @@ QUANTILE_GUARD_MM = 0.001
 #: run is one pair and the wait is the point.
 REFERENCE_SAMPLING_MM = 0.02
 
+#: What the reference engine's own published acceptance was recorded at. Its
+#: agreement with the audited continuous values is a property of this step, not
+#: of the engine: at the 0.02 mm it runs at in production it disagrees by up to
+#: 7e-3 mm, which is inside its own stated interval and outside the suppliers'
+#: 1e-3 mm threshold. Validating it against published values therefore has to
+#: use this, or it measures the sampling step and calls the result a defect.
+REFERENCE_ACCEPTANCE_SAMPLING_MM = 0.001
+
 #: Status text for a comparison the metrics cannot describe at all. A consensus
 #: is born as a binary mask and has no contours, so availability is a property
 #: of the *pair*: both sides must be native RTSTRUCT.
@@ -333,8 +341,13 @@ def library_available() -> bool:
         return False
 
 
-def select_engine(preferred: str | None = None) -> _Engine:
+def select_engine(preferred: str | None = None, *, sampling_mm: float | None = None) -> _Engine:
     """Resolve which kernel to use, honouring the override and availability.
+
+    ``sampling_mm`` overrides the reference engine's step, for the two callers
+    that need a different one: the acceptance suite, which has to meet the
+    suppliers' published threshold, and a differential check being used as an
+    oracle. It means nothing to the compiled engine, which has no step.
 
     An explicit request for the compiled engine on a platform with no library is
     an error rather than a silent downgrade: someone who set the variable wants
@@ -344,7 +357,7 @@ def select_engine(preferred: str | None = None) -> _Engine:
     """
     requested = (preferred or os.environ.get(ENGINE_VARIABLE) or "").strip().lower()
     if requested == ENGINE_REFERENCE:
-        return _ReferenceEngine()
+        return _ReferenceEngine(sampling_mm or REFERENCE_SAMPLING_MM)
     if requested == ENGINE_FAST:
         if not library_available():
             raise NativeLibraryError(
@@ -356,7 +369,9 @@ def select_engine(preferred: str | None = None) -> _Engine:
         raise ValueError(
             f"{ENGINE_VARIABLE} must be {ENGINE_FAST!r} or {ENGINE_REFERENCE!r}, not {requested!r}"
         )
-    return _FastEngine() if library_available() else _ReferenceEngine()
+    if library_available():
+        return _FastEngine()
+    return _ReferenceEngine(sampling_mm or REFERENCE_SAMPLING_MM)
 
 
 def compare_structures(
@@ -405,6 +420,7 @@ __all__ = [
     "ENGINE_VARIABLE",
     "MISSING_PLANE_POLICY",
     "QUANTILE_GUARD_MM",
+    "REFERENCE_ACCEPTANCE_SAMPLING_MM",
     "REFERENCE_SAMPLING_MM",
     "ROW_KEYS",
     "STATUS_NO_CONTOURS",

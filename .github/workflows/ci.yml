@@ -88,7 +88,16 @@ jobs:
       # from each platform's own math library - so this is the check that
       # catches a platform whose results drift, and it is the only validation a
       # CI-built library receives.
-      - name: Validate the native polygon-metric library
+      # Three layers, about seventy seconds: the suppliers' 150 published pairs
+      # and 44 stress cases against the vendored kernel, then the same 150 pairs
+      # driven through this application's own call path. The last one is ours to
+      # get wrong - APL is directional, and a kernel can be perfect while the
+      # code calling it swaps the two sides.
+      #
+      # Not run here: the second engine (nine minutes) and the DICOM archives
+      # (314 MB). Both belong to the release record, and
+      # docs/POLYGON_VALIDATION_REPORT.md carries their results.
+      - name: Validate the native polygon-metric library and our call path
         run: python scripts/validate_polygon_metrics.py
 
       - name: Install equivalence-test reference packages

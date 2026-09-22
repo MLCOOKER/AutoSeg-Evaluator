@@ -6,7 +6,11 @@ RTSTRUCT stores, with no rasterisation anywhere in the path.
 Written before the code, so the decisions and every deliberate deviation from
 the supplied reference are reviewable rather than discovered later.
 
-**Status: phases 1-2 landed 2026-09-22.** Both engines are vendored, and the adapter reads real RTSTRUCTs and measures them. Nothing is wired to the application yet - no metric is computed in a run, no tab has changed. Phases 3-7 below are still to do.
+**Status: phases 1–3 landed 2026-09-22.** Both engines are vendored, the adapter
+reads real RTSTRUCTs and measures them, and every acceptance layer passes —
+including the published archives driven from DICOM through our own grid builder
+and parser. Nothing is wired to the application yet: no metric is computed in a
+run and no tab has changed. Phases 4–7 below are still to do.
 
 **Revision 3, 2026-09-20.** Updated for `0.2.0.dev2`, which answers the
 portability review: a platform-aware loader, explicit floating-point build
@@ -534,6 +538,19 @@ about our adapter.
    builder and *our* adapter, not only through a supplier's library, against
    `golden_metrics.json`.
 
+**Measured 2026-09-22, all five runs passing.** The compiled engine reproduces
+the published values to 4.86e-10 mm through our own call path and, separately,
+from the DICOM files up: 150 pairs, 300 ROIs parsed by our parser on grids built
+by our builder. The reference engine reproduces them to 7.06e-04 mm.
+
+One trap, recorded because it cost a run to find: the published thresholds
+describe agreement with audited *continuous* values, and the reference engine
+meets them only at the sampling step its own acceptance was recorded at. Judged
+at the coarser step it runs at in the application it misses by up to 7e-3 mm —
+inside its own stated interval, outside the suppliers' 1e-3 mm threshold. That
+is the sampling step being measured, not a defect, and the acceptance run now
+sets the step explicitly rather than inheriting the production one.
+
 Layer 4 needs the original archives, which do not belong in git. It follows the
 existing repo idiom — `scripts/validate_polygon_metrics.py --data <folder> --out
 docs/POLYGON_VALIDATION_REPORT.md`, report committed, data not. A small fixture
@@ -577,7 +594,7 @@ an ROI compared against five sources should be prepared once.
 |---|---|---|
 | 1 | ✅ **Done.** Both engines vendored, integrity tests, 105 supplier tests, acceptance wrapper, CI Linux build step, `shapely` declared | none |
 | 2 | ✅ **Done.** `contour_grid.py`, `polygon_metrics.py`, engine selection + fallback, 30 tests | none |
-| 3 | Differential and end-to-end acceptance, `docs/POLYGON_VALIDATION_REPORT.md` | none |
+| 3 | ✅ **Done.** Four acceptance layers, differential, `docs/POLYGON_VALIDATION_REPORT.md` | none |
 | 4 | Worker integration, availability, `prepare()` caching | metrics computed |
 | 5 | Tab 5 split, session v7 | metrics selectable |
 | 6 | Results columns, sidecar, Report tab families | metrics reportable |
