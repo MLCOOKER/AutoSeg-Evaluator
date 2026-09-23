@@ -23,9 +23,11 @@ from PySide6.QtCore import QObject, Signal, Slot
 from autoseg_evaluator.core.contour_grid import GridUnavailableError, build_grid
 from autoseg_evaluator.core.dvh import DVHConfig, DVHError, _fmt_num, compute_dvh_metrics
 from autoseg_evaluator.core.masks import (
+    MaskConversionError,
     extract_mask_for_roi,
     find_reference_image_folder,
     gt_z_extent_mm,
+    mask_with_reading,
     read_dicom_image,
     read_rtstruct,
     truncate_to_gt_z_extent,
@@ -124,6 +126,11 @@ class MetricsWorker(QObject):
         # at nothing and were set aside. A structure read on anything other than
         # its own declarations is worth being able to find later.
         self._structure_notes: dict[tuple[str, str, int], dict[str, Any]] = {}
+        # The 3D side of the same record, and why a structure got no mask. Both
+        # keyed like ``_mask_cache``: a row should say what refused its mask,
+        # not only that something did.
+        self._mask_reading: dict[tuple[str, str, int], tuple[str, ...]] = {}
+        self._mask_failure: dict[tuple[str, str, int], str] = {}
         self._pending_polygon_audit: dict[str, Any] | None = None
         self._dose_cache: dict[tuple[str, str], Any] = {}
         # STAPLE summary scalars captured while synthesising a multi-observer
@@ -334,7 +341,10 @@ class MetricsWorker(QObject):
             if gt_mask is None:
                 raise RuntimeError(
                     f"GT ROI #{group['gt_roi_number']} ('{group['gt_roi_name']}') "
-                    f"could not be rasterised."
+                    f"could not be rasterised"
+                    + self._mask_failure_reason(
+                        group["patient_id"], group["gt_sop"], group["gt_roi_number"]
+                    )
                 )
         except Exception as exc:  # noqa: BLE001
             error_text = f"{type(exc).__name__}: {exc}"
@@ -364,7 +374,10 @@ class MetricsWorker(QObject):
                 if test_mask is None:
                     raise RuntimeError(
                         f"Test ROI #{test['roi_number']} ('{test['organ_name']}') "
-                        f"could not be rasterised."
+                        f"could not be rasterised"
+                        + self._mask_failure_reason(
+                            group["patient_id"], test["rtstruct_sop_uid"], test["roi_number"]
+                        )
                     )
             except Exception as exc:  # noqa: BLE001
                 load_errors.append(
@@ -534,7 +547,33 @@ class MetricsWorker(QObject):
                     row.setdefault("audit", {})["polygon"] = self._pending_polygon_audit
             if self._audit:
                 # Kept off row["metrics"], so it never becomes a column.
-                row.setdefault("audit", {})["mask"] = mask_audit_detail(gt_mask, record["mask"])
+                mask_detail = mask_audit_detail(gt_mask, record["mask"])
+                reading = {
+                    side: list(notes)
+                    for side, notes in (
+                        (
+                            "ground_truth",
+                            self._mask_reading.get(
+                                (group["patient_id"], group["gt_sop"], group["gt_roi_number"]), ()
+                            ),
+                        ),
+                        (
+                            "test",
+                            self._mask_reading.get(
+                                (
+                                    group["patient_id"],
+                                    record["meta"]["rtstruct_sop_uid"],
+                                    record["meta"]["roi_number"],
+                                ),
+                                (),
+                            ),
+                        ),
+                    )
+                    if notes
+                }
+                if reading:
+                    mask_detail["contour_reading"] = reading
+                row.setdefault("audit", {})["mask"] = mask_detail
             # Per-DVH-metric difference from the GT (test − GT), so the table
             # carries both absolutes and the deviation from the reference.
             if gt_dvh:
@@ -601,6 +640,7 @@ class MetricsWorker(QObject):
                 self._structure_notes[key] = {
                     "nested_planes": int(regions.nested_planes),
                     "references_set_aside": list(regions.references_set_aside),
+                    "reading": list(regions.reading_notes),
                 }
         except ContoursUnavailableError as exc:
             prepared = f"unavailable: {exc}"
@@ -656,6 +696,13 @@ class MetricsWorker(QObject):
             }
             if set_aside:
                 record["references_set_aside"] = set_aside
+            reading = {
+                side: notes["reading"]
+                for side, notes in (("ground_truth", reference_notes), ("test", candidate_notes))
+                if notes.get("reading")
+            }
+            if reading:
+                record["contour_reading"] = reading
             if result.detail:
                 record["measurements"] = result.detail
             if result.status:
@@ -1321,9 +1368,19 @@ class MetricsWorker(QObject):
             mask = self._synthesise_consensus_mask(patient_id, entry, roi_number, ct)
             self._mask_cache[key] = mask
             return mask
-        mask = extract_mask_for_roi(ct, rtss, roi_number)
+        try:
+            mask, notes = mask_with_reading(ct, rtss, roi_number)
+        except MaskConversionError as exc:
+            mask, notes = None, ()
+            self._mask_failure[key] = str(exc)
         self._mask_cache[key] = mask
+        self._mask_reading[key] = notes
         return mask
+
+    def _mask_failure_reason(self, patient_id: str, sop_uid: str, roi_number: int) -> str:
+        """``": <reason>"`` for a structure that got no mask, or nothing."""
+        reason = self._mask_failure.get((patient_id, sop_uid, roi_number))
+        return f": {reason}" if reason else "."
 
     def _synthesise_consensus_mask(self, patient_id: str, entry, roi_number: int, ct):
         """Build a binary STAPLE consensus mask for one synthetic ROI on the fly.
@@ -1413,9 +1470,9 @@ class MetricsWorker(QObject):
         for key in [k for k in self._dose_cache if k[0] == patient_id]:
             self._dose_cache.pop(key, None)
         # Drop every mask whose key starts with this patient_id.
-        mask_keys = [k for k in self._mask_cache if k[0] == patient_id]
-        for k in mask_keys:
-            self._mask_cache.pop(k, None)
+        for cache in (self._mask_cache, self._mask_reading, self._mask_failure):
+            for k in [k for k in cache if k[0] == patient_id]:
+                cache.pop(k, None)
         # Drop pydicom RTSTRUCT datasets we loaded for this patient.
         if self._library is not None:
             patient = self._library.patients.get(patient_id)

@@ -6,8 +6,10 @@ Two rasteriser backends are available, selectable per call, via
 ``continuous`` (default)
     Derived from dcmrtstruct2nii's ``DcmPatientCoords2Mask`` (MIT, see
     ``_rasterise_roi_continuous``). Transforms vertices to **continuous**
-    (sub-voxel) index coordinates before filling. Adapted rather than copied —
-    see that function's docstring for the deliberate deviations from upstream.
+    (sub-voxel) index coordinates before filling. The loops on each slice are
+    read into regions by :mod:`autoseg_evaluator.core.contour_reading` — the
+    same reading the 2D stream measures — and each region is filled with a
+    half-open rule, so a voxel centre on an edge belongs to exactly one side.
 
 ``legacy``
     The PlatiPy-derived ``transform_point_set_from_dicom_struct`` port from
@@ -34,17 +36,28 @@ import pydicom
 import SimpleITK as sitk
 from skimage.draw import polygon
 
+from autoseg_evaluator.core.contour_reading import (
+    AREA_TOLERANCE_MM2,
+    ContourReading,
+    ContourReadingError,
+    Outline,
+    read_outlines,
+)
+
 # ---- Rasteriser backend selection ----------------------------------------
 
 RASTERISER_LEGACY = "legacy"
 RASTERISER_CONTINUOUS = "continuous"
 RASTERISERS = (RASTERISER_LEGACY, RASTERISER_CONTINUOUS)
 
-# Contour geometric types the continuous backend will rasterise. Anything else
-# (notably the standard ``CLOSEDPLANAR_XOR``, and ``POINT`` / ``OPEN_*``)
-# yields ``None`` — never an empty mask, which downstream code would otherwise
-# treat as a real zero-volume structure instead of a failed conversion.
-SUPPORTED_GEOMETRY = frozenset({"CLOSED_PLANAR", "INTERPOLATED_PLANAR"})
+
+class MaskConversionError(RuntimeError):
+    """One structure could not be turned into a mask; the message says why.
+
+    Never an empty mask instead: downstream code would read that as a real
+    zero-volume structure rather than a failed conversion.
+    """
+
 
 # A contour whose vertices span more than this many voxels in the through-plane
 # index direction is not planar in *image* space and is not reconstructable by
@@ -255,58 +268,178 @@ def _rasterise_roi_legacy(
 def _rasterise_roi_continuous(
     dicom_image: sitk.Image, roi_contours: pydicom.Dataset
 ) -> np.ndarray | None:
-    """Continuous-coordinate backend, adapted from dcmrtstruct2nii.
+    """Continuous-coordinate backend: the volume, or ``None`` if unconvertible.
 
-    Derived from ``DcmPatientCoords2Mask.convert`` in dcmrtstruct2nii v5
-    (MIT, Copyright (c) 2022 Thomas Phil) — see ``NOTICE`` for the full
-    licence text. The substantive idea taken from upstream is transforming
-    vertices to **continuous** index coordinates before filling, instead of
-    snapping them to the voxel grid first.
+    See :func:`_fill_structure`; this is its quiet form, for callers that only
+    need to know whether a mask exists.
+    """
+    try:
+        volume, _reading = _fill_structure(dicom_image, roi_contours)
+    except (ContourReadingError, MaskConversionError):
+        return None
+    return volume
 
-    Deliberate deviations from upstream, all of which make it stricter:
 
-    * **Bounds.** Upstream computes ``z = round(...)`` and indexes straight
-      into the array, so a contour just below the volume gives ``z = -1`` and
-      NumPy silently paints the **last** slice. Out-of-range slices are skipped
-      here instead.
+def _fill_structure(
+    dicom_image: sitk.Image, roi_contours: pydicom.Dataset
+) -> tuple[np.ndarray, ContourReading]:
+    """Read one structure's loops into regions and fill them onto the image.
+
+    Adapted from ``DcmPatientCoords2Mask.convert`` in dcmrtstruct2nii v5 (MIT,
+    Copyright (c) 2022 Thomas Phil) — see ``NOTICE`` for the full licence
+    text. The idea taken from upstream is transforming vertices to
+    **continuous** index coordinates before filling, instead of snapping them
+    to the voxel grid first.
+
+    Where this departs from upstream, deliberately:
+
+    * **Loops are read, not toggled.** Upstream fills every loop and combines
+      them by exclusive-or, which turns a partial overlap into a hole and
+      leaves a one-voxel seam where two loops share an edge. Here the loops on
+      each slice are read into regions by
+      :func:`~autoseg_evaluator.core.contour_reading.read_outlines` — the same
+      function the 2D stream measures — and a structure it refuses gets no mask.
+    * **Half-open filling.** A voxel is inside when its centre is inside the
+      region; a centre exactly on an edge belongs to one side only (the edge's
+      lower and left side). Upstream counts it on both sides, which over-fills
+      outlines that pass through voxel centres. Away from such ties the two
+      fill exactly the same voxels.
+    * **Bounds.** Upstream computes ``z = round(...)`` and indexes straight into
+      the array, so a contour just below the volume gives ``z = -1`` and NumPy
+      silently paints the **last** slice. Out-of-range slices are skipped here.
     * **Planarity.** Upstream takes the first vertex's slice and flattens the
       contour onto it. A contour spanning more than
-      ``PLANARITY_TOLERANCE_VOXELS`` in index space aborts the ROI here, as in
-      the legacy backend.
-    * **Geometry types.** Upstream skips unsupported contours individually and
-      can therefore return an all-background mask, which downstream code would
-      read as a genuine zero-volume structure. Here an ROI containing any
-      unsupported type (e.g. the standard ``CLOSEDPLANAR_XOR``) returns
-      ``None`` so it surfaces as a failed conversion.
-    * **Geometry metadata** is restored by the caller (see above).
-    """
-    sequence = roi_contours.ContourSequence
-    types = {str(getattr(c, "ContourGeometricType", "")).upper() for c in sequence}
-    if not types or not types <= SUPPORTED_GEOMETRY:
-        return None
+      ``PLANARITY_TOLERANCE_VOXELS`` in index space refuses the structure here.
+    * **Geometry metadata** is restored by the caller.
 
+    The loops are read in voxel units, so the coordinates filled are exactly
+    the coordinates read, with no rescale in between that could move an edge
+    off a voxel centre. The area tolerance is converted to match.
+    """
     size_x, size_y, size_z = dicom_image.GetSize()
-    volume = np.zeros((size_z, size_y, size_x), dtype=bool)
+    spacing = dicom_image.GetSpacing()
     transform = _index_transform(dicom_image)  # invert the direction matrix once
-    for contour in sequence:
-        data = np.asarray(getattr(contour, "ContourData", []), dtype=np.float64)
-        if data.size < 9:  # fewer than three vertices — nothing to fill
+
+    outlines: list[Outline] = []
+    for contour in roi_contours.ContourSequence:
+        data = np.asarray(getattr(contour, "ContourData", None) or [], dtype=np.float64)
+        if data.size % 3 or not np.isfinite(data).all():
+            raise MaskConversionError(
+                "a contour's coordinates are not complete x, y, z triples of finite numbers"
+            )
+        if not data.size:
             continue
         idx = _apply_index_transform(data.reshape(-1, 3), transform)
-
         z_continuous = idx[:, 2]
         if float(z_continuous.max() - z_continuous.min()) > PLANARITY_TOLERANCE_VOXELS:
-            return None
+            raise MaskConversionError(
+                "a contour spans more than half a slice through-plane, so it does not lie "
+                "in one image plane"
+            )
         z = int(round(float(z_continuous[0])))
         if z < 0 or z >= size_z:
             continue
+        outlines.append(Outline(z, idx[:, :2], str(getattr(contour, "ContourGeometricType", ""))))
 
-        # polygon() takes (row, col) == (y, x); clipping uses the real row/col
-        # extents. Filling at float precision is the whole point of this backend.
-        rr, cc = polygon(idx[:, 1], idx[:, 0], shape=(size_y, size_x))
-        if rr.size:
-            volume[z][rr, cc] ^= True
-    return volume
+    reading = read_outlines(outlines, area_tolerance=AREA_TOLERANCE_MM2 / (spacing[0] * spacing[1]))
+    volume = np.zeros((size_z, size_y, size_x), dtype=bool)
+    for z, region in reading.regions.items():
+        volume[z] = _fill_region(region, size_y, size_x)
+    return volume, reading
+
+
+def _fill_region(region, rows: int, columns: int) -> np.ndarray:
+    """Voxels whose centre lies in ``region``, which is in (column, row) units.
+
+    A scanline fill, even-odd over every ring of the region: its outer
+    boundaries and its holes. Half-open in both directions — an edge counts for
+    a row when ``low <= row < high``, and a centre is inside a span when
+    ``start <= column < end`` — so a centre exactly on an edge is claimed by one
+    side, two regions sharing an edge claim each centre once between them, and
+    a shape's voxel count tracks its area rather than its perimeter.
+    """
+    rings = []
+    for part in getattr(region, "geoms", [region]):
+        rings.append(np.asarray(part.exterior.coords))
+        rings.extend(np.asarray(hole.coords) for hole in part.interiors)
+    x0 = np.concatenate([r[:-1, 0] for r in rings])
+    y0 = np.concatenate([r[:-1, 1] for r in rings])
+    x1 = np.concatenate([r[1:, 0] for r in rings])
+    y1 = np.concatenate([r[1:, 1] for r in rings])
+    sloped = y0 != y1  # a horizontal edge crosses no row under the half-open rule
+    x0, y0, x1, y1 = x0[sloped], y0[sloped], x1[sloped], y1[sloped]
+
+    first = np.maximum(np.ceil(np.minimum(y0, y1)), 0).astype(np.int64)
+    stop = np.minimum(np.ceil(np.maximum(y0, y1)), rows).astype(np.int64)
+    counts = np.maximum(stop - first, 0)
+    filled = np.zeros((rows, columns), dtype=bool)
+    total = int(counts.sum())
+    if not total:
+        return filled
+    edge = np.repeat(np.arange(len(counts)), counts)
+    row = first[edge] + (np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts))
+    x = x0[edge] + (row - y0[edge]) * (x1[edge] - x0[edge]) / (y1[edge] - y0[edge])
+
+    # Every closed ring crosses a row an even number of times under this rule,
+    # so once sorted by row and position the crossings pair off in order.
+    order = np.lexsort((x, row))
+    row, x = row[order], x[order]
+    span_row = row[0::2]
+    start = np.clip(np.ceil(x[0::2]), 0, columns).astype(np.int64)
+    end = np.clip(np.ceil(x[1::2]), 0, columns).astype(np.int64)
+    marks = np.zeros((rows, columns + 1), dtype=np.int32)
+    np.add.at(marks, (span_row, start), 1)
+    np.add.at(marks, (span_row, end), -1)
+    filled[:] = np.cumsum(marks, axis=1)[:, :columns] > 0
+    return filled
+
+
+def mask_with_reading(
+    dicom_image: sitk.Image,
+    rtstruct_ds: pydicom.Dataset,
+    roi_number: int,
+    *,
+    backend: str | None = None,
+) -> tuple[sitk.Image, tuple[str, ...]]:
+    """One ROI's mask, and what reading its loops had to interpret.
+
+    Like :func:`extract_mask_for_roi`, but a structure that cannot be converted
+    raises :class:`MaskConversionError` saying why, instead of returning
+    ``None``: the reason is what a results row should show.
+    """
+    number = int(roi_number)
+    listed = [
+        s
+        for s in getattr(rtstruct_ds, "StructureSetROISequence", None) or []
+        if int(s.ROINumber) == number
+    ]
+    if not listed:
+        raise MaskConversionError(f"ROI number {number} is not in this structure set")
+    items = [
+        c
+        for c in getattr(rtstruct_ds, "ROIContourSequence", None) or []
+        if int(c.ReferencedROINumber) == number
+    ]
+    if not items or not getattr(items[0], "ContourSequence", None):
+        raise MaskConversionError("no contours are stored for this structure")
+
+    if (backend or _default_rasteriser) == RASTERISER_CONTINUOUS:
+        try:
+            volume, reading = _fill_structure(dicom_image, items[0])
+        except ContourReadingError as exc:
+            raise MaskConversionError(str(exc)) from exc
+        notes = reading.notes
+    else:
+        volume = _rasterise_roi_legacy(dicom_image, items[0])
+        if volume is None:
+            raise MaskConversionError(
+                "the legacy rasteriser converts only planar CLOSED_PLANAR structures"
+            )
+        notes = ("legacy rasteriser: loops combined by exclusive-or, not by the shared reading",)
+
+    image = sitk.GetImageFromArray(volume.astype(np.uint8))
+    image.CopyInformation(dicom_image)
+    return sitk.Cast(image, sitk.sitkUInt8), notes
 
 
 def truncate_to_gt_z_extent(

@@ -171,6 +171,9 @@ control, and not a speed control.
 
 ### D1 — Nested rings are composed as holes, unconditionally
 
+> **Superseded by D10.** Holes are still read this way, now by the shared
+> reading both streams use, not by `polygon_compat`.
+
 `polygon_compat.parse_compatible(..., allow_nested=True)` composes rings that are
 strictly nested, after checking every ring is valid and either strictly nested or
 fully disjoint. Touching, duplicate, crossing and partially overlapping rings
@@ -557,6 +560,109 @@ For comparison, the mask stream has the same exposure and resolves it silently:
 DeepMind's `compute_robust_hausdorff` takes `np.searchsorted` on a floating-point
 cumulative area.
 
+### D10 — Both streams read contours through one function
+
+*Added 2026-09-23. Supersedes D1, which it generalises.* Until now the two
+streams read a structure's loops by different rules:
+
+| Loops on a slice | Mask path (fill each loop, exclusive-or) | Polygon path (vendored parser) |
+|---|---|---|
+| Loop inside a loop | hole | hole (D1) |
+| Touching at an edge | **one-voxel seam** | merged |
+| Partial overlap | **overlap silently deleted** | refused |
+| Outline crossing or touching itself | filled even-odd | refused |
+| Declared `CLOSEDPLANAR_XOR` | **no mask** | read |
+| Voxel centre exactly on an edge | counted inside for every loop | — |
+
+So a difference between a 2D and a 3D number could come from the measurement
+or from the two streams disagreeing about what the contour was, and nothing
+said which. Measured on synthetic phantoms, plastimatch 1.9.4 is no better. Its
+default unions everything, which fills every hole. `--xor-contours` behaves as
+the mask path did, and it drops `CLOSEDPLANAR_XOR` structures silently. Its one
+advantage is a half-open edge rule, adopted below.
+
+**Decision.** `core/contour_reading.py` reads each structure's outlines into
+regions once, by one set of rules, and both streams consume the result. The 3D
+stream fills the regions; the 2D stream measures their outlines. The rules, with
+the strongest evidence of intent first:
+
+| Case | Reading |
+|---|---|
+| Declared `CLOSEDPLANAR_XOR` | exclusive-or, as declared |
+| Loops apart | islands |
+| Loop inside a loop | hole, alternating with depth; also when the inner touches the outer |
+| Loops touching, not overlapping | merged |
+| Partial overlap, or a duplicated loop | **refused**: union and hole are both plausible and give different tissue |
+| Outline touching or crossing itself | the region it encloses if even-odd and non-zero winding agree; lines enclosing nothing are dropped; **refused** if they disagree |
+| Outline enclosing no area | dropped |
+
+Decisions are area-based with a 1e-8 mm² tolerance, the vendored parser's own,
+so rounding cannot flip a classification between the two streams' frames.
+
+**Placement stays per stream.** The 2D stream keeps the vendored parser's
+checks, reimplemented with the same leading messages: within 0.001 mm of a
+slice plane, inside the image, image references on the right slice (D8). The 3D
+stream keeps its own: nearest slice, a planarity limit of half a slice, and
+out-of-volume slices skipped. Only the loop reading is shared.
+
+**The 3D fill** is now a half-open scanline over the region's rings. An edge
+counts for a row when `low <= row < high`, and a centre is inside a span when
+`start <= column < end`. So a centre exactly on an edge belongs to one side,
+and shapes keep their true area. Away from such ties it fills exactly the
+voxels the previous scikit-image fill did. A test compares 25 random outlines
+voxel for voxel, and the dcmrtstruct2nii conformance test still passes
+unchanged. The 3D stream reads in voxel units, so the coordinates filled are
+the coordinates read. A structure the reading refuses gets no mask, and the
+row's error now gives the reason instead of "could not be rasterised".
+
+**The vendored parser leaves the production path** and is kept, unmodified, as
+a test oracle. On everything it accepts, the shared reading must produce the
+identical region. Where the reading goes further — a touching hole, an outline
+with one unambiguous region, an outline without area — it is deliberate, and
+listed here.
+
+The legacy rasteriser (`AUTOSEG_RASTERISER=legacy`) is untouched. It exists to
+reproduce v1 results, so it keeps v1's reading, and the audit record says so.
+
+**Measured on the tender H&N cohort**: 5,166 structures in 70 structure sets,
+run with `scripts/validate_contour_reading.py`.
+
+| 2D: shared reading against the vendored parser | Structures |
+|---|---|
+| Both read, regions identical | 5,143 |
+| Read now, refused before: an outline touching or crossing itself, with one region | 6 |
+| Refused by both | 19 |
+| Read before, refused now | **0** |
+
+| 3D: new masks against the previous fill | Structures |
+|---|---|
+| Voxel-identical | 4,619 |
+| Changed | 547 |
+| Gained or lost a mask | 0 |
+
+Every one of the 22,123 changed voxels has its centre exactly on an outline
+edge. Every change is a tie settled by the half-open rule; none is a change in
+how a contour was read. The ties are almost all in vendor A. Only vendor A
+draws outlines along rows and columns of voxel centres: 6.2% of its edges on
+the study organs, against 0.0% for every other vendor. The previous fill counted
+every centre on those edges as inside. That inflated vendor A's masks by a
+partial voxel layer along those stretches:
+
+| Study organ | Vendor A masks changed | Volume change |
+|---|---|---|
+| Eye_L | 8 of 10 | 0 to −6.25% |
+| Mandible | 8 of 10 | up to −0.82% |
+| Parotid_R | 8 of 10 | up to −0.43% |
+
+Vendor B changes by up to −0.22%, and C by −0.05% or less. Varian, D,
+RaySearch and Radformation are unchanged on every study organ. Across all
+structures, vendor A's largest changes are 0.1–3.5% of volume. **3D results for
+vendor A computed before this change are superseded.** The previous numbers
+carried a bias the other vendors did not.
+
+The new fill is faster: 219 s against 815 s for the whole cohort (3.7x),
+reading step included.
+
 ---
 
 ## 7. Results schema
@@ -814,8 +920,12 @@ reference engine. Nothing further is needed from the supplier to start.
 | D7 | Separate `error_mm` for each engine | The argument names one thing and means two; one value for both costs three orders of magnitude |
 | D8 | References naming nothing in the data are set aside before the strict parser runs | The parser cannot tell a reference that contradicts the image from one naming a slice that is not loaded. One vendor of seven on a real cohort wrote only the second kind, and lost every structure to it (0 → 435 of 447). Contradictions still refuse, geometric placement is still enforced, and the parser is unmodified |
 | D9 | The engine's quantile refusal is lifted and reapplied per metric, on the reported (larger-direction) value | Raising discarded every well-defined metric with the one undetermined quantile, and refused medians the other direction had already settled. Same threshold; a value is still never chosen from inside the interval |
+| D10 | The vendored parser leaves the production path; one shared reading serves both streams | The streams read loops by different rules, so a 2D/3D difference could be a reading difference. The parser stays as a test oracle; on everything it accepts the regions are identical |
 | — | Shapely 2.0.6 rather than 2.1.2 | Permitted by both packages' ranges; 56/56 and 49/49 tests plus the full 150-pair suite and 44 stress cases verified on ours |
 | ~~D2~~ | ~~`error_mm` 0.05~~ | Withdrawn in revision 2 — the setting no longer affects cost or value |
 
 Nothing else in the numerical path is changed. The kernels are vendored
 byte-identical and each supplier's acceptance suite runs at its own settings.
+The vendored parser is no longer called in production (D10). It too is
+byte-identical, and it now serves as the oracle the shared reading is tested
+against.

@@ -66,6 +66,44 @@ percentile over the other <i>even for identical anatomy</i>. The two streams are
 complementary, not redundant, and a difference between them is not an error in
 either.</p>
 
+<h2>Reading the contours (both streams)</h2>
+
+<p>A structure set stores outlines, not regions. Before anything is measured, the
+outlines on each slice are read as an area: which loops are islands, which are
+holes, and what an outline that touches or crosses itself encloses. Both streams
+use this one reading. The 3D metrics fill the regions it produces and the 2D
+metrics measure their outlines, so a difference between a 2D and a 3D number
+comes from how each measures, never from reading the contour differently.</p>
+
+<table>
+<tr><th>What is on the slice</th><th>How it is read</th></tr>
+<tr><td>Loops declared <code>CLOSEDPLANAR_XOR</code></td>
+    <td>Overlaps cancel, as the declaration states</td></tr>
+<tr><td>Loops apart from each other</td><td>Separate islands</td></tr>
+<tr><td>A loop inside another loop</td>
+    <td>A hole. An island inside a hole is inside again, and so on by depth</td></tr>
+<tr><td>Loops touching at an edge or a point</td><td>Merged into one region</td></tr>
+<tr><td>Loops partially overlapping, or the same loop drawn twice</td>
+    <td><b>Refused.</b> Union and hole are both plausible, they give different
+    tissue, and the file does not say which was meant</td></tr>
+<tr><td>One outline touching or crossing itself</td>
+    <td>Read as the region it encloses when the even-odd and non-zero winding
+    rules agree on that region. Lines enclosing nothing, such as a spike drawn
+    out and back, are dropped. If the rules disagree the outline goes around
+    some area twice, and it is <b>refused</b></td></tr>
+<tr><td>An outline enclosing no area</td><td>Dropped</td></tr>
+</table>
+
+<p>A refused structure gets neither 3D nor 2D metrics, and the row says which
+rule refused it. When the audit sidecar is on, it records for each structure
+anything the reading had to interpret: holes, merges, repaired outlines and
+dropped outlines.</p>
+
+<p class="note">Which slice a contour belongs to is checked separately by each
+stream, because they need different things. The 3D fill uses the nearest slice
+and allows up to half a slice of tilt. The 2D metrics need each contour within
+0.001&nbsp;mm of its slice plane and wholly inside the image.</p>
+
 <h2>3D mask metrics</h2>
 
 <p>Contours are filled onto the CT voxel grid and the resulting binary masks are
@@ -114,34 +152,23 @@ patient coordinates, with signed components, and catches a positional shift that
 a high overlap score can hide.</p>
 
 <h3>Rasterisation</h3>
-<p>How each contour becomes a mask, adapted from dcmrtstruct2nii:</p>
+<p>How each structure becomes a mask, adapted from dcmrtstruct2nii:</p>
 <ol>
 <li>Every vertex is converted from patient millimetres to <b>continuous</b> voxel
 coordinates, using the image's origin, spacing and orientation. Vertices are not
 rounded to the nearest voxel, so the outline keeps its sub-voxel position.</li>
-<li>The contour is assigned to the nearest slice. A contour whose vertices span
+<li>Each contour is assigned to the nearest slice. A contour whose vertices span
 more than half a slice through-plane is not planar in the image, and that
 structure produces no mask. Contours on slices outside the image are
 skipped.</li>
-<li>Each contour is filled on its slice. A voxel is inside when its
-<b>centre</b> lies inside the outline or exactly on it.</li>
-<li>When one structure has <b>several loops on the same slice</b>, each loop is
-filled and the fills are combined by exclusive-or: a voxel covered by an odd
-number of loops is inside, and one covered by an even number is not.</li>
+<li>The loops on each slice are read into regions by the rules in
+<i>Reading the contours</i> above, the same reading the 2D metrics measure.</li>
+<li>Each region is filled onto its slice. A voxel is inside when its
+<b>centre</b> lies inside the region. A centre lying exactly on an edge belongs
+to one side only, so a shape keeps its true area and two regions sharing an
+edge never both claim, or both leave out, the voxels along it.</li>
 </ol>
-<p>Step 4 is what makes a loop drawn inside another loop a <b>hole</b>, which is
-the usual intent. It also means:</p>
-<ul>
-<li>two loops that <b>partially overlap</b> lose the overlap: the region both
-cover becomes background;</li>
-<li>two loops that <b>share an edge</b> leave a one-voxel seam of background
-along it, because both fill the voxel centres on that edge;</li>
-<li>a single loop that <b>crosses itself</b> (a figure-of-eight) is filled
-even-odd: each lobe is inside.</li>
-</ul>
-<p>None of these produce a warning. Structures that declare their loop parity
-explicitly (<code>CLOSEDPLANAR_XOR</code>), and open or point contours, produce
-no mask and are reported as a failed conversion.</p>
+<p>A structure the reading refuses gets no mask, and its row says why.</p>
 
 <h2>2D contour metrics</h2>
 
@@ -222,14 +249,9 @@ exact coincidence of lengths, so it is rare with real contours. It is most
 likely where a test contour copies the ground truth exactly on some slices.</p>
 
 <h3>Contour topology</h3>
-<p>Simple closed loops and explicitly declared parity contours are read as
-given. Where a structure has one loop drawn wholly inside another on the same
-slice, without declaring it, the inner loop is read as a hole. This is the same
-reading the 3D fill gives it, so the two streams agree. Loops that only share an
-edge are merged into one region. A loop that crosses itself, or two loops that
-partially overlap, have no single correct reading, so those structures are
-<b>refused</b> rather than guessed. The 3D fill still produces a mask for them
-(see Rasterisation), so they can carry 3D metrics and no 2D metrics.</p>
+<p>The loops are read by the rules in <i>Reading the contours</i> above, the same
+reading the 3D fill uses. The 2D metrics are then measured along the outlines of
+the regions it produces.</p>
 
 <h2>What is reported when a metric cannot be computed</h2>
 
@@ -237,9 +259,11 @@ partially overlap, have no single correct reading, so those structures are
 perfect agreement and would be indistinguishable from one. The 2D status column
 carries the reason instead, and the numeric cells stay empty. The common causes
 are a consensus ground truth (which is created as a mask and has no contours at
-all), no shared planes, and contour topology that cannot be read unambiguously.
-These blank every 2D metric in the row. An undetermined quantile, described
-above, blanks only its own cell.</p>
+all), no shared planes, and a contour that is not on a slice plane or lies
+partly outside the image. These blank every 2D metric in the row. An
+undetermined quantile, described above, blanks only its own cell. A structure
+whose loops the reading refuses has no metrics in either stream, and the row's
+error says why.</p>
 
 <p class="note">A failure in one stream does not void the other. A row can carry
 3D metrics and a 2D status explaining why the 2D columns are blank.</p>

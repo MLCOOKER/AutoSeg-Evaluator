@@ -8,8 +8,10 @@ contour distance — to the definitions in Boukerroui et al. (2023) Supplement A
 
 This module is the boundary between the application and two vendored kernels.
 Everything the suppliers call integration responsibility lives here: choosing an
-engine, resolving contour topology, putting both structures in one frame, and
-turning an exception into something a results table can show.
+engine, placing contours on the image's planes, putting both structures in one
+frame, and turning an exception into something a results table can show. The
+loops themselves are read by :mod:`autoseg_evaluator.core.contour_reading`,
+which the 3D stream shares, so both streams measure the same regions.
 
 **Undefined is reported, never substituted.** Both kernels raise rather than
 returning a plausible number, and that is the property worth preserving. A
@@ -41,16 +43,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydicom.dataset import Dataset
+import numpy as np
 
 from autoseg_evaluator.core.contour_grid import PLANE_ALIGNMENT_BUDGET_MM, ContourGrid
+from autoseg_evaluator.core.contour_reading import ContourReadingError, Outline, read_outlines
 from autoseg_evaluator.vendor import native_contour_metrics as _reference
 from autoseg_evaluator.vendor import native_contour_metrics_fast as _fast
 from autoseg_evaluator.vendor.native_contour_metrics import (
     AmbiguousQuantileError as _ReferenceAmbiguousQuantileError,
 )
-from autoseg_evaluator.vendor.native_contour_metrics_fast import geometry as _fast_geometry
-from autoseg_evaluator.vendor.native_contour_metrics_fast import polygon_compat as _compat
 from autoseg_evaluator.vendor.native_contour_metrics_fast.errors import AmbiguousQuantileError
 from autoseg_evaluator.vendor.native_contour_metrics_fast.platforms import NativeLibraryError
 
@@ -139,8 +140,11 @@ class ContourRegions:
     nested_planes: int = 0
     #: References in the file that pointed at nothing and were set aside before
     #: parsing, in words. Empty for a structure set that is internally
-    #: consistent, which is most of them. See :func:`_set_aside_dangling_references`.
+    #: consistent, which is most of them. See :func:`_check_references`.
     references_set_aside: tuple[str, ...] = ()
+    #: What reading the loops had to interpret, in words. The 3D stream reads the
+    #: same structure by the same rules, so it records the same interpretation.
+    reading_notes: tuple[str, ...] = ()
 
     @property
     def empty(self) -> bool:
@@ -173,73 +177,68 @@ class PolygonMetrics:
 def parse_structure(dataset: Any, roi_number: int, grid: ContourGrid) -> ContourRegions:
     """Read one ROI into planar regions in the grid's frame.
 
-    Some exporters write a hole as a second ordinary ``CLOSED_PLANAR`` loop
-    inside the first, instead of declaring it with a keyhole contour or
-    ``CLOSEDPLANAR_XOR``. Those are composed even-odd here, without asking.
+    Two steps, and only the first belongs to this stream:
 
-    That was an opt-in at first, on the reasoning that such a loop has
-    unambiguous *geometry* and ambiguous *intent*. The reasoning was sound and
-    the conclusion was wrong, because it ignored what the rest of this
-    application already does: **both mask rasterisers have composed these rings
-    even-odd since v1** — verified on a real structure, whose mask comes out with
-    holes in it — so every published result from this software already rests on
-    that interpretation. Making the polygon path stricter did not avoid the
-    assumption; it made 22 of 357 structures appear in one stream and vanish from
-    the other, which is a backend difference wearing the costume of a metric
-    difference.
+    1. **Placement, strictly.** Every contour must lie within
+       :data:`~autoseg_evaluator.core.contour_grid.PLANE_ALIGNMENT_BUDGET_MM` of
+       a slice plane, inside the image, and — where its references name a slice
+       in this series — on that slice. Planar metrics pair contours by plane, so
+       a contour off its plane would be compared against the wrong one.
+    2. **Reading the loops** into regions, by
+       :func:`~autoseg_evaluator.core.contour_reading.read_outlines`: the same
+       function the 3D stream fills from. Holes, merges and refusals are decided
+       once, by one set of rules, for both streams.
 
-    So the interpretation is shared, and stated once, rather than offered as a
-    switch that can only ever put the two streams out of step.
-
-    What is *not* shared: rings that touch, cross or partially overlap are
-    refused here and silently combined by the mask path. Those have no single
-    reading, and refusing one is better than picking one — but it does mean a
-    structure can carry mask metrics and no polygon metrics. None were found in
-    the reference cohort.
+    The placement checks reproduce the vendored parser's
+    (``geometry.parse_roi``), which the tests keep as an oracle: every structure
+    it accepts must read to the identical region here. Where the reading goes
+    further it is deliberate and recorded in the spec (D10) — a hole touching
+    its outer loop is read as a hole, an outline touching or crossing itself is
+    read when both fill rules agree on its region, and an outline enclosing no
+    area is dropped. The vendored parser refuses all three.
 
     References that point at nothing are set aside first; see
-    :func:`_set_aside_dangling_references` for which, and why that is not the
-    same as ignoring them.
+    :func:`_check_references` for which, and why that is not the same as
+    ignoring them.
     """
-    source, set_aside = _set_aside_dangling_references(dataset, int(roi_number), grid)
+    number = int(roi_number)
+    drop_references, set_aside = _check_references(dataset, number, grid)
+    outlines, vertices = _place_outlines(dataset, number, grid, drop_references)
     try:
-        parsed = _compat.parse_compatible(
-            source, int(roi_number), grid.as_parser_grid(), allow_nested=True
-        )
-    except _fast_geometry.Unsupported as exc:
+        reading = read_outlines(outlines)
+    except ContourReadingError as exc:
         raise ContoursUnavailableError(f"contours not readable: {exc}") from exc
-
-    roi, nested = _unpack_compat(parsed)
     return ContourRegions(
-        planes=dict(roi.planes),
-        geometric_type=str(roi.geometric_type),
-        vertices=int(roi.vertices),
-        nested_planes=int(nested),
+        planes=dict(reading.regions),
+        geometric_type=reading.geometric_type,
+        vertices=vertices,
+        nested_planes=reading.hole_slices,
         references_set_aside=set_aside,
+        reading_notes=reading.notes,
     )
 
 
-def _set_aside_dangling_references(
+def _check_references(
     dataset: Any, roi_number: int, grid: ContourGrid
-) -> tuple[Any, tuple[str, ...]]:
-    """Hand the parser this ROI without the references that point at nothing.
+) -> tuple[bool, tuple[str, ...]]:
+    """Decide which of this ROI's references can be checked, and refuse the rest.
 
-    The parser checks two references before it will read a contour: the ROI's
+    Two references say where a structure was drawn: the ROI's
     ``ReferencedFrameOfReferenceUID`` must be the image series' frame, and each
     contour's ``ContourImageSequence`` must name the slice the contour lies on.
-    Both exist to catch a contour placed on the wrong image. Neither separates a
-    reference that *contradicts* the image from one that names nothing in the
-    data at all, and real exports produce the second kind: a structure set
-    written against one copy of a CT and loaded beside another whose UIDs were
-    remapped carries references to slices that are not there. On the tender H&N
-    cohort that was one vendor of seven, every structure, every patient.
+    Both exist to catch a contour placed on the wrong image. Neither, as the
+    vendored parser checks them, separates a reference that *contradicts* the
+    image from one that names nothing in the data at all, and real exports
+    produce the second kind: a structure set written against one copy of a CT
+    and loaded beside another whose UIDs were remapped carries references to
+    slices that are not there. On the tender H&N cohort that was one vendor of
+    seven, every structure, every patient.
 
     A reference to nothing is unverifiable, not wrong. So it is set aside, and
-    the contour's placement is established the way the mask path has always
-    established it — from its coordinates — except more strictly: the parser
-    still requires every contour to lie within
+    the contour's placement is established from its coordinates — which must
+    still lie within
     :data:`~autoseg_evaluator.core.contour_grid.PLANE_ALIGNMENT_BUDGET_MM` of a
-    slice plane and inside the image bounds, and the mask path requires neither.
+    slice plane and inside the image bounds.
 
     What is set aside, and only when it is unambiguous:
 
@@ -250,7 +249,7 @@ def _set_aside_dangling_references(
       frame it could mean.
     * **Image references of which none resolves.** Only all-or-nothing: if any
       of this ROI's references name a slice in this series, they all stay and
-      the parser checks each one.
+      each is checked.
 
     What is still refused, with a reason naming which it was:
 
@@ -260,11 +259,9 @@ def _set_aside_dangling_references(
     * an undeclared frame in a set declaring several, or none matching;
     * references of which some resolve and some do not.
 
-    The dataset passed in is never modified: it is cached and shared with the
-    mask path. When something is set aside the parser gets a one-ROI view built
-    from the same data elements, which also keeps the nested-ring path's copy of
-    the dataset down to one structure instead of a hundred. The returned notes
-    are for the audit record and never contain a UID.
+    Returns whether the image references are to be set aside, and what was set
+    aside in words, for the audit record. The words never contain a UID, and
+    the dataset — cached and shared with the mask path — is never modified.
     """
     entries = [
         r
@@ -306,14 +303,9 @@ def _set_aside_dangling_references(
             "image series' frame"
         )
 
-    items = [
-        r
-        for r in getattr(dataset, "ROIContourSequence", None) or []
-        if int(r.ReferencedROINumber) == roi_number
-    ]
     references = [
         str(getattr(ref, "ReferencedSOPInstanceUID", "") or "")
-        for item in items
+        for item in _contour_items(dataset, roi_number)
         for contour in getattr(item, "ContourSequence", None) or []
         for ref in getattr(contour, "ContourImageSequence", None) or []
     ]
@@ -333,66 +325,85 @@ def _set_aside_dangling_references(
             f"within {PLANE_ALIGNMENT_BUDGET_MM:g} mm of a slice plane and inside "
             "the image bounds"
         )
-
-    if not set_aside:
-        return dataset, ()
-    return _one_roi_view(entries[0], items, roi_number, frame, drop_references), tuple(set_aside)
+    return drop_references, tuple(set_aside)
 
 
-def _one_roi_view(
-    entry: Any, items: Sequence[Any], roi_number: int, frame: str, drop_references: bool
-) -> Dataset:
-    """A structure set holding only this ROI, sharing the original's elements.
+def _contour_items(dataset: Any, roi_number: int) -> list[Any]:
+    return [
+        r
+        for r in getattr(dataset, "ROIContourSequence", None) or []
+        if int(r.ReferencedROINumber) == roi_number
+    ]
 
-    Elements are carried across by reference, so nothing is converted or
-    copied: a view of a large structure costs a few hundred small objects, not a
-    second copy of its coordinates.
+
+def _place_outlines(
+    dataset: Any, roi_number: int, grid: ContourGrid, drop_references: bool
+) -> tuple[list[Outline], int]:
+    """Assign every contour to a slice of the grid, or refuse the structure.
+
+    Returns the outlines in the grid's in-plane millimetres, and the vertex
+    count. Each refusal leads with the vendored parser's own phrase, so a reason
+    reads the same whichever produced it.
     """
-    view = Dataset()
-    roi = Dataset()
-    roi.add(entry["ROINumber"])
-    roi.ReferencedFrameOfReferenceUID = frame
-    view.StructureSetROISequence = [roi]
+    items = _contour_items(dataset, roi_number)
+    if len(items) != 1 or not getattr(items[0], "ContourSequence", None):
+        raise ContoursUnavailableError(
+            "contours not readable: Missing contour sequence — no contours are stored "
+            "for this structure"
+        )
+    origin = np.asarray(grid.origin, dtype=float)
+    basis = np.asarray(grid.basis, dtype=float)
+    spacing = np.asarray(grid.spacing, dtype=float)
+    columns, rows, slices = grid.size
+    in_plane_limit = np.asarray([columns, rows], dtype=float) - 0.5
 
-    rebuilt = []
-    for item in items:
-        holder = Dataset()
-        holder.ReferencedROINumber = roi_number
-        contours = []
-        for contour in getattr(item, "ContourSequence", None) or []:
-            kept = Dataset()
-            for keyword in ("ContourGeometricType", "NumberOfContourPoints", "ContourData"):
-                if keyword in contour:
-                    kept.add(contour[keyword])
-            if not drop_references and "ContourImageSequence" in contour:
-                kept.add(contour["ContourImageSequence"])
-            contours.append(kept)
-        # An empty sequence stays absent, so the parser's own "missing contour
-        # sequence" refusal still fires exactly as it would have.
-        if contours:
-            holder.ContourSequence = contours
-        rebuilt.append(holder)
-    view.ROIContourSequence = rebuilt
-    return view
-
-
-def _unpack_compat(parsed: Any) -> tuple[Any, int]:
-    """The compat parser reports an audit policy alongside the ROI.
-
-    Its exact shape is the supplier's to choose, so this reads it defensively
-    rather than pinning a tuple layout we would then have to track.
-    """
-    if isinstance(parsed, tuple):
-        roi = parsed[0]
-        policy = parsed[1] if len(parsed) > 1 else None
-    else:
-        roi, policy = parsed, None
-    nested = 0
-    if isinstance(policy, Mapping):
-        nested = int(policy.get("nested_plane_count", policy.get("nested_planes", 0)) or 0)
-    elif isinstance(policy, int):
-        nested = int(policy)
-    return roi, nested
+    outlines: list[Outline] = []
+    vertices = 0
+    for contour in items[0].ContourSequence:
+        data = np.asarray(getattr(contour, "ContourData", None) or [], dtype=float)
+        if data.size % 3 or not np.isfinite(data).all():
+            raise ContoursUnavailableError(
+                "contours not readable: Invalid coordinates — a contour's coordinates "
+                "are not complete x, y, z triples of finite numbers"
+            )
+        xyz = data.reshape(-1, 3)
+        declared = getattr(contour, "NumberOfContourPoints", None)
+        if declared is not None and int(declared) != len(xyz):
+            raise ContoursUnavailableError(
+                f"contours not readable: Point count mismatch — a contour declares "
+                f"{int(declared)} points and holds {len(xyz)}"
+            )
+        if not len(xyz):
+            continue
+        local = (xyz - origin) @ basis
+        z = int(np.floor(local[0, 2] / spacing[2] + 0.5))
+        if z < 0 or z >= slices:
+            raise ContoursUnavailableError(
+                "contours not readable: Off-grid or nonplanar contour — a contour lies "
+                "beyond the image's first or last slice"
+            )
+        offset = float(np.max(np.abs(local[:, 2] - z * spacing[2])))
+        if offset > PLANE_ALIGNMENT_BUDGET_MM:
+            raise ContoursUnavailableError(
+                f"contours not readable: Off-grid or nonplanar contour — a contour lies "
+                f"{offset:.3g} mm from its slice plane, against a limit of "
+                f"{PLANE_ALIGNMENT_BUDGET_MM:g} mm"
+            )
+        index = local[:, :2] / spacing[:2]
+        if (index < -0.5).any() or (index > in_plane_limit).any():
+            raise ContoursUnavailableError(
+                "contours not readable: Out of CT bounds — part of a contour lies outside the image"
+            )
+        if not drop_references:
+            for ref in getattr(contour, "ContourImageSequence", None) or []:
+                if grid.sops.get(str(getattr(ref, "ReferencedSOPInstanceUID", ""))) != z:
+                    raise ContoursUnavailableError(
+                        "contours not readable: Referenced CT plane mismatch — a contour "
+                        "names an image slice other than the one it lies on"
+                    )
+        outlines.append(Outline(z, local[:, :2], str(getattr(contour, "ContourGeometricType", ""))))
+        vertices += len(xyz)
+    return outlines, vertices
 
 
 # ---- Quantiles the data do not determine ----------------------------------

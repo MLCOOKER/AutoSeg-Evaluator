@@ -97,6 +97,14 @@ def build(rows: Iterable[Mapping[str, Any]], *, settings: Mapping[str, Any] | No
                 "Applies to the mask stream only. The polygon stream's shared-plane "
                 "rule already excludes contours outside the ground truth's planes."
             ),
+            "contour_reading": (
+                "Both streams read each structure's loops into regions by one set of "
+                "rules. Where the reading had to interpret (a loop inside a loop read "
+                "as a hole, touching loops merged, an outline touching or crossing "
+                "itself read as its one region, an outline with no area dropped), "
+                "it is recorded per structure under contour_reading, in both the mask "
+                "and polygon records."
+            ),
             "references_set_aside": (
                 "Polygon stream only. A structure set's frame or image references "
                 "that named nothing in the loaded data were set aside, and the "

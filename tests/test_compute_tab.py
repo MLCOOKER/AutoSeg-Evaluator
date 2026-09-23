@@ -361,9 +361,10 @@ def test_the_definitions_reference_opens_and_explains_the_plane_rule(qapp):
     assert "only the planes where" in text
     assert "truncation option in the Match Contours tab applies to the 3D mask stream" in text
     assert "weighted by arc length" in text
-    # Where the 3D numbers come from, and how a contour becomes a mask.
+    # Where the 3D numbers come from, and the one reading of loops both use.
     assert "google-deepmind/surface-distance" in text
-    assert "exclusive-or" in text
+    assert "Reading the contours (both streams)" in text
+    assert "even-odd and non-zero winding" in text
     # Non-modal on purpose: read a definition while changing what it describes.
     assert not tab._definitions_dialog.isModal()
     tab.deleteLater()

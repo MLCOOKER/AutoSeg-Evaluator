@@ -7,6 +7,16 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **2D metrics were unavailable for structure sets with dangling references.**
+  A structure set naming a Frame of Reference it never declares, or image slices
+  absent from the loaded CT, was refused outright; on one cohort that voided
+  every 2D metric in the run. References that name nothing are now set aside,
+  and contours are placed from their coordinates, still within 0.001 mm of a
+  slice plane. References that contradict the image are still refused.
+- **One undetermined quantile voided every 2D metric in the pair.** A 2D median
+  or 95% Hausdorff that the contours leave undetermined now blanks only its own
+  cell, with the range it could take. It is judged on the reported value, so a
+  median the other direction settles is reported.
 - **Dose was matched to structure sets by PatientID alone.** `_load_dose()`
   walked every imaging context for the patient and kept the first
   PLAN-summation dose it found, never consulting the structure set. On a
@@ -180,6 +190,29 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   voxel-identical to PlatiPy 0.7.2 by `tests/test_platipy_equivalence.py`.
   Case coverage is unchanged: on the HN1 set both backends converted exactly
   the same 357 of 389 ROIs.
+- **Both metric streams read contours through one function**
+  (`core/contour_reading.py`). ⚠️ **This changes 3D numerical output for some
+  vendors.** Previously the 3D fill combined every loop on a slice by
+  exclusive-or, while the 2D stream used a stricter parser. The two disagreed on
+  touching loops (a one-voxel seam in 3D), partial overlaps (the overlap silently
+  deleted in 3D), outlines crossing themselves (filled in 3D, refused in 2D) and
+  declared `CLOSEDPLANAR_XOR` (no 3D mask at all). Now one set of rules applies
+  to both. Holes, islands and touching loops are read as drawn. Partial overlaps
+  and duplicated loops are refused, because union and hole are both plausible.
+  An outline crossing itself is read only when the even-odd and non-zero rules
+  agree on its region. A refused structure's row now says why, instead of
+  "could not be rasterised".
+
+  The 3D fill also changes its edge rule. A voxel centre exactly on an outline
+  edge now belongs to one side (half-open), so shapes keep their true area.
+  Previously it counted as inside for every loop, which over-filled. On the
+  tender H&N cohort (5,166 structures), 4,619 masks are voxel-identical and 547
+  change. Every one of the 22,123 changed voxels has its centre on an edge.
+  They are almost all vendor A's, the only vendor drawing along rows and
+  columns of voxel centres. Its volumes fall by 0.1–3.5% on most structures and
+  up to 6.25% on the left eye. The 2D reading matches the vendored parser on all
+  5,143 structures both read, and additionally reads 6 that it refused. The fill
+  is also 3.7x faster.
 
 ## [2.6.1] — 2026-06-30
 
