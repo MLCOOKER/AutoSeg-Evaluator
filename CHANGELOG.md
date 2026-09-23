@@ -214,6 +214,29 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   5,143 structures both read, and additionally reads 6 that it refused. The fill
   is also 3.7x faster.
 
+### Removed
+- **Mask-based Added Path Length (`apl_mean`, `apl_total`).** ⚠️ **v1 APL values
+  are now historical, not reproducible by this version.** Added path length
+  measures boundary that would have to be redrawn. That needs the edge as drawn,
+  not as a voxel staircase, so it now comes only from the 2D contour metrics
+  (2D APL and NAPL, with both directions), measured on the RTSTRUCT outlines. The
+  mask version was a port of PlatiPy's per-slice dilation.
+
+  Gone with it:
+  - the two checkboxes and the APL τ on the Compute tab;
+  - the same in Tab 2's inter-observer dialog;
+  - the results and CSV columns, and the Report tab entries;
+  - PlatiPy APL parity, from the equivalence tests and from
+    `scripts/validate_against_upstream.py`.
+
+  Older `settings.json` files that still switch mask APL on load cleanly: the
+  retired keys are dropped on load and left out of the next save. Sessions never
+  stored metric settings, so no session schema change is needed.
+
+  `scripts/validate_against_upstream.py` now pins its PlatiPy mask-parity check
+  to the `legacy` rasteriser. That is the only backend meant to match PlatiPy;
+  since the default changed, the check was comparing the wrong one.
+
 ## [2.6.1] — 2026-06-30
 
 ### Fixed

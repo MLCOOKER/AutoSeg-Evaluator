@@ -388,7 +388,8 @@ def test_a_tolerance_metric_reports_its_tolerance():
     from autoseg_evaluator.core.readable import tolerance_note
 
     assert tolerance_note("surface_dice", 3.0, None) == "tolerance = 3.00 mm"
-    assert tolerance_note("apl_mean", None, 2.5) == "tolerance = 2.50 mm"
+    # The 2D APL takes the 2D stream's tolerance, not Surface Dice's.
+    assert tolerance_note("poly_apl_mm", 3.0, 2.5) == "tolerance = 2.50 mm"
     assert tolerance_note("dice", 3.0, 2.5) == ""
 
 
@@ -408,9 +409,16 @@ def test_metric_scale_classes():
         metric_scale,
     )
 
-    for metric in ("dice", "surface_dice", "precision", "recall", "staple_sensitivity"):
+    for metric in (
+        "dice",
+        "surface_dice",
+        "precision",
+        "recall",
+        "staple_sensitivity",
+        "poly_napl",
+    ):
         assert metric_scale(metric) == SCALE_BOUNDED_UNIT, metric
-    for metric in ("hausdorff95", "mean_surface_distance", "apl_total", "dmean_gy", "V20gy_cc"):
+    for metric in ("hausdorff95", "mean_surface_distance", "poly_hd95_mm", "dmean_gy", "V20gy_cc"):
         assert metric_scale(metric) == SCALE_NON_NEGATIVE, metric
     for metric in ("com_dx_mm", "volume_diff_cc", "d2cc_gy_diff"):
         assert metric_scale(metric) == SCALE_SIGNED, metric

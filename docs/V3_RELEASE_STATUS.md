@@ -20,7 +20,7 @@ of v3.0.0 is legible from the repository rather than from memory.
 | 2 | Validate dcmrtstruct2nii against PlatiPy | **Done** |
 | 3 | Robust DICOM ingestion and grouping, without RTPLAN | **Done** |
 | 4 | Performance / parallelisation | **Not started** — needs re-profiling first |
-| 5 | Two-stream metric architecture | **Phases 1–6 done**; phase 7 (remove mask APL) remaining |
+| 5 | Two-stream metric architecture | **Done**, all seven phases |
 | 6 | Canonical organ bucketing + statistics | **Done**, both halves |
 | 7 | Quantify DVH on mask vs on RTSS | **Not started** |
 | 8 | Validation report for the Stream B metrics | **Partly done** — synthetic half written |
@@ -122,10 +122,13 @@ landed:
   vendor A's 3D masks (volumes −0.1 to −3.5 %, Eye_L up to −6.25 %): every
   changed voxel had its centre exactly on an outline edge.
 
-**Phase 7 remains**: remove mask APL (`apl_mean`, `apl_total`,
-`_apl_per_slice`), migrate the settings and session keys, and rewrite the
-Methods, project overview, README and tooltips. This makes the v1 (Rusanov et
-al. 2025) APL values historical rather than reproducible.
+**Phase 7 is done** (2026-09-24): mask APL is removed from the code, the
+Compute tab, Tab 2's inter-observer dialog, results, the Report tab and the
+tests, and `settings.json` drops its retired keys on load. Added path length
+now comes only from the 2D stream. This makes the v1 (Rusanov et al. 2025) APL
+values historical rather than reproducible. `7b6cec1` is the last commit that
+computes mask APL. The manuscript Methods text lives outside this repository
+and still needs the matching change.
 
 ### 7 — DVH on a mask versus DVH on RTSS
 

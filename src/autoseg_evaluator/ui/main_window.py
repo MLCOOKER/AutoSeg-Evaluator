@@ -315,7 +315,7 @@ class MainWindow(QMainWindow):
         self._compute_tab.progress_panel().begin(total_tasks)
 
         # Stamp the active tolerances on the ResultsManager so the Surface
-        # Dice / APL column headers (and CSV export) carry the τ value
+        # Dice / 2D APL column headers (and CSV export) carry the τ value
         # next to the metric name. Stops users accidentally merging CSVs
         # computed at different tolerances in Excel.
         tol = config.get("tolerances") or {}
@@ -323,12 +323,6 @@ class MainWindow(QMainWindow):
             sd_tau_mm=float(tol.get("surface_dice_tau_mm"))
             if tol.get("surface_dice_tau_mm") is not None
             else None,
-            apl_tau_mm=float(tol.get("apl_tolerance_mm"))
-            if tol.get("apl_tolerance_mm") is not None
-            else None,
-            # The polygon stream keeps its own tolerance rather than sharing the
-            # mask stream's; two APL columns headed with one number would be
-            # worse than none.
             poly_tau_mm=float((config.get("polygon") or {}).get("tolerance_mm"))
             if (config.get("polygon") or {}).get("tolerance_mm") is not None
             else None,

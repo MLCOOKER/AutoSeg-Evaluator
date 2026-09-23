@@ -25,7 +25,6 @@ _DEFAULTS: dict[str, Any] = {
     "theme": "light_blue.xml",
     "tolerances": {
         "surface_dice_tau_mm": 3.0,
-        "apl_tolerance_mm": 3.0,
         "similarity_threshold": 0.6,
     },
     "dvh": {
@@ -41,8 +40,6 @@ _DEFAULTS: dict[str, Any] = {
         "hausdorff95": True,
         "mean_surface_distance": True,
         "surface_dice": True,
-        "apl_mean": False,
-        "apl_total": False,
     },
     # The native-polygon stream. Off by default: it is a second way of measuring
     # the same structures, not a refinement of the first, and it adds its own
@@ -98,7 +95,26 @@ def load_settings() -> dict[str, Any]:
             user = json.load(f)
     except (OSError, json.JSONDecodeError):
         return default_settings()
-    return _merge(default_settings(), user)
+    return _merge(default_settings(), _drop_retired(user))
+
+
+#: Settings that named something the application no longer has. They are
+#: dropped on load, so the next save leaves them out, instead of travelling on
+#: forever and suggesting to anyone reading the file that they still do
+#: something. Mask APL and its tolerance were removed in v3 (spec D3).
+_RETIRED: dict[str, tuple[str, ...]] = {
+    "compute_geometric": ("apl_mean", "apl_total"),
+    "tolerances": ("apl_tolerance_mm",),
+}
+
+
+def _drop_retired(user: dict[str, Any]) -> dict[str, Any]:
+    for section, keys in _RETIRED.items():
+        block = user.get(section)
+        if isinstance(block, dict):
+            for key in keys:
+                block.pop(key, None)
+    return user
 
 
 def save_settings(settings: dict[str, Any]) -> None:

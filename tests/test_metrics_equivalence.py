@@ -1,21 +1,20 @@
 """Bit-for-bit equivalence of AutoSeg metric implementations vs upstream.
 
-* Volumetric Dice, Hausdorff 100% / 95%, Surface Dice @ 3 mm, mean
-  surface distance — compared against
-  ``google-deepmind/surface-distance`` (the upstream of AutoSeg's
-  embedded port).
-* Total APL, Mean APL @ 3 mm — compared against
-  ``platipy.imaging.label.comparison`` (the original of AutoSeg's
-  ``apl_total`` / ``apl_mean`` ports).
+Volumetric Dice, Hausdorff 100% / 95%, Surface Dice @ 3 mm and mean surface
+distance are compared against ``google-deepmind/surface-distance``, the
+upstream of AutoSeg's embedded port.
 
 The test builds a tiny synthetic CT + a single RTSTRUCT carrying two
 ROIs ("GT" and "Test"; offset squares spanning multiple slices) so the
-seven metric outputs are non-trivial — Dice strictly between 0 and 1,
-Hausdorff > 0, APL > 0 — and asserts that every AutoSeg / upstream
-comparison produces exactly zero absolute difference.
+metric outputs are non-trivial — Dice strictly between 0 and 1,
+Hausdorff > 0 — and asserts that every AutoSeg / upstream comparison
+produces exactly zero absolute difference.
 
-Skipped when upstream packages aren't installed. CI explicitly installs
-``platipy>=0.7`` and ``surface-distance`` so this test runs there.
+Mask APL, and its equivalence with PlatiPy, went with the metric in v3: added
+path length is now measured on the contours themselves (spec D3), and that
+stream has its own acceptance suites.
+
+Skipped when ``surface-distance`` isn't installed; CI installs it.
 """
 
 from __future__ import annotations
@@ -36,12 +35,9 @@ from pydicom.uid import (
 
 from autoseg_evaluator.core import surface_distance as autoseg_sd
 from autoseg_evaluator.core.masks import extract_mask_for_roi, read_dicom_image, read_rtstruct
-from autoseg_evaluator.core.metrics import apl_mean as autoseg_apl_mean
-from autoseg_evaluator.core.metrics import apl_total as autoseg_apl_total
 
-# Skip the whole module if either upstream isn't installed.
+# Skip the whole module if the upstream isn't installed.
 deepmind = pytest.importorskip("surface_distance")
-platipy_cmp = pytest.importorskip("platipy.imaging.label.comparison")
 
 CT_ROWS = 24
 CT_COLS = 24
@@ -49,7 +45,7 @@ CT_SLICES = 12
 CT_SPACING_XY = 2.0
 CT_SLICE_THICK = 2.0
 
-# Surface Dice / APL tolerance — must match what AutoSeg uses in tests.
+# Surface Dice tolerance — must match what AutoSeg uses in tests.
 TAU_MM = 3.0
 
 
@@ -137,7 +133,6 @@ def _write_rtstruct(folder: Path, *, study_uid: str, for_uid: str, ct_sop_uids: 
     The 4-mm XY offset and 2-mm Z offset guarantee non-trivial outputs:
         * Dice strictly between 0 and 1
         * HD100 / HD95 > 0
-        * APL total / mean > 0
     """
     sop_uid = generate_uid()
     meta = _new_meta(RTStructureSetStorage, sop_uid)
@@ -299,22 +294,3 @@ def test_mean_surface_distance_equivalence(gt_and_test_masks):
     assert msd_autoseg == msd_deepmind, (
         f"Mean Surface Distance differs: AutoSeg={msd_autoseg} deepmind={msd_deepmind}"
     )
-
-
-# ---- PlatiPy APL equivalence -------------------------------------------
-
-
-def test_apl_total_equivalence(gt_and_test_masks):
-    gt, test = gt_and_test_masks
-    a = float(autoseg_apl_total(gt, test, distance_threshold_mm=TAU_MM))
-    b = float(platipy_cmp.compute_metric_total_apl(gt, test, distance_threshold_mm=TAU_MM))
-    assert a > 0.0, "APL total should be > 0 on offset masks"
-    assert a == b, f"APL total differs: AutoSeg={a} platipy={b}"
-
-
-def test_apl_mean_equivalence(gt_and_test_masks):
-    gt, test = gt_and_test_masks
-    a = float(autoseg_apl_mean(gt, test, distance_threshold_mm=TAU_MM))
-    b = float(platipy_cmp.compute_metric_mean_apl(gt, test, distance_threshold_mm=TAU_MM))
-    assert a > 0.0
-    assert a == b, f"APL mean differs: AutoSeg={a} platipy={b}"

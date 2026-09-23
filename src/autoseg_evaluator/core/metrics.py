@@ -1,8 +1,13 @@
-"""High-level geometric metric functions + Added Path Length (APL).
+"""High-level 3D mask metric functions.
 
 These are the public entry points the worker calls per (GT, test) pair. They
-wrap :mod:`autoseg_evaluator.core.surface_distance` for surface-based
-metrics, and port the v1 / PlatiPy APL implementation directly.
+wrap :mod:`autoseg_evaluator.core.surface_distance` for surface-based metrics.
+
+Added path length is not here. It measures boundary to be redrawn, which needs
+the edge as drawn rather than as a voxel staircase, so it lives in the 2D
+contour stream (:mod:`autoseg_evaluator.core.polygon_metrics`). The mask
+version v1 shipped — a port of PlatiPy's per-slice dilation — was removed in v3
+(spec D3), which makes v1's APL values historical rather than reproducible.
 
 The :func:`compute_geometric_metrics` aggregator returns a flat ``{metric: value}``
 dict honouring the user's checkbox/tolerance configuration; the worker just
@@ -126,57 +131,6 @@ def volume_and_com_metrics(gt_mask: sitk.Image, test_mask: sitk.Image) -> dict[s
     }
 
 
-# ---- APL (Added Path Length) ---------------------------------------------
-
-
-def _apl_per_slice(label_ref: sitk.Image, label_test: sitk.Image, distance_threshold_mm: float):
-    """Port of v1's per-slice APL — returns a list of per-slice voxel counts."""
-    result: list[int] = []
-    n_slices = label_ref.GetSize()[2]
-    avg_xy = float(np.mean(label_ref.GetSpacing()[:2]))
-    dilate_kernel_size = int(np.ceil(distance_threshold_mm / avg_xy)) if avg_xy else 0
-    for i in range(n_slices):
-        ref_view = sitk.GetArrayViewFromImage(label_ref)[i]
-        test_view = sitk.GetArrayViewFromImage(label_test)[i]
-        if (ref_view.sum() + test_view.sum()) == 0:
-            continue
-        ref_contour = sitk.LabelContour(label_ref[:, :, i])
-        test_contour = sitk.LabelContour(label_test[:, :, i])
-        if distance_threshold_mm > 0:
-            kernel = [dilate_kernel_size, dilate_kernel_size]
-            test_contour = sitk.BinaryDilate(test_contour, kernel)
-        test_contour.CopyInformation(ref_contour)
-        added_path = sitk.MaskNegated(ref_contour, test_contour)
-        result.append(int(sitk.GetArrayViewFromImage(added_path).sum()))
-    return result
-
-
-def apl_total(
-    label_ref: sitk.Image, label_test: sitk.Image, distance_threshold_mm: float = 3.0
-) -> float:
-    """Total APL in mm. Faithful to PlatiPy's ``compute_metric_total_apl``."""
-    arr = _apl_per_slice(label_ref, label_test, distance_threshold_mm)
-    avg_xy = float(np.mean(label_ref.GetSpacing()[:2]))
-    # np.sum([]) → 0.0, so an empty result naturally yields 0 (matches PlatiPy).
-    return float(np.sum(arr) * avg_xy)
-
-
-def apl_mean(
-    label_ref: sitk.Image, label_test: sitk.Image, distance_threshold_mm: float = 3.0
-) -> float:
-    """Mean APL in mm. Faithful to PlatiPy's ``compute_metric_mean_apl``.
-
-    Returns NaN when no slice contributed (both masks empty across every Z
-    slice) — matching ``np.mean([])`` behaviour in PlatiPy, just without the
-    runtime warning.
-    """
-    arr = _apl_per_slice(label_ref, label_test, distance_threshold_mm)
-    if not arr:
-        return math.nan
-    avg_xy = float(np.mean(label_ref.GetSpacing()[:2]))
-    return float(np.mean(arr) * avg_xy)
-
-
 # ---- Aggregator ----------------------------------------------------------
 
 
@@ -248,9 +202,9 @@ def compute_geometric_metrics(
     ``config`` has the same shape as :meth:`ComputeTab.config`:
 
     * ``geometric``: ``{dice: bool, hausdorff100: bool, hausdorff95: bool,
-      mean_surface_distance: bool, surface_dice: bool, apl_mean: bool,
-      apl_total: bool}``
-    * ``tolerances``: ``{surface_dice_tau_mm: float, apl_tolerance_mm: float}``
+      mean_surface_distance: bool, surface_dice: bool, volume: bool,
+      com_offset: bool}``
+    * ``tolerances``: ``{surface_dice_tau_mm: float}``
 
     Returns a flat ``{metric_name: float}`` dict. Surface-distance derived
     metrics share a single ``compute_surface_distances`` call so we don't pay
@@ -259,7 +213,6 @@ def compute_geometric_metrics(
     geom = dict(config.get("geometric", {}) or {})
     tols = dict(config.get("tolerances", {}) or {})
     sd_tau = float(tols.get("surface_dice_tau_mm", 3.0))
-    apl_tau = float(tols.get("apl_tolerance_mm", 3.0))
 
     gt_arr = sitk.GetArrayFromImage(gt_mask).astype(np.uint8)
     test_arr = sitk.GetArrayFromImage(test_mask).astype(np.uint8)
@@ -302,11 +255,6 @@ def compute_geometric_metrics(
                 out["mean_surface_distance"] = float(0.5 * (a + b))
         if geom.get("surface_dice"):
             out["surface_dice"] = compute_surface_dice_at_tolerance(sd, sd_tau)
-
-    if geom.get("apl_mean"):
-        out["apl_mean"] = apl_mean(gt_mask, test_mask, apl_tau)
-    if geom.get("apl_total"):
-        out["apl_total"] = apl_total(gt_mask, test_mask, apl_tau)
 
     # Volume + centre-of-mass are computed together (single mask traversal each
     # under the hood), but exposed via two independent checkboxes so users can

@@ -63,6 +63,8 @@ def test_compute_tab_defaults_load_from_settings(qapp):
             "hausdorff95": True,
             "mean_surface_distance": False,
             "surface_dice": True,
+            # Stale: mask APL was removed in v3. The tab must load regardless
+            # and must not hand the setting on.
             "apl_mean": True,
             "apl_total": False,
         },
@@ -80,7 +82,8 @@ def test_compute_tab_defaults_load_from_settings(qapp):
     assert cfg["geometric"]["dice"] is True
     assert cfg["geometric"]["hausdorff100"] is False
     assert cfg["tolerances"]["surface_dice_tau_mm"] == pytest.approx(5.0)
-    assert cfg["tolerances"]["apl_tolerance_mm"] == pytest.approx(2.5)
+    assert "apl_mean" not in cfg["geometric"]
+    assert "apl_tolerance_mm" not in cfg["tolerances"]
     assert cfg["dvh"]["include_dmean"] is False
     assert cfg["dvh"]["include_dmin"] is True
     assert cfg["dvh"]["d_at_volumes_pct"] == [99.0, 50.0]

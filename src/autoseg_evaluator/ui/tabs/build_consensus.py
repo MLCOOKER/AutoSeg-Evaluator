@@ -1340,9 +1340,6 @@ class BuildConsensusTab(QWidget):
             default_sd_tau_mm=float(
                 (self._settings.get("tolerances") or {}).get("surface_dice_tau_mm", 3.0)
             ),
-            default_apl_tau_mm=float(
-                (self._settings.get("tolerances") or {}).get("apl_tolerance_mm", 3.0)
-            ),
             parent=self,
         )
         if settings_dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1434,7 +1431,6 @@ class BuildConsensusTab(QWidget):
             n_groups=len(selected_pids),
             cancelled=cancelled,
             sd_tau_mm=float(config["tolerances"]["surface_dice_tau_mm"]),
-            apl_tau_mm=float(config["tolerances"]["apl_tolerance_mm"]),
             parent=self,
         )
         dlg.exec()
@@ -1526,14 +1522,11 @@ class BuildConsensusTab(QWidget):
                     "hausdorff95": True,
                     "mean_surface_distance": True,
                     "surface_dice": True,
-                    "apl_mean": False,
-                    "apl_total": False,
                     "volume": True,
                     "com_offset": True,
                 },
                 "tolerances": {
                     "surface_dice_tau_mm": 3.0,
-                    "apl_tolerance_mm": 3.0,
                 },
             }
 
@@ -1769,17 +1762,14 @@ class _ObserverSelectionDialog(QDialog):
 
 
 # Display order matches the canonical results-table convention. The
-# labels for tolerance-dependent metrics (Surface Dice, APL) are computed
-# at dialog-construction time from the user-supplied τ values; the static
-# block below is the fallback when no tolerance is provided.
+# Surface Dice label is computed at dialog-construction time from the
+# user-supplied τ; the static block below is the fallback without one.
 _INTER_MANUAL_COLUMN_KEYS: tuple[str, ...] = (
     "dice",
     "surface_dice",
     "hausdorff100",
     "hausdorff95",
     "mean_surface_distance",
-    "apl_mean",
-    "apl_total",
     "volume_gt_cc",
     "volume_test_cc",
     "volume_diff_cc",
@@ -1788,14 +1778,12 @@ _INTER_MANUAL_COLUMN_KEYS: tuple[str, ...] = (
 )
 
 
-def _inter_manual_columns(
-    sd_tau_mm: float | None, apl_tau_mm: float | None
-) -> tuple[tuple[str, str], ...]:
-    """Build the (key, header) list with tolerance values baked into the labels.
+def _inter_manual_columns(sd_tau_mm: float | None) -> tuple[tuple[str, str], ...]:
+    """Build the (key, header) list with the tolerance baked into the labels.
 
-    Surface Dice and APL are tolerance-dependent — by including the τ
-    value in the header, two CSV exports computed at different
-    tolerances can be told apart at a glance in Excel.
+    Surface Dice is tolerance-dependent — by including the τ value in the
+    header, two CSV exports computed at different tolerances can be told apart
+    at a glance in Excel.
     """
     static_overrides = {
         "hausdorff100": "HD 100% (mm)",
@@ -1812,7 +1800,7 @@ def _inter_manual_columns(
         if key in static_overrides:
             label = static_overrides[key]
         else:
-            label = metric_display_label(key, sd_tau_mm=sd_tau_mm, apl_tau_mm=apl_tau_mm)
+            label = metric_display_label(key, sd_tau_mm=sd_tau_mm)
         out.append((key, label))
     return tuple(out)
 
@@ -1879,25 +1867,19 @@ class _InterManualMetricsDialog(QDialog):
         n_groups: int = 1,
         cancelled: bool = False,
         sd_tau_mm: float | None = None,
-        apl_tau_mm: float | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Inter-observer variability — {n_groups} group(s)")
         self.resize(1200, 600)
         self._n_groups = n_groups
-        # Resolve column labels with the τ values baked in so headers
-        # read e.g. "Surface Dice @ 3.00 mm" / "Mean APL @ 3.00 mm".
-        self._inter_manual_columns = _inter_manual_columns(sd_tau_mm, apl_tau_mm)
+        # Resolve column labels with the τ baked in so the header reads
+        # e.g. "Surface Dice @ 3.00 mm".
+        self._inter_manual_columns = _inter_manual_columns(sd_tau_mm)
         layout = QVBoxLayout(self)
         info_html = f"<b>Groups:</b> {n_groups}  &nbsp; <b>Comparisons:</b> {len(rows)}"
-        if sd_tau_mm is not None or apl_tau_mm is not None:
-            tol_bits = []
-            if sd_tau_mm is not None:
-                tol_bits.append(f"Surface Dice τ = {sd_tau_mm:.2f} mm")
-            if apl_tau_mm is not None:
-                tol_bits.append(f"APL τ = {apl_tau_mm:.2f} mm")
-            info_html += "  &nbsp; <b>" + " · ".join(tol_bits) + "</b>"
+        if sd_tau_mm is not None:
+            info_html += f"  &nbsp; <b>Surface Dice τ = {sd_tau_mm:.2f} mm</b>"
         if cancelled:
             info_html += (
                 "  &nbsp; <span style='color:#d96b00'><b>Cancelled — partial results</b></span>"
@@ -2033,19 +2015,16 @@ class _InterManualMetricsDialog(QDialog):
 class _InterObserverSettingsDialog(QDialog):
     """Modal pre-flight settings for the inter-observer computation.
 
-    Lets the user pick which geometric metrics to compute and override
-    the Surface Dice / APL tolerance values for this run. Defaults are
-    inherited from Tab 4's tolerances (passed in by the caller) plus
-    all geometric metrics on (except APL, which is off by default to
-    match Tab 4's geometric defaults). Returns the config dict via
-    :meth:`metric_config` after Accept.
+    Lets the user pick which 3D mask metrics to compute and override the
+    Surface Dice tolerance for this run. The tolerance defaults to the Compute
+    tab's (passed in by the caller) and every metric starts on. Returns the
+    config dict via :meth:`metric_config` after Accept.
     """
 
     def __init__(
         self,
         n_groups: int,
         default_sd_tau_mm: float = 3.0,
-        default_apl_tau_mm: float = 3.0,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2061,8 +2040,7 @@ class _InterObserverSettingsDialog(QDialog):
             )
         )
 
-        # Metric checkboxes — sensible default set (all geom on except APL,
-        # which is expensive and rarely needed for inter-observer studies).
+        # Metric checkboxes — every 3D mask metric, all on by default.
         metrics_box = QGroupBox("Metrics to compute", self)
         metrics_layout = QVBoxLayout(metrics_box)
         self._metric_boxes: dict[str, QCheckBox] = {}
@@ -2072,8 +2050,6 @@ class _InterObserverSettingsDialog(QDialog):
             "hausdorff100": True,
             "hausdorff95": True,
             "mean_surface_distance": True,
-            "apl_mean": False,
-            "apl_total": False,
             "volume": True,
             "com_offset": True,
         }
@@ -2083,8 +2059,6 @@ class _InterObserverSettingsDialog(QDialog):
             "hausdorff100": "3D Hausdorff 100%",
             "hausdorff95": "3D Hausdorff 95%",
             "mean_surface_distance": "Mean Surface Distance",
-            "apl_mean": "Mean APL (uses τ below)",
-            "apl_total": "Total APL (uses τ below)",
             "volume": "Volume + diff/ratio",
             "com_offset": "Centre-of-mass offset",
         }
@@ -2095,8 +2069,8 @@ class _InterObserverSettingsDialog(QDialog):
             self._metric_boxes[key] = cb
         layout.addWidget(metrics_box)
 
-        # Tolerance overrides — only relevant when surface_dice / apl
-        # are enabled, but we always show them so the user can pre-set.
+        # Tolerance override — only relevant when Surface Dice is enabled,
+        # but always shown so the user can pre-set it.
         tol_box = QGroupBox("Tolerances", self)
         tol_form = QFormLayout(tol_box)
         self._sd_tau_spin = QDoubleSpinBox(tol_box)
@@ -2106,13 +2080,6 @@ class _InterObserverSettingsDialog(QDialog):
         self._sd_tau_spin.setSuffix(" mm")
         self._sd_tau_spin.setValue(default_sd_tau_mm)
         tol_form.addRow("Surface Dice τ:", self._sd_tau_spin)
-        self._apl_tau_spin = QDoubleSpinBox(tol_box)
-        self._apl_tau_spin.setRange(0.0, 100.0)
-        self._apl_tau_spin.setSingleStep(0.1)
-        self._apl_tau_spin.setDecimals(2)
-        self._apl_tau_spin.setSuffix(" mm")
-        self._apl_tau_spin.setValue(default_apl_tau_mm)
-        tol_form.addRow("APL τ:", self._apl_tau_spin)
         layout.addWidget(tol_box)
 
         btns = QDialogButtonBox(
@@ -2129,6 +2096,5 @@ class _InterObserverSettingsDialog(QDialog):
             "geometric": {key: cb.isChecked() for key, cb in self._metric_boxes.items()},
             "tolerances": {
                 "surface_dice_tau_mm": float(self._sd_tau_spin.value()),
-                "apl_tolerance_mm": float(self._apl_tau_spin.value()),
             },
         }

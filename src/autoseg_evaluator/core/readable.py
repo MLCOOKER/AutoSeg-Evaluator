@@ -25,8 +25,6 @@ METRIC_PROSE: dict[str, str] = {
     "hausdorff95": "3D Hausdorff 95%",
     "hausdorff100": "3D Hausdorff (maximum)",
     "mean_surface_distance": "Mean surface distance",
-    "apl_mean": "Mean added path length",
-    "apl_total": "Total added path length",
     "volume_gt_cc": "Reference volume",
     "volume_test_cc": "Test volume",
     "volume_diff_cc": "Volume difference",
@@ -57,8 +55,6 @@ METRIC_UNITS: dict[str, str] = {
     "hausdorff95": "mm",
     "hausdorff100": "mm",
     "mean_surface_distance": "mm",
-    "apl_mean": "mm",
-    "apl_total": "mm",
     "com_offset_mm": "mm",
     "com_dx_mm": "mm",
     "com_dy_mm": "mm",
@@ -83,11 +79,8 @@ METRIC_UNITS: dict[str, str] = {
 TOLERANCE_METRICS: frozenset[str] = frozenset(
     {
         "surface_dice",
-        "apl_mean",
-        "apl_total",
-        # The polygon stream's added path length takes its own tolerance, which
-        # is not the mask stream's. Reporting either without saying which would
-        # make two numbers look comparable that are not.
+        # The 2D added path length takes its own tolerance, set in the 2D group
+        # on the Compute tab, not Surface Dice's.
         "poly_apl_mm",
         "poly_napl",
         "poly_apl_reverse_mm",
@@ -114,6 +107,9 @@ BOUNDED_UNIT_METRICS: frozenset[str] = frozenset(
         "specificity",
         "staple_sensitivity",
         "staple_specificity",
+        # Boundary length missed as a share of the ground truth's length.
+        "poly_napl",
+        "poly_napl_reverse",
     }
 )
 
@@ -125,12 +121,16 @@ NON_NEGATIVE_METRICS: frozenset[str] = frozenset(
         "hausdorff95",
         "hausdorff100",
         "mean_surface_distance",
-        "apl_mean",
-        "apl_total",
         "com_offset_mm",
         "volume_gt_cc",
         "volume_test_cc",
         "volume_ratio",
+        "poly_apl_mm",
+        "poly_apl_reverse_mm",
+        "poly_hd100_mm",
+        "poly_hd95_mm",
+        "poly_mean_distance_mm",
+        "poly_median_distance_mm",
     }
 )
 
@@ -194,7 +194,6 @@ def metric_units(metric: str) -> str:
 def tolerance_note(
     metric: str,
     sd_tau_mm: float | None = None,
-    apl_tau_mm: float | None = None,
     poly_tau_mm: float | None = None,
 ) -> str:
     """``tolerance = 3.00 mm``, or empty where the metric does not take one.
@@ -207,12 +206,7 @@ def tolerance_note(
     key = str(metric).strip().lower()
     if key not in TOLERANCE_METRICS:
         return ""
-    if key in POLYGON_TOLERANCE_METRICS:
-        tolerance = poly_tau_mm
-    elif key == "surface_dice":
-        tolerance = sd_tau_mm
-    else:
-        tolerance = apl_tau_mm
+    tolerance = poly_tau_mm if key in POLYGON_TOLERANCE_METRICS else sd_tau_mm
     if tolerance is None:
         return "tolerance not recorded"
     return f"tolerance = {float(tolerance):.2f} mm"

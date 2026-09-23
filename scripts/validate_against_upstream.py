@@ -3,14 +3,15 @@
 Runs two empirical equivalence tests on a folder containing a single CT
 series plus one or more RTSTRUCT files:
 
-1. **Mask rasterisation** vs PlatiPy 0.7.2's
+1. **Mask rasterisation** — the ``legacy`` backend vs PlatiPy 0.7.2's
    ``transform_point_set_from_dicom_struct``. For every ROI in every
-   RTSS, asserts voxel-identical output (Δ = 0).
+   RTSS, asserts voxel-identical output (Δ = 0). The default ``continuous``
+   backend is deliberately *not* PlatiPy's fill, so it is not the one tested.
 
-2. **Metric computation** vs the upstream packages:
-   * ``google-deepmind/surface-distance`` — Dice, HD100, HD95, Surface
-     Dice @ 3 mm, mean surface distance.
-   * ``platipy.imaging.label.comparison`` — Total APL, Mean APL @ 3 mm.
+2. **Metric computation** vs ``google-deepmind/surface-distance`` — Dice,
+   HD100, HD95, Surface Dice @ 3 mm, mean surface distance. (Mask APL, which
+   this once compared against PlatiPy, was removed in v3; added path length
+   is now measured on the contours themselves.)
 
    For every ROI name present in two or more RTSSes (case-insensitive),
    one RTSS is treated as GT and another as Test, and AutoSeg's
@@ -46,22 +47,18 @@ import surface_distance as deepmind  # noqa: E402
 from platipy.dicom.io.rtstruct_to_nifti import (  # noqa: E402
     transform_point_set_from_dicom_struct,
 )
-from platipy.imaging.label.comparison import (  # noqa: E402
-    compute_metric_mean_apl as platipy_mean_apl,
-)
-from platipy.imaging.label.comparison import (  # noqa: E402
-    compute_metric_total_apl as platipy_total_apl,
-)
 
 # AutoSeg
 from autoseg_evaluator import __version__ as autoseg_version
 from autoseg_evaluator.core import surface_distance as autoseg_sd
-from autoseg_evaluator.core.masks import extract_mask_for_roi, read_dicom_image, read_rtstruct
-from autoseg_evaluator.core.metrics import apl_mean as autoseg_apl_mean
-from autoseg_evaluator.core.metrics import apl_total as autoseg_apl_total
+from autoseg_evaluator.core.masks import (
+    RASTERISER_LEGACY,
+    extract_mask_for_roi,
+    read_dicom_image,
+    read_rtstruct,
+)
 
 SURFACE_DICE_TAU_MM = 3.0
-APL_TAU_MM = 3.0
 
 
 # ----------------------------- Anonymisation -------------------------------
@@ -88,7 +85,7 @@ def compare_masks(rtss_label: str, ds: Any, image: sitk.Image) -> list[dict[str,
         roi_number = int(struct.ROINumber)
         roi_name_clean = "_".join(str(struct.ROIName).split())
 
-        autoseg_mask = extract_mask_for_roi(image, ds, roi_number)
+        autoseg_mask = extract_mask_for_roi(image, ds, roi_number, backend=RASTERISER_LEGACY)
         platipy_mask = platipy_map.get(roi_name_clean)
 
         if autoseg_mask is None and platipy_mask is None:
@@ -181,12 +178,6 @@ def compute_metric_row(roi_name: str, gt_mask: sitk.Image, test_mask: sitk.Image
     a_msd = float((a_msd_gt_to_test + a_msd_test_to_gt) / 2.0)
     d_msd = float((d_msd_gt_to_test + d_msd_test_to_gt) / 2.0)
 
-    # APL (autoseg vs platipy)
-    a_apl_total = float(autoseg_apl_total(gt_mask, test_mask, distance_threshold_mm=APL_TAU_MM))
-    p_apl_total = float(platipy_total_apl(gt_mask, test_mask, distance_threshold_mm=APL_TAU_MM))
-    a_apl_mean = float(autoseg_apl_mean(gt_mask, test_mask, distance_threshold_mm=APL_TAU_MM))
-    p_apl_mean = float(platipy_mean_apl(gt_mask, test_mask, distance_threshold_mm=APL_TAU_MM))
-
     return {
         "roi": roi_name,
         "dice_autoseg": a_dice,
@@ -199,10 +190,6 @@ def compute_metric_row(roi_name: str, gt_mask: sitk.Image, test_mask: sitk.Image
         "surface_dice_upstream": d_sdice,
         "msd_autoseg": a_msd,
         "msd_upstream": d_msd,
-        "apl_total_autoseg": a_apl_total,
-        "apl_total_upstream": p_apl_total,
-        "apl_mean_autoseg": a_apl_mean,
-        "apl_mean_upstream": p_apl_mean,
     }
 
 
@@ -267,7 +254,7 @@ def write_report(
         "(axial, isotropic in-plane)"
     )
     lines.append(f"- **RTSTRUCT files loaded:** {n_rtss}")
-    lines.append("- **Tolerance for Surface Dice and APL:** 3.0 mm")
+    lines.append("- **Tolerance for Surface Dice:** 3.0 mm")
     lines.append("")
     lines.append(
         "The validation cohort is a single anonymised head-and-neck patient "
@@ -280,12 +267,13 @@ def write_report(
 
     # ----- Part 1: mask rasterisation
     lines.append(
-        "## 1. Mask rasterisation parity vs PlatiPy `transform_point_set_from_dicom_struct`\n"
+        "## 1. Legacy mask rasterisation parity vs PlatiPy "
+        "`transform_point_set_from_dicom_struct`\n"
     )
     lines.append(
         "**Method.** For every ROI in every RTSTRUCT, the same DICOM "
         "dataset and reference CT volume are passed to AutoSeg "
-        "Evaluator's `extract_mask_for_roi` and to PlatiPy's "
+        "Evaluator's `extract_mask_for_roi` with the `legacy` backend and to PlatiPy's "
         "`transform_point_set_from_dicom_struct`. The two resulting "
         "binary masks are compared with `numpy.array_equal`; the "
         "voxel-wise XOR count and Dice coefficient are tabulated."
@@ -315,26 +303,25 @@ def write_report(
     lines.append("")
 
     # ----- Part 2: metric equivalence
-    lines.append("## 2. Metric equivalence vs `google-deepmind/surface-distance` + PlatiPy\n")
+    lines.append("## 2. Metric equivalence vs `google-deepmind/surface-distance`\n")
     lines.append(
         "**Method.** ROI names that appear in two or more RTSTRUCTs are paired "
         "up (the first occurrence as ground truth, the second as test). For each "
-        "pair, all seven metrics are computed with **AutoSeg Evaluator's own "
+        "pair, all five metrics are computed with **AutoSeg Evaluator's own "
         "implementation** and with the **upstream reference package**:"
     )
     lines.append("")
     lines.append(
         "- **`google-deepmind/surface-distance`**: Dice, HD100, HD95, Surface Dice @ 3 mm, MSD"
     )
-    lines.append("- **`platipy.imaging.label.comparison`**: Total APL, Mean APL @ 3 mm")
     lines.append("")
     n_metric_pairs = len(metric_rows)
-    n_metrics = 7
+    n_metrics = 5
     n_comparisons = n_metric_pairs * n_metrics
     # Count exact equality
     n_exact_metric = 0
     for row in metric_rows:
-        for m in ("dice", "hd100", "hd95", "surface_dice", "msd", "apl_total", "apl_mean"):
+        for m in ("dice", "hd100", "hd95", "surface_dice", "msd"):
             if row[f"{m}_autoseg"] == row[f"{m}_upstream"]:
                 n_exact_metric += 1
     lines.append(
@@ -358,8 +345,6 @@ def write_report(
             ("hd95", "HD95 (mm)", "deepmind"),
             ("surface_dice", f"Surface Dice @ {SURFACE_DICE_TAU_MM:.0f} mm", "deepmind"),
             ("msd", "Mean Surf Dist (mm)", "deepmind"),
-            ("apl_total", f"APL total @ {APL_TAU_MM:.0f} mm", "platipy"),
-            ("apl_mean", f"APL mean @ {APL_TAU_MM:.0f} mm", "platipy"),
         ):
             a_val = row[f"{metric_key}_autoseg"]
             b_val = row[f"{metric_key}_upstream"]
@@ -516,7 +501,7 @@ def main() -> int:
     any_mask_diff = any(r["result"] != "EXACT" for r in mask_rows)
     any_metric_diff = False
     for row in metric_rows:
-        for m in ("dice", "hd100", "hd95", "surface_dice", "msd", "apl_total", "apl_mean"):
+        for m in ("dice", "hd100", "hd95", "surface_dice", "msd"):
             if row[f"{m}_autoseg"] != row[f"{m}_upstream"]:
                 any_metric_diff = True
     return 1 if (any_mask_diff or any_metric_diff) else 0

@@ -2,11 +2,12 @@
 
 Provides:
 
-* a 3D mask-metric checkbox group (Dice, HD100/95, MSD, Surface Dice, APL)
-  plus Surface-Dice τ and APL τ tolerance spinboxes,
-* a 2D contour-metric group measuring the RTSTRUCT polygons directly, with its
-  own tolerance — a separate method rather than a second list of names, so the
-  two sit side by side where a reader compares them,
+* a 3D mask-metric checkbox group (Dice, HD100/95, MSD, Surface Dice, volume,
+  centre-of-mass) plus the Surface Dice τ spinbox,
+* a 2D contour-metric group measuring the RTSTRUCT polygons directly — APL,
+  NAPL, 2D Hausdorff, mean and median distance — with its own APL τ, a
+  separate method rather than a second list of names, so the two sit side by
+  side where a reader compares them,
 * a dosimetric-metric group (Dmean/Dmax/Dmin checkboxes, user-defined
   D@volume% list, V@dose(Gy) list, RTDOSE auto-detection note),
 * a "Compute All" button that emits a fully-populated configuration dict,
@@ -103,18 +104,6 @@ _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
         "Surface Dice",
         "Fraction of each surface within tolerance τ mm of the other; 0–1. "
         "Reflects the clinically acceptable editing tolerance (Nikolov 2018).",
-    ),
-    (
-        "apl_mean",
-        "Mean APL",
-        "Mean of per-slice Added Path Length across slices that contain "
-        "either contour (mm). PlatiPy convention; NaN when no slices contribute.",
-    ),
-    (
-        "apl_total",
-        "Total APL",
-        "Sum of per-slice Added Path Length over the whole volume (mm). "
-        "Approximates manual-editing effort (Vaassen 2020).",
     ),
     (
         "volume",
@@ -255,7 +244,6 @@ class ComputeTab(QWidget):
             "geometric": {key: cb.isChecked() for key, cb in self._geom_checks.items()},
             "tolerances": {
                 "surface_dice_tau_mm": float(self._sd_tau_spin.value()),
-                "apl_tolerance_mm": float(self._apl_tau_spin.value()),
             },
             "polygon": {
                 "metrics": {key: cb.isChecked() for key, cb in self._poly_checks.items()},
@@ -373,14 +361,6 @@ class ComputeTab(QWidget):
         self._sd_tau_spin.setSuffix(" mm")
         self._sd_tau_spin.valueChanged.connect(self._emit_config_changed)
         tol_form.addRow("Surface Dice τ:", self._sd_tau_spin)
-
-        self._apl_tau_spin = _NoScrollSpinBox(box)
-        self._apl_tau_spin.setRange(0.0, 100.0)
-        self._apl_tau_spin.setSingleStep(0.1)
-        self._apl_tau_spin.setDecimals(2)
-        self._apl_tau_spin.setSuffix(" mm")
-        self._apl_tau_spin.valueChanged.connect(self._emit_config_changed)
-        tol_form.addRow("APL tolerance:", self._apl_tau_spin)
         layout.addLayout(tol_form)
 
         layout.addStretch(1)
@@ -616,8 +596,6 @@ class ComputeTab(QWidget):
             "hausdorff95": True,
             "mean_surface_distance": True,
             "surface_dice": True,
-            "apl_mean": False,
-            "apl_total": False,
             "volume": True,
             "com_offset": True,
         }
@@ -651,9 +629,6 @@ class ComputeTab(QWidget):
         self._sd_tau_spin.blockSignals(True)
         self._sd_tau_spin.setValue(float(tol.get("surface_dice_tau_mm", 3.0)))
         self._sd_tau_spin.blockSignals(False)
-        self._apl_tau_spin.blockSignals(True)
-        self._apl_tau_spin.setValue(float(tol.get("apl_tolerance_mm", 3.0)))
-        self._apl_tau_spin.blockSignals(False)
 
         # DVH config
         dvh = (self._settings.get("dvh") or {}) if self._settings else {}

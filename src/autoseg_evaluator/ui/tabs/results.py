@@ -51,7 +51,6 @@ _GROUP_BANDS: dict[str, tuple[str, QColor]] = {
     "identifier": ("Identifier columns", QColor("#5C6BC0")),  # indigo
     "overlap": ("Volumetric overlap", QColor("#00ACC1")),  # cyan
     "surface": ("Surface distances", QColor("#FB8C00")),  # orange
-    "apl": ("Added Path Length", QColor("#FDD835")),  # yellow
     "polygon": ("2D contour metrics", QColor("#26A69A")),  # teal
     "volume": ("Volume + COM", QColor("#43A047")),  # green
     "staple": ("STAPLE consensus", QColor("#EC407A")),  # pink
@@ -109,8 +108,6 @@ def _band_for_metric_key(key: str) -> str:
         return "overlap"
     if key in ("hausdorff100", "hausdorff95", "mean_surface_distance"):
         return "surface"
-    if key in ("apl_mean", "apl_total"):
-        return "apl"
     # Before the volume/staple/dose rules: every polygon column belongs to one
     # band regardless of which metric it holds, because the stream is the thing
     # a reader needs to tell apart, not the metric family within it.
@@ -175,10 +172,9 @@ class ResultsTab(QWidget):
         metric_cols = self._results_mgr.metric_columns()
         meta_keys = [k for k, _ in META_COLUMNS]
         meta_labels = [label for _, label in META_COLUMNS]
-        sd_tau, apl_tau, poly_tau = self._results_mgr.tolerances()
+        sd_tau, poly_tau = self._results_mgr.tolerances()
         headers = meta_labels + [
-            metric_display_label(k, sd_tau_mm=sd_tau, apl_tau_mm=apl_tau, poly_tau_mm=poly_tau)
-            for k in metric_cols
+            metric_display_label(k, sd_tau_mm=sd_tau, poly_tau_mm=poly_tau) for k in metric_cols
         ]
 
         # Re-build with sorting disabled to keep insertion order stable
@@ -323,15 +319,11 @@ class ResultsTab(QWidget):
             # the detail, and is silently absent when it did not. Prompting here
             # would ask about something already decided — and a run that did not
             # collect it cannot produce one now.
-            sd_tau, apl_tau, poly_tau = self._results_mgr.tolerances()
+            sd_tau, poly_tau = self._results_mgr.tolerances()
             audit_path = sidecar.write(
                 sidecar.path_for(path),
                 self._results_mgr.rows(),
-                settings={
-                    "surface_dice_tau_mm": sd_tau,
-                    "apl_tolerance_mm": apl_tau,
-                    "polygon_tolerance_mm": poly_tau,
-                },
+                settings={"surface_dice_tau_mm": sd_tau, "polygon_tolerance_mm": poly_tau},
             )
         except OSError as exc:
             QMessageBox.critical(self, "Export CSV", f"Could not write file:\n{exc}")

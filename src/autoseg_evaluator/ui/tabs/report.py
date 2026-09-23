@@ -1002,23 +1002,20 @@ class ReportTab(QWidget):
                 "free-text descriptions are read."
             )
 
-    def _tolerances(self) -> tuple[float | None, float | None, float | None]:
-        """Surface-Dice, mask-APL and polygon tolerances, if they were recorded.
+    def _tolerances(self) -> tuple[float | None, float | None]:
+        """Surface Dice and 2D APL tolerances, if they were recorded.
 
         Surface Dice at 1 mm and at 5 mm are different measurements, so a figure
-        that omits which was used cannot be compared with another. The two APLs
-        keep separate tolerances because they are separate measurements.
+        that omits which was used cannot be compared with another.
         """
-        empty = (None, None, None)
+        empty = (None, None)
         if self._results is None:
             return empty
         try:
             recorded = tuple(self._results.tolerances())
         except (AttributeError, TypeError, ValueError):
             return empty
-        # Older result sets recorded two; pad rather than fail, so a session
-        # saved before the polygon stream still opens.
-        return (recorded + empty)[:3]
+        return (recorded + empty)[:2]
 
     def _repopulate_paired(self, family: dict) -> None:
         """Offer the rows that actually have a comparison to open up."""

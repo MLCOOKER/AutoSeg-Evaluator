@@ -11,7 +11,8 @@ reads real RTSTRUCTs and measures them, every acceptance layer passes —
 including the published archives driven from DICOM through our own grid builder
 and parser — and the worker computes the metrics in a run, verified on the real
 multi-vendor sample cohort, Tab 5 offers them, and the results table, Report tab
-and audit sidecar all carry them. Phase 7 remains: mask APL is untouched.
+and audit sidecar all carry them. Phase 7 landed 2026-09-24: mask APL is
+removed, and added path length now comes only from this stream.
 
 **Revision 3, 2026-09-20.** Updated for `0.2.0.dev2`, which answers the
 portability review: a platform-aware loader, explicit floating-point build
@@ -236,6 +237,14 @@ no precision control in Tab 5.
 compared on real data before anything is deleted. Removal is then its own change,
 carrying the Methods, PROJECT_OVERVIEW, README and tooltip rewrite and the
 session-key migration together.
+
+> **Done (2026-09-24, phase 7).** Removed from the metric code, the Compute tab,
+> Tab 2's inter-observer dialog, the results and CSV columns, the Report tab,
+> the tests and the upstream validator. The "session-key migration" turned out
+> to be a settings one: sessions never stored metric settings. `settings.json`
+> drops `apl_mean`, `apl_total` and `apl_tolerance_mm` on load. Anyone needing
+> the mask values for comparison can check out `7b6cec1`, the last commit that
+> computes them.
 
 ### D4 — Tab 5 puts the two geometry methods side by side
 
@@ -898,7 +907,7 @@ an ROI compared against five sources should be prepared once.
 | 4 | ✅ **Done.** Worker integration, availability, caching, 8 tests | metrics computed |
 | 5 | ✅ **Done.** Tab 5 split, settings round-trip, 6 tests | metrics selectable |
 | 6 | ✅ **Done.** Declared columns, `2D`/`3D` naming, Report families, definitions dialog, optional two-stream sidecar | metrics reportable |
-| 7 | *(separate, per D3)* mask APL removed, docs rewritten | numbers move |
+| 7 | ✅ **Done.** Mask APL removed (D3), settings keys retired, validator pinned to legacy for PlatiPy parity | numbers move |
 
 Phases 1–3 change nothing a user can see, deliberately: the numerical path is
 proven against the published reference, through our own adapter, before it is

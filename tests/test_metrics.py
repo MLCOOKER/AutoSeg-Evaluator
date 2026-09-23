@@ -9,8 +9,6 @@ import SimpleITK as sitk
 
 from autoseg_evaluator.core.dvh import DVHConfig
 from autoseg_evaluator.core.metrics import (
-    apl_mean,
-    apl_total,
     centroid_physical,
     compute_geometric_metrics,
     dice,
@@ -63,23 +61,6 @@ def test_surface_dice_identical_is_one():
     m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
     arr = sitk.GetArrayFromImage(m)
     assert surface_dice(arr, arr, (1.0, 1.0, 1.0), tolerance_mm=0.0) == 1.0
-
-
-# ---- APL ------------------------------------------------------------------
-
-
-def test_apl_identical_masks_is_zero():
-    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
-    assert apl_total(m, m, 0.0) == 0.0
-    assert apl_mean(m, m, 0.0) == 0.0
-
-
-def test_apl_disjoint_masks_is_positive():
-    a = _cube_sitk((20, 20, 20), 0, 5, 0, 5, 0, 5)
-    b = _cube_sitk((20, 20, 20), 10, 15, 10, 15, 10, 15)
-    # With a tolerance smaller than the gap, every reference voxel is "added path"
-    total = apl_total(a, b, 1.0)
-    assert total > 0
 
 
 # ---- Volume + centre-of-mass ---------------------------------------------
@@ -153,16 +134,29 @@ def test_compute_geometric_metrics_respects_config_flags():
             "hausdorff95": False,
             "mean_surface_distance": False,
             "surface_dice": True,
-            "apl_mean": False,
-            "apl_total": False,
         },
-        "tolerances": {"surface_dice_tau_mm": 3.0, "apl_tolerance_mm": 3.0},
+        "tolerances": {"surface_dice_tau_mm": 3.0},
     }
     out = compute_geometric_metrics(m, m, config)
     assert "dice" in out
     assert "surface_dice" in out
     assert "hausdorff100" not in out
-    assert "apl_total" not in out
+
+
+def test_a_configuration_still_asking_for_mask_apl_gets_none():
+    """Mask APL was removed in v3; an old configuration must not break a run.
+
+    Added path length now comes only from the 2D stream. A settings file or a
+    caller from before the removal may still switch the mask version on; it is
+    ignored rather than raising, and nothing named like it reaches a row.
+    """
+    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    config = {
+        "geometric": {"dice": True, "apl_mean": True, "apl_total": True},
+        "tolerances": {"surface_dice_tau_mm": 3.0, "apl_tolerance_mm": 3.0},
+    }
+    out = compute_geometric_metrics(m, m, config)
+    assert out == {"dice": 1.0}
 
 
 def test_compute_geometric_metrics_identical_masks_score_perfect():
@@ -174,10 +168,8 @@ def test_compute_geometric_metrics_identical_masks_score_perfect():
             "hausdorff95": True,
             "mean_surface_distance": True,
             "surface_dice": True,
-            "apl_mean": True,
-            "apl_total": True,
         },
-        "tolerances": {"surface_dice_tau_mm": 0.0, "apl_tolerance_mm": 0.0},
+        "tolerances": {"surface_dice_tau_mm": 0.0},
     }
     out = compute_geometric_metrics(m, m, config)
     assert out["dice"] == 1.0
@@ -185,7 +177,6 @@ def test_compute_geometric_metrics_identical_masks_score_perfect():
     assert out["hausdorff95"] == 0.0
     assert out["mean_surface_distance"] == 0.0
     assert out["surface_dice"] == 1.0
-    assert out["apl_total"] == 0.0
 
 
 # ---- DVH config ----------------------------------------------------------

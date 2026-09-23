@@ -98,8 +98,6 @@ GEOMETRIC_METRICS = frozenset(
         "hausdorff100",
         "hausdorff95",
         "mean_surface_distance",
-        "apl_mean",
-        "apl_total",
         "volume_gt_cc",
         "volume_test_cc",
         "volume_diff_cc",
@@ -216,8 +214,6 @@ LOWER_IS_BETTER = frozenset(
         "hausdorff95",
         "hausdorff100",
         "mean_surface_distance",
-        "apl_mean",
-        "apl_total",
         "com_offset_mm",
         # The 2D stream. Every one is zero for identical contours and grows with
         # disagreement. APL and NAPL are directional in *what* they measure —
