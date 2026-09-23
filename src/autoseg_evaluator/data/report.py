@@ -219,6 +219,30 @@ LOWER_IS_BETTER = frozenset(
         "apl_mean",
         "apl_total",
         "com_offset_mm",
+        # The 2D stream. Every one is zero for identical contours and grows with
+        # disagreement. APL and NAPL are directional in *what* they measure —
+        # boundary to draw (forward) versus boundary to remove (reverse) — but
+        # in both directions less is better.
+        "poly_apl_mm",
+        "poly_apl_reverse_mm",
+        "poly_napl",
+        "poly_napl_reverse",
+        "poly_hd100_mm",
+        "poly_hd95_mm",
+        "poly_mean_distance_mm",
+        "poly_median_distance_mm",
+    }
+)
+
+#: Columns that say what a 2D number was measured over — how many planes both
+#: structures reached, and how many only one did. They qualify a metric; they
+#: are not one, and comparing sources on them would test the wrong thing. Kept
+#: in the results table and export, left out of the report.
+DIAGNOSTIC_COLUMNS = frozenset(
+    {
+        "poly_planes_joint",
+        "poly_planes_gt_only",
+        "poly_planes_test_only",
     }
 )
 
@@ -885,6 +909,8 @@ def build_report_model(
                 # Describes the consensus construction, not a contour
                 # comparison, so it has no place among the paired tests.
                 continue
+            if str(metric).lower() in DIAGNOSTIC_COLUMNS:
+                continue
             key = (organ, source, str(metric), patient, linkage, reference)
             if key in model.observations:
                 # A second row for the same contour adds no information, and
@@ -920,6 +946,7 @@ __all__ = [
     "collect_acquisition",
     "FamilyAxis",
     "interval_text",
+    "DIAGNOSTIC_COLUMNS",
     "LOWER_IS_BETTER",
     "Coverage",
     "CoverageCell",

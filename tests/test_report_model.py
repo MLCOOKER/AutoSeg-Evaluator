@@ -286,6 +286,43 @@ def test_metric_direction(metric, expected):
     assert metric_direction(metric) == expected
 
 
+def test_every_2d_metric_is_lower_is_better():
+    """Zero for identical contours, growing with disagreement — all of them.
+
+    APL and NAPL measure different things in each direction (boundary to draw,
+    boundary to remove) but less is better in both. Checked against the 2D
+    stream's own column list, so a metric added there without a direction here
+    fails rather than silently reading as undirected.
+    """
+    from autoseg_evaluator.core.polygon_metrics import METRIC_COLUMNS
+
+    for columns in METRIC_COLUMNS.values():
+        for column in columns:
+            assert metric_direction(column) == -1, column
+
+
+def test_the_2d_plane_counts_never_reach_the_report():
+    """They say what a number was measured over; they are not a comparison.
+
+    Kept in step with the 2D stream's own list of such columns.
+    """
+    from autoseg_evaluator.core.polygon_metrics import CONTEXT_COLUMNS
+    from autoseg_evaluator.data.report import DIAGNOSTIC_COLUMNS
+
+    assert set(CONTEXT_COLUMNS) == set(DIAGNOSTIC_COLUMNS)
+    model = build_report_model(
+        [
+            _row(
+                "P1",
+                "Parotid",
+                "VendorA",
+                {"poly_hd95_mm": 2.1, "poly_planes_joint": 30, "poly_planes_gt_only": 2},
+            )
+        ]
+    )
+    assert model.metrics() == ["poly_hd95_mm"]
+
+
 def test_favours_reads_the_direction_not_the_sign():
     """A smaller Hausdorff is better, so a negative difference favours A."""
     assert favours("dice", 0.04) == "a"

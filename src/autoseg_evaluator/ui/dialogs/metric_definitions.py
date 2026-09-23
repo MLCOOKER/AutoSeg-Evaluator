@@ -224,30 +224,6 @@ vertex-only or voxel-based maximum cannot.</p>
 are combined by their <b>equal average</b>; the median is computed per direction
 and the two combined by taking the <b>larger</b>.</p>
 
-<h3>When a quantile is not determined (median and 95%)</h3>
-<p>The median is the distance that half the boundary length lies within. The 95%
-Hausdorff is the same idea at 95%. Usually exactly one distance fits. But
-suppose half the boundary coincides with the other contour (0&nbsp;mm) and the
-other half sits 2&nbsp;mm away, with nothing in between. Then every value from 0
-to 2&nbsp;mm fits the definition equally well. A computer would settle it by
-whether its running total of lengths rounds to just under or just over one half.
-That is rounding noise worth 2&nbsp;mm, not a property of the contours.</p>
-<p>The engine detects this by moving the target share up and down by a tiny
-amount. If the answer jumps by more than 0.002&nbsp;mm, the value is
-<b>undetermined</b>. It is judged on the value the table reports, which is the
-larger of the two directions. If one direction could be anywhere from 0 to
-2&nbsp;mm but the other is exactly 2&nbsp;mm, the reported value is 2&nbsp;mm
-either way, and it is shown. Only when the reported value itself is undetermined
-is that cell left <b>empty</b>. The status column then gives the range it could
-take. Every other metric in the row is still reported. A value is never picked
-from inside the range. (On a computer without the compiled 2D engine, the
-fallback engine cannot single out one metric, so all 2D metrics in that row are
-left empty instead.)</p>
-<p class="note">The 3D stream has the same exposure and handles it differently:
-its 95% figure silently takes whichever side the rounding lands on. This needs an
-exact coincidence of lengths, so it is rare with real contours. It is most
-likely where a test contour copies the ground truth exactly on some slices.</p>
-
 <h3>Contour topology</h3>
 <p>The loops are read by the rules in <i>Reading the contours</i> above, the same
 reading the 3D fill uses. The 2D metrics are then measured along the outlines of
@@ -260,10 +236,11 @@ perfect agreement and would be indistinguishable from one. The 2D status column
 carries the reason instead, and the numeric cells stay empty. The common causes
 are a consensus ground truth (which is created as a mask and has no contours at
 all), no shared planes, and a contour that is not on a slice plane or lies
-partly outside the image. These blank every 2D metric in the row. An
-undetermined quantile, described above, blanks only its own cell. A structure
-whose loops the reading refuses has no metrics in either stream, and the row's
-error says why.</p>
+partly outside the image. These blank every 2D metric in the row. A 2D median
+or 95% value that the contours do not determine blanks only its own cell, and
+the status column gives the range it could take. A structure whose loops the
+reading refuses has no metrics in either stream, and the row's error says
+why.</p>
 
 <p class="note">A failure in one stream does not void the other. A row can carry
 3D metrics and a 2D status explaining why the 2D columns are blank.</p>
