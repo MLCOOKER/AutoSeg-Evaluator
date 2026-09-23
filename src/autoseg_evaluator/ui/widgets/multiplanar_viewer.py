@@ -1,14 +1,15 @@
 """Interactive multiplanar CT + contour viewer (QGraphicsView based).
 
-Built for the qualitative-assessment tab: shows one CT volume with any number
-of contour overlays, in axial / coronal / sagittal planes (all resliced up
-front; the user cycles the single viewport). Supports:
+Shared by the Qualitative tab and the Matching tab's visualise popup: one CT
+volume with any number of contour overlays, in axial / coronal / sagittal
+planes (all resliced up front; the user cycles the single viewport). Supports:
 
 * slice scrolling (wheel or slider),
-* zoom (ctrl + wheel, anchored under the cursor),
-* window/level (left-drag),
+* zoom (ctrl + wheel, anchored under the cursor) and panning (left-drag),
+* window/level (sliders),
 * per-overlay visibility + an "active" highlight,
-* adjustable contour opacity and line thickness.
+* adjustable contour opacity and line thickness,
+* an optional dose colour wash, drawn between the CT and the contours.
 
 The reslice / aspect helpers at the top are pure (numpy only) so they can be
 unit-tested without Qt. Rendering converts a slice to a grayscale ``QImage``
@@ -126,6 +127,8 @@ class _PlaneView(QGraphicsView):
     steps slices. Window/level is driven by sliders, not the mouse."""
 
     sliceStepped = Signal(int)  # +1 / -1 on a plain wheel turn
+    zoomed = Signal()  # the user changed the zoom
+    resized = Signal()  # the viewport changed size, including when first shown
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -142,9 +145,14 @@ class _PlaneView(QGraphicsView):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
             self.scale(factor, factor)
+            self.zoomed.emit()
         else:
             self.sliceStepped.emit(1 if event.angleDelta().y() > 0 else -1)
         event.accept()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.resized.emit()
 
 
 # ---- The viewer widget ---------------------------------------------------
@@ -164,6 +172,18 @@ class MultiPlanarViewer(QWidget):
         self._wl_width = 400.0
         self._opacity = 0.9
         self._thickness = 2
+        # Which overlay's extent the viewer opens on when none is active.
+        self._focus: int | None = None
+        # Optional dose wash: a (z, y, x) Gy array on the CT grid, off by default.
+        self._dose: np.ndarray | None = None
+        self._dose_max = 0.0
+        self._dose_visible = False
+        self._dose_opacity = 0.4
+        # Keep the image fitted to the view until the user zooms. Data loaded
+        # before the widget is on screen is otherwise fitted to the view's
+        # placeholder size and opens far too small; this refits once the real
+        # size arrives, and follows window resizes, but never undoes a zoom.
+        self._auto_fit = True
         self._build_ui()
 
     # ---- UI ----
@@ -197,6 +217,8 @@ class MultiPlanarViewer(QWidget):
         self._pixmap_item = QGraphicsPixmapItem()
         self._scene.addItem(self._pixmap_item)
         self._view.sliceStepped.connect(self._on_slice_step)
+        self._view.zoomed.connect(self._on_user_zoom)
+        self._view.resized.connect(self._on_view_resized)
         outer.addWidget(self._view, stretch=1)
 
         # Slice slider
@@ -249,11 +271,21 @@ class MultiPlanarViewer(QWidget):
         outer.addLayout(ctl_row)
 
     # ---- Public API ----
-    def set_data(self, ct_image: sitk.Image, overlays: list[Overlay]) -> None:
-        """Load a CT volume + its contour overlays and render the first view."""
+    def set_data(
+        self, ct_image: sitk.Image, overlays: list[Overlay], *, focus: int | None = None
+    ) -> None:
+        """Load a CT volume + its contour overlays and render the first view.
+
+        ``focus`` names the overlay whose extent the view opens on when none is
+        marked active — the way to centre on a structure without dimming the
+        others. Any dose wash from a previous load is cleared.
+        """
         self._ct = sitk.GetArrayFromImage(ct_image).astype(np.float32)
         self._spacing = tuple(float(s) for s in ct_image.GetSpacing())
         self._overlays = list(overlays)
+        self._focus = focus
+        self._dose = None
+        self._dose_max = 0.0
         self._wl_center, self._wl_width = _default_window_level(self._ct)
         self._configure_wl_sliders()
         self._plane = AXIAL
@@ -263,7 +295,44 @@ class MultiPlanarViewer(QWidget):
         self._refresh_slider_range()
         self._render()
         # Fit the image into the view once data is present.
+        self._auto_fit = True
         self._fit()
+
+    def set_dose(self, dose: np.ndarray | None) -> bool:
+        """Offer a dose colour wash; returns whether there is one to show.
+
+        ``dose`` is a ``(z, y, x)`` array in Gy already resampled onto the CT
+        grid. It is refused — and the wash stays unavailable — when its shape
+        does not match the CT or it carries no positive dose, rather than being
+        drawn misaligned or as an empty layer. Call after :meth:`set_data`.
+        """
+        self._dose = None
+        self._dose_max = 0.0
+        if dose is not None and self._ct is not None and dose.shape == self._ct.shape:
+            positive = dose[dose > 0]
+            if positive.size:
+                self._dose = np.asarray(dose, dtype=np.float32)
+                self._dose_max = float(positive.max())
+        self._render()
+        return self._dose is not None
+
+    @property
+    def dose_max(self) -> float:
+        """The highest dose in the wash, in Gy; 0 when there is none."""
+        return self._dose_max
+
+    def set_dose_visible(self, visible: bool) -> None:
+        self._dose_visible = bool(visible)
+        self._render()
+
+    def set_dose_opacity(self, opacity: float) -> None:
+        self._dose_opacity = max(0.05, min(0.95, float(opacity)))
+        if self._dose_visible:
+            self._render()
+
+    def step_slice(self, delta: int) -> None:
+        """Move ``delta`` slices through the current plane, clamped to the volume."""
+        self._on_slice_step(delta)
 
     def set_overlay_visible(self, index: int, visible: bool) -> None:
         if 0 <= index < len(self._overlays):
@@ -278,23 +347,26 @@ class MultiPlanarViewer(QWidget):
     def set_plane(self, plane: str) -> None:
         if plane not in PLANES or plane == self._plane:
             return
+        for btn in self._plane_group.buttons():
+            btn.setChecked(btn.text().lower().startswith(plane))
         self._plane = plane
         self._slice = self._default_slice()
         self._refresh_slider_range()
         self._render()
+        self._auto_fit = True
         self._fit()
 
     def cycle_plane(self, step: int = 1) -> None:
         idx = (PLANES.index(self._plane) + step) % len(PLANES)
-        target = PLANES[idx]
-        for btn in self._plane_group.buttons():
-            btn.setChecked(btn.text().lower().startswith(target))
-        self.set_plane(target)
+        self.set_plane(PLANES[idx])
 
     # ---- Internal helpers ----
     def _default_slice(self) -> int:
-        """Middle slice of the active overlay's extent (else volume middle)."""
+        """Middle slice of the active overlay's extent, else the focus overlay's,
+        else the middle of the volume."""
         active = next((o for o in self._overlays if o.active and o.visible), None)
+        if active is None and self._focus is not None and 0 <= self._focus < len(self._overlays):
+            active = self._overlays[self._focus]
         if self._ct is None:
             return 0
         if active is not None and self._plane == AXIAL:
@@ -365,7 +437,15 @@ class MultiPlanarViewer(QWidget):
             self._configure_wl_sliders()
         self._view.resetTransform()
         self._render()
+        self._auto_fit = True
         self._fit()
+
+    def _on_user_zoom(self) -> None:
+        self._auto_fit = False
+
+    def _on_view_resized(self) -> None:
+        if self._auto_fit:
+            self._fit()
 
     def _fit(self) -> None:
         if not self._pixmap_item.pixmap().isNull():
@@ -397,6 +477,21 @@ class MultiPlanarViewer(QWidget):
             child.setParentItem(None)
             self._scene.removeItem(child)
 
+        # The dose wash sits between the CT and the contours, so contour lines
+        # stay legible on top of it.
+        if self._dose_visible and self._dose is not None:
+            wash = QGraphicsPixmapItem(
+                QPixmap.fromImage(
+                    _dose_wash(
+                        reslice(self._dose, self._plane, self._slice),
+                        self._dose_max,
+                        self._dose_opacity,
+                    )
+                ),
+                self._pixmap_item,
+            )
+            wash.setZValue(0)
+
         for ov in self._overlays:
             if not ov.visible:
                 continue
@@ -407,6 +502,7 @@ class MultiPlanarViewer(QWidget):
             if path.isEmpty():
                 continue
             item = QGraphicsPathItem(path, self._pixmap_item)
+            item.setZValue(1)
             width = self._thickness + (1 if ov.active else 0)
             pen = QPen(QColor(ov.color), width)
             pen.setCosmetic(True)  # constant device-pixel width regardless of zoom
@@ -416,6 +512,24 @@ class MultiPlanarViewer(QWidget):
                 if ov.active or not _any_active(self._overlays)
                 else self._opacity * 0.55
             )
+
+
+#: Below this share of the maximum, dose is not washed in: otherwise the whole
+#: dose grid's bounding box tints the air around the patient.
+DOSE_WASH_FLOOR = 0.05
+
+
+def _dose_wash(dose_2d: np.ndarray, dose_max: float, opacity: float) -> QImage:
+    """One slice of dose as a translucent ``jet`` colour wash."""
+    from matplotlib import colormaps
+
+    level = np.clip(dose_2d / max(dose_max, 1e-6), 0.0, 1.0)
+    rgba = (colormaps["jet"](level) * 255).astype(np.uint8)
+    shown = dose_2d > DOSE_WASH_FLOOR * dose_max
+    rgba[..., 3] = np.where(shown, int(round(opacity * 255)), 0).astype(np.uint8)
+    rgba = np.ascontiguousarray(rgba)
+    h, w = dose_2d.shape
+    return QImage(rgba.tobytes(), w, h, 4 * w, QImage.Format.Format_RGBA8888).copy()
 
 
 def _any_active(overlays: list[Overlay]) -> bool:

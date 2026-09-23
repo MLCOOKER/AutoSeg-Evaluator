@@ -1,18 +1,18 @@
-"""Visualization popup — slice-by-slice CT viewer with GT and test contours overlaid.
+"""Visualise popup — checking that a match landed on the right structure.
 
-A modal QDialog hosting a matplotlib FigureCanvasQTAgg. The user scrolls
-through axial slices via a slider (or the keyboard arrow keys); the GT
-contour is drawn in a fixed reference colour and each test source gets a
-distinct colour drawn from a colourblind-friendly palette. A legend lists
-which colour belongs to which source.
+Shows one patient's ground truth and every matched test contour on the
+reference CT, in the same multiplanar viewer the Qualitative tab uses: axial,
+coronal and sagittal planes, level/window sliders, ctrl+scroll zoom and
+left-drag panning, contour opacity and thickness.
 
-This is intentionally a basic 2D axial viewer — enough for sanity-checking
-outliers and verifying the auto-match landed on the right structure. The
-v1 paper's §2.5 ("Visualization") describes the same minimal feature.
+Around the viewer, this dialog adds what matching needs and grading does not: a
+legend that turns each source on and off, and — when the patient has an RT
+Dose — an optional dose colour wash with its scale.
 
-When an RT Dose is loaded for the patient, the viewer also accepts a dose
-array (resampled onto the CT grid) and offers an optional dose colour-wash
-overlay, toggled on/off with a checkbox and an opacity control.
+The ground truth is drawn last, so it stays on top of every test contour, and
+the viewer opens on the middle of the ground truth's extent. Colours come from
+the shared palette, so a source is the same colour here as in the Qualitative
+tab.
 """
 
 from __future__ import annotations
@@ -21,9 +21,8 @@ from collections.abc import Sequence
 
 import numpy as np
 import SimpleITK as sitk
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -36,23 +35,28 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# Reference colour for GT (yellow). Test sources cycle through this
-# colourblind-distinguishable palette (Wong / Tol-derived).
-_GT_COLOR = "#F0B400"
-_TEST_PALETTE = [
-    "#E41A1C",  # red
-    "#377EB8",  # blue
-    "#4DAF4A",  # green
-    "#984EA3",  # purple
-    "#FF7F00",  # orange
-    "#A65628",  # brown
-    "#F781BF",  # pink
-    "#999999",  # grey
-]
+from autoseg_evaluator.ui.widgets._palette import GT_COLOR, color_for_index
+from autoseg_evaluator.ui.widgets.multiplanar_viewer import (
+    AXIAL,
+    CORONAL,
+    SAGITTAL,
+    MultiPlanarViewer,
+    Overlay,
+)
+
+#: The ``jet`` ramp the dose wash is drawn with, as stops for the scale bar.
+_JET_STOPS = (
+    (0.0, "#00007F"),
+    (0.125, "#0000FF"),
+    (0.375, "#00FFFF"),
+    (0.625, "#FFFF00"),
+    (0.875, "#FF0000"),
+    (1.0, "#7F0000"),
+)
 
 
 class VisualizationWindow(QDialog):
-    """Modal slice viewer for one patient's GT + tests against the reference CT."""
+    """Modal viewer for one patient's GT + matched tests against the reference CT."""
 
     def __init__(
         self,
@@ -66,43 +70,42 @@ class VisualizationWindow(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(960, 800)
+        self.resize(960, 900)
         self.setSizeGripEnabled(True)
 
-        self._ct_arr = sitk.GetArrayFromImage(ct_image)  # shape (z, y, x)
-        self._gt_arr = sitk.GetArrayFromImage(gt_mask)
-        self._gt_label = gt_label
-        self._tests: list[tuple[str, np.ndarray]] = [
-            (label, sitk.GetArrayFromImage(m)) for label, m in test_masks_with_labels
+        tests = [
+            (label, sitk.GetArrayFromImage(mask).astype(bool))
+            for label, mask in test_masks_with_labels
         ]
-        self._test_visible: list[bool] = [True] * len(self._tests)
-        self._gt_visible = True
-        self._n_slices = int(self._ct_arr.shape[0])
+        overlays = [
+            Overlay(label=label, color=color_for_index(i), mask=arr)
+            for i, (label, arr) in enumerate(tests)
+        ]
+        # Last, so it is drawn over every test contour.
+        overlays.append(
+            Overlay(
+                label=f"GT — {gt_label}",
+                color=GT_COLOR,
+                mask=sitk.GetArrayFromImage(gt_mask).astype(bool),
+            )
+        )
+        self._gt_index = len(overlays) - 1
+        self._overlays = overlays
 
-        # Optional dose overlay: a (z, y, x) Gy array resampled onto the CT grid
-        # (so it aligns slice-for-slice). Kept only when it matches the CT shape
-        # and carries some positive dose; otherwise the overlay is unavailable.
-        self._dose_arr: np.ndarray | None = None
-        self._dose_vmax: float = 0.0
-        if dose_arr is not None and dose_arr.shape == self._ct_arr.shape:
-            positive = dose_arr[dose_arr > 0]
-            if positive.size:
-                self._dose_arr = dose_arr
-                self._dose_vmax = float(positive.max())
-        self._dose_visible = False
+        self._viewer = MultiPlanarViewer(self)
+        # Open on the ground truth without dimming the tests the way an
+        # "active" overlay would.
+        self._viewer.set_data(ct_image, overlays, focus=self._gt_index)
+
         self._dose_alpha = 0.40
-        self._dose_cax = None  # colorbar axes, created in _build_ui when dose exists
-
-        # Default to the middle-of-GT slice if GT non-empty, else mid-volume
-        z_with_gt = np.any(self._gt_arr > 0, axis=(1, 2))
-        if z_with_gt.any():
-            zs = np.nonzero(z_with_gt)[0]
-            self._current_slice = int((zs.min() + zs.max()) // 2)
-        else:
-            self._current_slice = self._n_slices // 2
+        self._dose_visible = False
+        has_dose = self._viewer.set_dose(dose_arr)
+        self._dose_arr: np.ndarray | None = dose_arr if has_dose else None
+        self._dose_vmax = self._viewer.dose_max
+        self._viewer.set_dose_opacity(self._dose_alpha)
 
         self._build_ui()
-        self._refresh_plot()
+        self._bind_keys()
 
     # ---- UI construction --------------------------------------------------
 
@@ -110,40 +113,10 @@ class VisualizationWindow(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
+        outer.addWidget(self._viewer, stretch=1)
 
-        # Matplotlib canvas — claim almost the entire figure for the image.
-        # When a dose overlay is available, reserve a right margin for its
-        # colorbar; otherwise the image claims the full width.
-        self._figure = Figure(figsize=(10, 10))
-        right = 0.88 if self._dose_arr is not None else 0.99
-        self._figure.subplots_adjust(left=0.01, right=right, top=0.96, bottom=0.01)
-        self._canvas = FigureCanvas(self._figure)
-        self._ax = self._figure.add_subplot(111)
-        self._figure.patch.set_facecolor("#000000")
-        self._ax.set_facecolor("#000000")
-        if self._dose_arr is not None:
-            # Fixed colorbar axes, reused across slice redraws (no stacking).
-            self._dose_cax = self._figure.add_axes([0.90, 0.08, 0.025, 0.84])
-            self._dose_cax.set_visible(False)
-        # Mouse-wheel slice navigation on the image
-        self._canvas.mpl_connect("scroll_event", self._on_canvas_scroll)
-        outer.addWidget(self._canvas, stretch=1)
-
-        # Slider row
-        slider_row = QHBoxLayout()
-        slider_row.addWidget(QLabel("Slice:"))
-        self._slider = QSlider(Qt.Orientation.Horizontal)
-        self._slider.setRange(0, max(0, self._n_slices - 1))
-        self._slider.setValue(self._current_slice)
-        self._slider.valueChanged.connect(self._on_slice_changed)
-        slider_row.addWidget(self._slider, stretch=1)
-        self._slice_label = QLabel(self._format_slice_label())
-        slider_row.addWidget(self._slice_label)
-        outer.addLayout(slider_row)
-
-        # Dose-overlay controls: an on/off toggle plus an opacity slider.
-        # Shown disabled (with an explanatory tooltip) when the patient has no
-        # RT Dose loaded, so the feature is still discoverable.
+        # Dose wash: an on/off toggle, an opacity slider, and the scale. Shown
+        # disabled when the patient has no RT Dose, so it is still discoverable.
         dose_row = QHBoxLayout()
         self._dose_checkbox = QCheckBox("Dose overlay")
         self._dose_checkbox.setChecked(False)
@@ -152,7 +125,8 @@ class VisualizationWindow(QDialog):
             self._dose_checkbox.setToolTip("No RT Dose is loaded for this patient.")
         else:
             self._dose_checkbox.setToolTip(
-                f"Overlay the planned dose as a colour wash (jet, 0–{self._dose_vmax:.0f} Gy)."
+                f"Overlay the planned dose as a colour wash (0–{self._dose_vmax:.0f} Gy). "
+                "Dose below 5% of the maximum is not washed in."
             )
             self._dose_checkbox.toggled.connect(self._on_dose_toggled)
         dose_row.addWidget(self._dose_checkbox)
@@ -165,10 +139,14 @@ class VisualizationWindow(QDialog):
         self._dose_opacity.setEnabled(self._dose_arr is not None)
         self._dose_opacity.valueChanged.connect(self._on_dose_opacity_changed)
         dose_row.addWidget(self._dose_opacity)
+        dose_row.addSpacing(12)
+        self._dose_scale = self._make_dose_scale()
+        self._dose_scale.setVisible(False)
+        dose_row.addWidget(self._dose_scale)
         dose_row.addStretch(1)
         outer.addLayout(dose_row)
 
-        # Legend / visibility toggles
+        # Legend / visibility toggles: ground truth first, as a reader looks for it.
         legend_scroll = QScrollArea()
         legend_scroll.setWidgetResizable(True)
         legend_scroll.setMaximumHeight(140)
@@ -176,165 +154,75 @@ class VisualizationWindow(QDialog):
         legend_layout = QVBoxLayout(legend_inner)
         legend_layout.setContentsMargins(4, 4, 4, 4)
         legend_layout.setSpacing(2)
-
-        gt_row = self._make_legend_row(_GT_COLOR, f"GT — {self._gt_label}", checked=True)
-        gt_row.checkbox.toggled.connect(self._on_gt_toggled)
-        legend_layout.addWidget(gt_row)
-
-        self._test_rows: list[_LegendRow] = []
-        for i, (label, _arr) in enumerate(self._tests):
-            color = _TEST_PALETTE[i % len(_TEST_PALETTE)]
-            row = self._make_legend_row(color, label, checked=True)
-            row.checkbox.toggled.connect(lambda checked, idx=i: self._on_test_toggled(idx, checked))
+        self._legend_rows: list[_LegendRow] = []
+        order = [self._gt_index] + [i for i in range(len(self._overlays)) if i != self._gt_index]
+        for index in order:
+            overlay = self._overlays[index]
+            row = _LegendRow(overlay.color, overlay.label, checked=True)
+            row.checkbox.toggled.connect(
+                lambda checked, i=index: self._viewer.set_overlay_visible(i, checked)
+            )
             legend_layout.addWidget(row)
-            self._test_rows.append(row)
-
+            self._legend_rows.append(row)
         legend_layout.addStretch(1)
         legend_scroll.setWidget(legend_inner)
         outer.addWidget(legend_scroll)
 
-        # Close button
         btn_row = QHBoxLayout()
+        hint = QLabel(
+            "Scroll: slices · Ctrl+scroll: zoom · Drag: pan · A / C / S: plane · Arrow keys: slices"
+        )
+        hint.setStyleSheet("color: #888;")
+        btn_row.addWidget(hint)
         btn_row.addStretch(1)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
         btn_row.addWidget(close_btn)
         outer.addLayout(btn_row)
 
-    @staticmethod
-    def _make_legend_row(color: str, label: str, checked: bool) -> _LegendRow:
-        return _LegendRow(color, label, checked)
+    def _make_dose_scale(self) -> QWidget:
+        """``0 Gy [ramp] max Gy`` — the colour bar for the wash."""
+        scale = QWidget(self)
+        layout = QHBoxLayout(scale)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(QLabel("0"))
+        ramp = QLabel(scale)
+        ramp.setFixedSize(120, 12)
+        stops = ", ".join(f"stop:{at} {colour}" for at, colour in _JET_STOPS)
+        ramp.setStyleSheet(
+            f"border: 1px solid #888; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, {stops});"
+        )
+        layout.addWidget(ramp)
+        layout.addWidget(QLabel(f"{self._dose_vmax:.0f} Gy"))
+        return scale
+
+    def _bind_keys(self) -> None:
+        """Arrow keys step slices, A / C / S pick the plane, as in the Qualitative tab."""
+        for key, delta in (
+            (Qt.Key.Key_Up, 1),
+            (Qt.Key.Key_Right, 1),
+            (Qt.Key.Key_Down, -1),
+            (Qt.Key.Key_Left, -1),
+        ):
+            QShortcut(QKeySequence(key), self, activated=lambda d=delta: self._viewer.step_slice(d))
+        for key, plane in (
+            (Qt.Key.Key_A, AXIAL),
+            (Qt.Key.Key_C, CORONAL),
+            (Qt.Key.Key_S, SAGITTAL),
+        ):
+            QShortcut(QKeySequence(key), self, activated=lambda p=plane: self._viewer.set_plane(p))
 
     # ---- Event handlers ---------------------------------------------------
 
-    def _on_slice_changed(self, value: int) -> None:
-        self._current_slice = int(value)
-        self._slice_label.setText(self._format_slice_label())
-        self._refresh_plot()
-
-    def _on_gt_toggled(self, checked: bool) -> None:
-        self._gt_visible = checked
-        self._refresh_plot()
-
-    def _on_test_toggled(self, index: int, checked: bool) -> None:
-        if 0 <= index < len(self._test_visible):
-            self._test_visible[index] = checked
-            self._refresh_plot()
-
     def _on_dose_toggled(self, checked: bool) -> None:
         self._dose_visible = checked
-        self._refresh_plot()
+        self._dose_scale.setVisible(checked)
+        self._viewer.set_dose_visible(checked)
 
     def _on_dose_opacity_changed(self, value: int) -> None:
         self._dose_alpha = max(0.05, min(0.95, value / 100.0))
-        if self._dose_visible:
-            self._refresh_plot()
-
-    def keyPressEvent(self, event):
-        # Arrow keys navigate slices
-        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Right):
-            self._slider.setValue(min(self._slider.value() + 1, self._slider.maximum()))
-            return
-        if event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Left):
-            self._slider.setValue(max(self._slider.value() - 1, 0))
-            return
-        super().keyPressEvent(event)
-
-    def _on_canvas_scroll(self, event) -> None:
-        """Mouse-wheel scroll over the image → advance slice up/down."""
-        # ``event.button`` is 'up' or 'down' for vertical wheel events
-        if event.button == "up":
-            delta = 1
-        elif event.button == "down":
-            delta = -1
-        else:
-            return
-        new_value = max(0, min(self._slider.maximum(), self._slider.value() + delta))
-        self._slider.setValue(new_value)
-
-    # ---- Drawing ----------------------------------------------------------
-
-    def _refresh_plot(self) -> None:
-        self._ax.clear()
-        self._ax.set_facecolor("#000000")
-        if self._n_slices == 0:
-            self._canvas.draw_idle()
-            return
-        ct_slice = self._ct_arr[self._current_slice]
-        vmin, vmax = _window_level(ct_slice)
-        self._ax.imshow(
-            ct_slice,
-            cmap="gray",
-            aspect="equal",
-            vmin=vmin,
-            vmax=vmax,
-            interpolation="nearest",
-        )
-        # Dose colour wash sits between the CT and the contours, so contour
-        # lines stay legible on top of the wash.
-        self._draw_dose_overlay()
-        # Draw test contours FIRST (so GT lands on top of every test).
-        for i, (_label, arr) in enumerate(self._tests):
-            if not self._test_visible[i]:
-                continue
-            if self._current_slice >= arr.shape[0]:
-                continue
-            tslice = arr[self._current_slice]
-            if not tslice.any():
-                continue
-            color = _TEST_PALETTE[i % len(_TEST_PALETTE)]
-            self._ax.contour(tslice, levels=[0.5], colors=[color], linewidths=0.7)
-        # GT contour painted last → guaranteed to render above the tests
-        if self._gt_visible and self._current_slice < self._gt_arr.shape[0]:
-            gt_slice = self._gt_arr[self._current_slice]
-            if gt_slice.any():
-                self._ax.contour(
-                    gt_slice,
-                    levels=[0.5],
-                    colors=[_GT_COLOR],
-                    linewidths=1.2,
-                )
-        self._ax.set_title(
-            f"Slice {self._current_slice + 1} / {self._n_slices}",
-            color="white",
-            fontsize=10,
-        )
-        self._ax.axis("off")
-        self._canvas.draw_idle()
-
-    def _draw_dose_overlay(self) -> None:
-        """Paint the dose colour wash for the current slice (when toggled on)."""
-        if not (self._dose_visible and self._dose_arr is not None):
-            if self._dose_cax is not None:
-                self._dose_cax.set_visible(False)
-            return
-        if self._current_slice >= self._dose_arr.shape[0]:
-            return
-        dose_slice = self._dose_arr[self._current_slice]
-        # Mask trivial / out-of-grid dose so the wash marks only meaningful
-        # dose (≥ 5 % of the volume max) instead of tinting air inside the
-        # dose grid's bounding box.
-        threshold = 0.05 * self._dose_vmax
-        masked = np.ma.masked_less_equal(dose_slice, threshold)
-        im = self._ax.imshow(
-            masked,
-            cmap="jet",
-            aspect="equal",
-            alpha=self._dose_alpha,
-            vmin=0.0,
-            vmax=self._dose_vmax,
-            interpolation="nearest",
-        )
-        if self._dose_cax is not None:
-            self._dose_cax.clear()
-            self._dose_cax.set_visible(True)
-            cbar = self._figure.colorbar(im, cax=self._dose_cax)
-            cbar.set_label("Dose (Gy)", color="white", fontsize=8)
-            cbar.outline.set_edgecolor("#888888")
-            self._dose_cax.tick_params(colors="white", labelsize=7)
-
-    def _format_slice_label(self) -> str:
-        return f"{self._current_slice + 1} / {self._n_slices}"
+        self._viewer.set_dose_opacity(self._dose_alpha)
 
 
 # ---- Legend row widget ---------------------------------------------------
@@ -363,25 +251,7 @@ class _LegendRow(QWidget):
         )
         layout.addWidget(swatch)
 
-        # No explicit colour — let the application's theme palette decide so the
-        # label is readable in both light AND dark mode. Previously we used
-        # ``color: inherit`` which is not valid in Qt stylesheets and silently
-        # forced the text to default black, making it unreadable on the dark
-        # background.
+        # No explicit colour: the theme palette keeps the label readable in both
+        # light and dark mode.
         text = QLabel(label, self)
         layout.addWidget(text, stretch=1)
-
-
-# ---- Helpers --------------------------------------------------------------
-
-
-def _window_level(slice_arr: np.ndarray) -> tuple[float, float]:
-    """Pick a reasonable display window/level for a CT slice via robust percentiles."""
-    finite = slice_arr[np.isfinite(slice_arr)]
-    if finite.size == 0:
-        return 0.0, 1.0
-    lo = float(np.percentile(finite, 1))
-    hi = float(np.percentile(finite, 99))
-    if hi <= lo:
-        hi = lo + 1.0
-    return lo, hi
