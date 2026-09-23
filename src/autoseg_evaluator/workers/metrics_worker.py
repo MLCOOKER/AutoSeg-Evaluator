@@ -119,10 +119,11 @@ class MetricsWorker(QObject):
         # cannot yield a grid will not yield one on the next attempt either.
         self._grid_cache: dict[tuple[str, str], Any] = {}
         self._polygon_cache: dict[tuple[str, str, int], Any] = {}
-        # How many planes of each structure needed nested-ring composition, for
-        # the audit record: a structure whose topology was interpreted rather
-        # than declared is worth being able to find later.
-        self._nested_planes: dict[tuple[str, str, int], int] = {}
+        # What had to be interpreted to read each structure, for the audit
+        # record: planes composed from nested rings, and references that pointed
+        # at nothing and were set aside. A structure read on anything other than
+        # its own declarations is worth being able to find later.
+        self._structure_notes: dict[tuple[str, str, int], dict[str, Any]] = {}
         self._pending_polygon_audit: dict[str, Any] | None = None
         self._dose_cache: dict[tuple[str, str], Any] = {}
         # STAPLE summary scalars captured while synthesising a multi-observer
@@ -597,7 +598,10 @@ class MetricsWorker(QObject):
                 prepared = "undefined: this structure has no contours on any plane"
             else:
                 prepared = self._polygon_engine_for_run().prepare(regions)
-                self._nested_planes[key] = int(regions.nested_planes)
+                self._structure_notes[key] = {
+                    "nested_planes": int(regions.nested_planes),
+                    "references_set_aside": list(regions.references_set_aside),
+                }
         except ContoursUnavailableError as exc:
             prepared = f"unavailable: {exc}"
         except Exception as exc:  # noqa: BLE001 — becomes a per-row status
@@ -628,12 +632,12 @@ class MetricsWorker(QObject):
         reference = self._polygon_structure(*reference_key, gt_rtss, grid)
         if isinstance(reference, str):
             return {}, reference
-        reference_nested = self._nested_planes.get(reference_key, 0)
+        reference_notes = self._structure_notes.get(reference_key, {})
         candidate_key = (group["patient_id"], test["rtstruct_sop_uid"], test["roi_number"])
         candidate = self._polygon_structure(*candidate_key, record["rtss"], grid)
         if isinstance(candidate, str):
             return {}, candidate
-        candidate_nested = self._nested_planes.get(candidate_key, 0)
+        candidate_notes = self._structure_notes.get(candidate_key, {})
 
         result = engine.compare(
             reference, candidate, tolerance_mm=self._polygon_config.tolerance_mm
@@ -642,15 +646,31 @@ class MetricsWorker(QObject):
             record = dict(engine.settings)
             record["tolerance_mm"] = self._polygon_config.tolerance_mm
             record["missing_plane_policy"] = MISSING_PLANE_POLICY
-            record["nested_planes_composed"] = reference_nested + candidate_nested
+            record["nested_planes_composed"] = reference_notes.get(
+                "nested_planes", 0
+            ) + candidate_notes.get("nested_planes", 0)
+            set_aside = {
+                side: notes["references_set_aside"]
+                for side, notes in (("ground_truth", reference_notes), ("test", candidate_notes))
+                if notes.get("references_set_aside")
+            }
+            if set_aside:
+                record["references_set_aside"] = set_aside
             if result.detail:
                 record["measurements"] = result.detail
             if result.status:
                 record["status"] = result.status
+            if result.undefined:
+                record["undefined"] = dict(result.undefined)
             self._pending_polygon_audit = record
         if not result.available:
             return {}, result.status
-        return self._polygon_config.select(result.values), ""
+        # A metric the contours leave undetermined is blank and says why; the
+        # rest of the row stands. Only reasons for metrics the user selected are
+        # shown — an unselected blank is not a finding.
+        shown = self._polygon_config.columns()
+        notes = [reason for column, reason in result.undefined.items() if column in shown]
+        return self._polygon_config.select(result.values), "; ".join(notes)
 
     @staticmethod
     def _dvh_diff_metrics(
@@ -1406,7 +1426,7 @@ class MetricsWorker(QObject):
         # The polygon caches key on the same patient, and a prepared structure
         # holds its edge arrays; dropping them here keeps peak memory tied to
         # one patient rather than to the whole cohort.
-        for cache in (self._grid_cache, self._polygon_cache):
+        for cache in (self._grid_cache, self._polygon_cache, self._structure_notes):
             for key in [k for k in cache if k[0] == patient_id]:
                 cache.pop(key, None)
         # Encourage Python to actually reclaim the C++-backed SimpleITK

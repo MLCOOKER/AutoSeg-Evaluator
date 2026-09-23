@@ -184,6 +184,203 @@ def test_an_explicit_xor_needs_no_opt_in(grid):
     assert regions.nested_planes == 0
 
 
+# ---- References that point at nothing --------------------------------------
+#
+# Found on a real tender cohort: one vendor of seven wrote structure sets whose
+# references name a CT that is not the one loaded beside them — a frame UID the
+# file never declares, and slice UIDs absent from the series. The contours
+# themselves sit exactly on the CT's planes. The mask stream never reads these
+# references; the parser refused every structure in those sets (0 of 447).
+
+SLICES = {generate_uid(): k for k in range(20)}
+
+
+@pytest.fixture
+def sliced_grid() -> ContourGrid:
+    """The same frame, with slice UIDs the contours can reference."""
+    return ContourGrid(
+        origin=(0.0, 0.0, 0.0),
+        basis=np.eye(3),
+        spacing=(1.0, 1.0, 2.0),
+        size=(512, 512, 20),
+        frame_of_reference_uid=FRAME,
+        sops=dict(SLICES),
+    )
+
+
+def _declare(dataset, *frames):
+    """Give a structure set the top-level frame declarations exporters write."""
+    items = []
+    for frame in frames:
+        item = Dataset()
+        item.FrameOfReferenceUID = frame
+        items.append(item)
+    dataset.ReferencedFrameOfReferenceSequence = items
+    return dataset
+
+
+def _reference_slices(dataset, uid_for_plane):
+    """Point each contour at an image, as ``ContourImageSequence`` does."""
+    for contour in dataset.ROIContourSequence[0].ContourSequence:
+        plane = int(round(float(contour.ContourData[2]) / 2.0))
+        ref = Dataset()
+        ref.ReferencedSOPClassUID = "1.2.840.10008.5.1.4.1.1.2"
+        ref.ReferencedSOPInstanceUID = uid_for_plane(plane)
+        contour.ContourImageSequence = [ref]
+    return dataset
+
+
+def _uid_of_plane(plane):
+    return next(uid for uid, k in SLICES.items() if k == plane)
+
+
+def test_a_consistent_structure_set_is_passed_through_untouched(sliced_grid):
+    dataset = _reference_slices(_declare(_rtss({3: [_square(10, 10, 20)]}), FRAME), _uid_of_plane)
+
+    regions = parse_structure(dataset, 1, sliced_grid)
+
+    assert sorted(regions.planes) == [3]
+    assert regions.references_set_aside == ()
+
+
+def test_a_frame_the_structure_set_never_declares_is_read_in_the_one_it_does(grid):
+    dataset = _declare(_rtss({3: [_square(10, 10, 20)]}), FRAME)
+    dataset.StructureSetROISequence[0].ReferencedFrameOfReferenceUID = generate_uid()
+
+    regions = parse_structure(dataset, 1, grid)
+
+    assert regions.planes[3].area == pytest.approx(400.0)
+    assert len(regions.references_set_aside) == 1
+    assert "not declared" in regions.references_set_aside[0]
+
+
+def test_a_frame_the_structure_set_does_declare_is_still_a_mismatch(grid):
+    """A structure drawn on another image cannot be placed by its coordinates.
+
+    Its frame is real and named; it is simply not this one. That is the case the
+    parser's check exists for, and setting it aside would put an MR contour on
+    CT slices.
+    """
+    other = generate_uid()
+    dataset = _declare(_rtss({3: [_square(10, 10, 20)]}), FRAME, other)
+    dataset.StructureSetROISequence[0].ReferencedFrameOfReferenceUID = other
+
+    with pytest.raises(ContoursUnavailableError, match="different Frame of Reference"):
+        parse_structure(dataset, 1, grid)
+
+
+def test_an_undeclared_frame_is_refused_when_there_is_no_single_frame_to_mean(grid):
+    dataset = _declare(_rtss({3: [_square(10, 10, 20)]}), FRAME, generate_uid())
+    dataset.StructureSetROISequence[0].ReferencedFrameOfReferenceUID = generate_uid()
+
+    with pytest.raises(ContoursUnavailableError, match="no\\s+single frame"):
+        parse_structure(dataset, 1, grid)
+
+
+def test_image_references_that_name_no_slice_are_set_aside(sliced_grid):
+    dataset = _reference_slices(
+        _declare(_rtss({3: [_square(10, 10, 20)], 4: [_square(10, 10, 20)]}), FRAME),
+        lambda plane: generate_uid(),
+    )
+
+    regions = parse_structure(dataset, 1, sliced_grid)
+
+    assert sorted(regions.planes) == [3, 4]
+    assert regions.references_set_aside
+    assert regions.references_set_aside[0].startswith("2 contour image references")
+
+
+def test_setting_references_aside_never_touches_the_cached_dataset(sliced_grid):
+    """The dataset is shared with the mask stream and every other pair."""
+    stray_frame = generate_uid()
+    dataset = _reference_slices(
+        _declare(_rtss({3: [_square(10, 10, 20)]}), FRAME), lambda plane: generate_uid()
+    )
+    dataset.StructureSetROISequence[0].ReferencedFrameOfReferenceUID = stray_frame
+
+    parse_structure(dataset, 1, sliced_grid)
+
+    assert dataset.StructureSetROISequence[0].ReferencedFrameOfReferenceUID == stray_frame
+    assert "ContourImageSequence" in dataset.ROIContourSequence[0].ContourSequence[0]
+
+
+def test_a_reference_that_resolves_to_the_wrong_slice_is_still_refused(sliced_grid):
+    """Contradiction, not absence: this is what the parser's check is for."""
+    dataset = _reference_slices(
+        _declare(_rtss({3: [_square(10, 10, 20)]}), FRAME),
+        lambda plane: _uid_of_plane(plane + 1),
+    )
+
+    with pytest.raises(ContoursUnavailableError, match="Referenced CT plane mismatch"):
+        parse_structure(dataset, 1, sliced_grid)
+
+
+def test_references_of_which_only_some_resolve_are_ambiguous(sliced_grid):
+    dataset = _reference_slices(
+        _declare(_rtss({3: [_square(10, 10, 20)], 4: [_square(10, 10, 20)]}), FRAME),
+        lambda plane: _uid_of_plane(plane) if plane == 3 else generate_uid(),
+    )
+
+    with pytest.raises(ContoursUnavailableError, match="1 of this structure's 2"):
+        parse_structure(dataset, 1, sliced_grid)
+
+
+def test_without_references_a_contour_off_the_slice_planes_is_still_refused(sliced_grid):
+    """Coordinates carry the placement once references are set aside.
+
+    So the geometric check has to hold: a contour half a slice off the lattice
+    is not on this CT, whatever its references said.
+    """
+    dataset = _reference_slices(
+        _declare(_rtss({3: [_square(10, 10, 20)]}), FRAME), lambda plane: generate_uid()
+    )
+    contour = dataset.ROIContourSequence[0].ContourSequence[0]
+    contour.ContourData = [
+        value + 1.0 if index % 3 == 2 else value for index, value in enumerate(contour.ContourData)
+    ]
+
+    with pytest.raises(ContoursUnavailableError, match="Off-grid"):
+        parse_structure(dataset, 1, sliced_grid)
+
+
+def test_nested_rings_compose_through_the_view_as_well(grid):
+    """The nested-ring path copies the dataset; here it copies the view."""
+    dataset = _declare(_rtss({3: [_square(0, 0, 40), _square(10, 10, 10)]}), FRAME)
+    dataset.StructureSetROISequence[0].ReferencedFrameOfReferenceUID = generate_uid()
+
+    regions = parse_structure(dataset, 1, grid)
+
+    assert regions.nested_planes == 1
+    assert regions.planes[3].area == pytest.approx(1500.0)
+    assert regions.references_set_aside
+
+
+def test_an_roi_number_listed_twice_is_named_as_the_reason(grid):
+    dataset = _rtss({3: [_square(10, 10, 20)]})
+    duplicate = Dataset()
+    duplicate.ROINumber = 1
+    duplicate.ReferencedFrameOfReferenceUID = FRAME
+    dataset.StructureSetROISequence.append(duplicate)
+
+    with pytest.raises(ContoursUnavailableError, match="listed 2 times"):
+        parse_structure(dataset, 1, grid)
+
+
+def test_what_was_set_aside_is_described_without_a_single_uid(sliced_grid):
+    """These notes go into the audit sidecar, which leaves the building."""
+    stray_frame = generate_uid()
+    stray_slice = generate_uid()
+    dataset = _reference_slices(
+        _declare(_rtss({3: [_square(10, 10, 20)]}), FRAME), lambda plane: stray_slice
+    )
+    dataset.StructureSetROISequence[0].ReferencedFrameOfReferenceUID = stray_frame
+
+    notes = " ".join(parse_structure(dataset, 1, sliced_grid).references_set_aside)
+
+    for uid in (FRAME, stray_frame, stray_slice, *SLICES):
+        assert uid not in notes
+
+
 # ---- Measuring -------------------------------------------------------------
 
 
@@ -286,6 +483,97 @@ def test_structures_sharing_no_plane_are_undefined_not_zero():
     assert not result.available
     assert "no common planes" in result.status.lower()
     assert result.values == {}
+
+
+# ---- Quantiles the contours do not determine -------------------------------
+#
+# Half the ground truth coincides with the test and half sits 2 mm from it, so
+# any median from 0 to 2 mm meets the definition. Which one a program reports is
+# decided by whether a running sum of lengths rounds just under or just over one
+# half. The engine refuses; the question is how much it should refuse.
+
+_SAME = box(0, 0, 10, 10)
+
+
+def _half_coincident(test_far):
+    """Planes 0-1 identical; planes 2-3 carry ``test_far`` against a 10 mm box."""
+    reference = _regions({z: _SAME for z in range(4)}, "CLOSED_PLANAR")
+    test = _regions({0: _SAME, 1: _SAME, 2: test_far, 3: test_far}, "CLOSED_PLANAR")
+    return reference, test
+
+
+def _fast_only():
+    if not library_available():
+        pytest.skip("no compiled library for this platform")
+    return select_engine(ENGINE_FAST)
+
+
+def test_an_undetermined_median_blanks_the_median_and_nothing_else():
+    """HD100, the mean and APL do not depend on where a quantile falls."""
+    engine = _fast_only()
+    # Inset by 2 mm: the ground truth's median could be 0 or 2, and the test's
+    # own median is 0, so the reported (larger) one is undetermined too.
+    reference, test = _half_coincident(box(2, 2, 8, 8))
+
+    result = compare_structures(reference, test, tolerance_mm=1.0, engine=engine)
+
+    assert result.available, "one undetermined quantile must not void the comparison"
+    assert "poly_median_distance_mm" not in result.values
+    assert set(result.undefined) == {"poly_median_distance_mm"}
+    assert "from 0 to 2 mm" in result.undefined["poly_median_distance_mm"]
+    for kept in ("poly_hd100_mm", "poly_hd95_mm", "poly_mean_distance_mm", "poly_apl_mm"):
+        assert kept in result.values
+    assert result.values["poly_hd100_mm"] == pytest.approx(2 * np.sqrt(2), abs=1e-9)
+
+
+def test_a_median_the_other_direction_settles_is_reported():
+    """The table shows the larger direction, and here it is the same either way.
+
+    Drawn 2 mm wider: the ground truth's median is anywhere in 0-2 mm, but the
+    test's is exactly 2 mm, so the larger of the two is 2 mm whichever end the
+    first takes. The engine used to refuse this; nothing about it is a guess.
+    """
+    engine = _fast_only()
+    reference, test = _half_coincident(box(-2, -2, 12, 12))
+
+    result = compare_structures(reference, test, tolerance_mm=1.0, engine=engine)
+
+    assert result.undefined == {}
+    assert result.values["poly_median_distance_mm"] == pytest.approx(2.0, abs=1e-6)
+    # The first direction really was undetermined; only the symmetry settles it.
+    assert result.detail["a_quantile_mass_gap_median_mm"] > 1.9
+
+
+def test_switching_off_the_engines_refusal_changes_no_number():
+    """Its ``error_mm`` only decides when to raise, so lifting it is free."""
+    engine = _fast_only()
+    from autoseg_evaluator.vendor import native_contour_metrics_fast as fast
+
+    reference = fast.prepare(fast.ROI({0: box(0, 0, 10, 10), 1: box(1, 0, 11, 9)}, {}, 0, "x"))
+    test = fast.prepare(fast.ROI({0: box(2, 1, 9, 8), 1: box(0, 0, 10, 10)}, {}, 0, "x"))
+    kwargs = {"taus": [1.0], "missing_plane_policy": "exclude"}
+
+    strict = fast.compare(reference, test, error_mm=0.001, **kwargs)
+    lifted = engine._compare(reference, test, 1.0)
+
+    for key, value in strict.items():
+        assert lifted[key] == value, key
+
+
+def test_the_fallback_engine_still_refuses_the_whole_pair_and_says_undefined():
+    """It cannot report a quantile's gap without raising.
+
+    So it keeps the old behaviour, but under the same word as the compiled
+    engine: an undetermined quantile is undefined, not unavailable.
+    """
+    reference, test = _half_coincident(box(2, 2, 8, 8))
+
+    result = compare_structures(
+        reference, test, tolerance_mm=1.0, engine=select_engine(ENGINE_REFERENCE)
+    )
+
+    assert not result.available
+    assert result.status.startswith("undefined:")
 
 
 def test_planes_reached_by_only_one_structure_are_counted_not_hidden():

@@ -73,6 +73,14 @@ compared in three dimensions. Every distance is therefore quantised to the voxel
 size, which for a typical planning CT is around 1&nbsp;mm in plane and 2–3&nbsp;mm
 between slices.</p>
 
+<p>Dice and all surface-distance metrics (3D Hausdorff, Mean Surface Distance,
+Surface Dice) are computed with Google DeepMind's <b>surface-distance</b>
+implementation (github.com/google-deepmind/surface-distance). It is embedded
+in this application, as it was in AutoSeg Evaluator v1. It finds each mask's
+surface elements from the 2&times;2&times;2 voxel neighbourhoods along the
+boundary, gives each one its surface area in mm&sup2;, and measures its distance
+to the other mask's surface with a Euclidean distance transform.</p>
+
 <h3>Dice</h3>
 <p>Twice the overlapping volume divided by the sum of the two volumes; 0&nbsp;to&nbsp;1.
 Biased toward larger structures — a fixed boundary error costs a small organ far
@@ -106,15 +114,34 @@ patient coordinates, with signed components, and catches a positional shift that
 a high overlap score can hide.</p>
 
 <h3>Rasterisation</h3>
-<p>Contour vertices are transformed to continuous sub-voxel coordinates before
-filling. A second, legacy backend that snapped vertices to the nearest voxel
-centre first is retained for reproducing older results; it systematically
-over-estimates volume, by roughly 3% on large organs and more than 50% on
-structures one to two voxels across. <b>The backend in use is recorded in the
-audit sidecar</b>, because switching it moves every mask-derived number.</p>
-
-<p>Where a structure's contours stack more than one loop on a plane, the loops
-are combined by parity — a loop inside another becomes a hole.</p>
+<p>How each contour becomes a mask, adapted from dcmrtstruct2nii:</p>
+<ol>
+<li>Every vertex is converted from patient millimetres to <b>continuous</b> voxel
+coordinates, using the image's origin, spacing and orientation. Vertices are not
+rounded to the nearest voxel, so the outline keeps its sub-voxel position.</li>
+<li>The contour is assigned to the nearest slice. A contour whose vertices span
+more than half a slice through-plane is not planar in the image, and that
+structure produces no mask. Contours on slices outside the image are
+skipped.</li>
+<li>Each contour is filled on its slice. A voxel is inside when its
+<b>centre</b> lies inside the outline or exactly on it.</li>
+<li>When one structure has <b>several loops on the same slice</b>, each loop is
+filled and the fills are combined by exclusive-or: a voxel covered by an odd
+number of loops is inside, and one covered by an even number is not.</li>
+</ol>
+<p>Step 4 is what makes a loop drawn inside another loop a <b>hole</b>, which is
+the usual intent. It also means:</p>
+<ul>
+<li>two loops that <b>partially overlap</b> lose the overlap: the region both
+cover becomes background;</li>
+<li>two loops that <b>share an edge</b> leave a one-voxel seam of background
+along it, because both fill the voxel centres on that edge;</li>
+<li>a single loop that <b>crosses itself</b> (a figure-of-eight) is filled
+even-odd: each lobe is inside.</li>
+</ul>
+<p>None of these produce a warning. Structures that declare their loop parity
+explicitly (<code>CLOSEDPLANAR_XOR</code>), and open or point contours, produce
+no mask and are reported as a failed conversion.</p>
 
 <h2>2D contour metrics</h2>
 
@@ -168,17 +195,41 @@ vertex-only or voxel-based maximum cannot.</p>
 <h3>2D Mean and Median Contour Distance</h3>
 <p>Both are arc-length weighted. The mean is computed per direction and the two
 are combined by their <b>equal average</b>; the median is computed per direction
-and the two combined by taking the <b>larger</b>. Where a quantile falls on a
-rounding-sensitive gap in the distance distribution, it is <b>refused</b> rather
-than resolved arbitrarily, and the status column says so.</p>
+and the two combined by taking the <b>larger</b>.</p>
+
+<h3>When a quantile is not determined (median and 95%)</h3>
+<p>The median is the distance that half the boundary length lies within. The 95%
+Hausdorff is the same idea at 95%. Usually exactly one distance fits. But
+suppose half the boundary coincides with the other contour (0&nbsp;mm) and the
+other half sits 2&nbsp;mm away, with nothing in between. Then every value from 0
+to 2&nbsp;mm fits the definition equally well. A computer would settle it by
+whether its running total of lengths rounds to just under or just over one half.
+That is rounding noise worth 2&nbsp;mm, not a property of the contours.</p>
+<p>The engine detects this by moving the target share up and down by a tiny
+amount. If the answer jumps by more than 0.002&nbsp;mm, the value is
+<b>undetermined</b>. It is judged on the value the table reports, which is the
+larger of the two directions. If one direction could be anywhere from 0 to
+2&nbsp;mm but the other is exactly 2&nbsp;mm, the reported value is 2&nbsp;mm
+either way, and it is shown. Only when the reported value itself is undetermined
+is that cell left <b>empty</b>. The status column then gives the range it could
+take. Every other metric in the row is still reported. A value is never picked
+from inside the range. (On a computer without the compiled 2D engine, the
+fallback engine cannot single out one metric, so all 2D metrics in that row are
+left empty instead.)</p>
+<p class="note">The 3D stream has the same exposure and handles it differently:
+its 95% figure silently takes whichever side the rounding lands on. This needs an
+exact coincidence of lengths, so it is rare with real contours. It is most
+likely where a test contour copies the ground truth exactly on some slices.</p>
 
 <h3>Contour topology</h3>
 <p>Simple closed loops and explicitly declared parity contours are read as
-given. Where an exporter stacks a loop inside another without declaring it, the
-inner loop is read as a hole — the same reading the mask stream has always
-applied, so the two agree. Loops that touch, cross or partially overlap have no
-single correct reading: those structures are <b>refused</b> rather than guessed,
-and can therefore carry 3D metrics and no 2D metrics.</p>
+given. Where a structure has one loop drawn wholly inside another on the same
+slice, without declaring it, the inner loop is read as a hole. This is the same
+reading the 3D fill gives it, so the two streams agree. Loops that only share an
+edge are merged into one region. A loop that crosses itself, or two loops that
+partially overlap, have no single correct reading, so those structures are
+<b>refused</b> rather than guessed. The 3D fill still produces a mask for them
+(see Rasterisation), so they can carry 3D metrics and no 2D metrics.</p>
 
 <h2>What is reported when a metric cannot be computed</h2>
 
@@ -186,17 +237,18 @@ and can therefore carry 3D metrics and no 2D metrics.</p>
 perfect agreement and would be indistinguishable from one. The 2D status column
 carries the reason instead, and the numeric cells stay empty. The common causes
 are a consensus ground truth (which is created as a mask and has no contours at
-all), no shared planes, contour topology that cannot be read unambiguously, and
-a quantile refused as described above.</p>
+all), no shared planes, and contour topology that cannot be read unambiguously.
+These blank every 2D metric in the row. An undetermined quantile, described
+above, blanks only its own cell.</p>
 
 <p class="note">A failure in one stream does not void the other. A row can carry
 3D metrics and a 2D status explaining why the 2D columns are blank.</p>
 
 <h2>Provenance</h2>
 
-<p>Both streams record what produced their numbers — the rasteriser backend and
-voxel spacing for the 3D stream, the engine, its version and its settings for the
-2D stream — in the optional audit sidecar written beside an export. A number
+<p>Both streams record what produced their numbers — the rasteriser and voxel
+spacing for the 3D stream, the engine, its version and its settings for the 2D
+stream — in the optional audit sidecar written beside an export. A number
 that cannot be traced to the method and settings that produced it cannot be
 reproduced.</p>
 

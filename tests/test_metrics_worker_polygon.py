@@ -22,6 +22,7 @@ from autoseg_evaluator.core.polygon_metrics import (  # noqa: E402
     STATUS_NO_CONTOURS,
     ContourRegions,
     PolygonConfig,
+    PolygonMetrics,
 )
 from autoseg_evaluator.workers.metrics_worker import MetricsWorker  # noqa: E402
 
@@ -188,6 +189,76 @@ def test_the_caches_are_released_with_the_rest_of_the_patient():
 
     assert [k for k in worker._grid_cache] == [("P02", "gt.9")]
     assert [k for k in worker._polygon_cache] == [("P02", "gt.9", 1)]
+
+
+def test_references_set_aside_are_recorded_against_the_side_they_came_from(monkeypatch):
+    """A ground truth read on its coordinates is worth finding later.
+
+    Only the side that needed it carries the note: a test structure set that
+    was internally consistent says nothing, rather than inheriting a caveat.
+    """
+    worker = MetricsWorker(None, [], {"polygon": ENABLED, "audit": {"sidecar": True}})
+    note = "12 contour image references name no slice in this image series"
+
+    def parse(_dataset, roi_number, _grid):
+        return ContourRegions(
+            planes={0: box(0, 0, 10, 10)},
+            geometric_type="CLOSED_PLANAR",
+            vertices=4,
+            references_set_aside=(note,) if roi_number == 1 else (),
+        )
+
+    monkeypatch.setattr("autoseg_evaluator.workers.metrics_worker.parse_structure", parse)
+    monkeypatch.setattr(worker, "_polygon_grid", lambda *_a: object())
+    monkeypatch.setattr(worker, "_load_rtstruct", lambda *_a: SimpleNamespace())
+    engine = SimpleNamespace(
+        settings={"engine": "fast"},
+        prepare=lambda regions: regions,
+        compare=lambda *_a, **_k: PolygonMetrics(values={"poly_hd95_mm": 1.0}, detail={"x": 1}),
+    )
+    monkeypatch.setattr(worker, "_polygon_engine_for_run", lambda: engine)
+
+    worker._polygon_metrics(_group(), _record())
+
+    audit = worker._pending_polygon_audit
+    assert audit["references_set_aside"] == {"ground_truth": [note]}
+
+    worker._evict_patient_caches("P01")
+    assert not worker._structure_notes
+
+
+@pytest.mark.parametrize("median_selected", [True, False])
+def test_an_undetermined_metric_is_explained_only_when_it_was_asked_for(
+    monkeypatch, median_selected
+):
+    """The row keeps every determined value; the status explains the blank.
+
+    A blank the user did not ask for is not a finding, so it says nothing.
+    """
+    metrics = {"hd95": True, "median": median_selected}
+    worker = MetricsWorker(None, [], {"polygon": {"metrics": metrics, "tolerance_mm": 3.0}})
+    reason = "undefined: 2D median contour distance could be anything from 0 to 2 mm"
+    regions = ContourRegions(planes={0: box(0, 0, 10, 10)}, geometric_type="x", vertices=4)
+    monkeypatch.setattr(
+        "autoseg_evaluator.workers.metrics_worker.parse_structure", lambda *a: regions
+    )
+    monkeypatch.setattr(worker, "_polygon_grid", lambda *_a: object())
+    monkeypatch.setattr(worker, "_load_rtstruct", lambda *_a: SimpleNamespace())
+    engine = SimpleNamespace(
+        settings={},
+        prepare=lambda r: r,
+        compare=lambda *_a, **_k: PolygonMetrics(
+            values={"poly_hd95_mm": 2.4, "poly_planes_joint": 4},
+            undefined={"poly_median_distance_mm": reason},
+        ),
+    )
+    monkeypatch.setattr(worker, "_polygon_engine_for_run", lambda: engine)
+
+    values, status = worker._polygon_metrics(_group(), _record())
+
+    assert values["poly_hd95_mm"] == 2.4
+    assert "poly_median_distance_mm" not in values
+    assert status == (reason if median_selected else "")
 
 
 def test_only_the_selected_columns_reach_the_row():

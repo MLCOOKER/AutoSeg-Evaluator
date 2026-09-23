@@ -41,9 +41,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from autoseg_evaluator.core.contour_grid import ContourGrid
+from pydicom.dataset import Dataset
+
+from autoseg_evaluator.core.contour_grid import PLANE_ALIGNMENT_BUDGET_MM, ContourGrid
 from autoseg_evaluator.vendor import native_contour_metrics as _reference
 from autoseg_evaluator.vendor import native_contour_metrics_fast as _fast
+from autoseg_evaluator.vendor.native_contour_metrics import (
+    AmbiguousQuantileError as _ReferenceAmbiguousQuantileError,
+)
 from autoseg_evaluator.vendor.native_contour_metrics_fast import geometry as _fast_geometry
 from autoseg_evaluator.vendor.native_contour_metrics_fast import polygon_compat as _compat
 from autoseg_evaluator.vendor.native_contour_metrics_fast.errors import AmbiguousQuantileError
@@ -67,7 +72,25 @@ MISSING_PLANE_POLICY = "exclude"
 #: not a sampling step and not a speed control: measured across 0.001 to 0.5 it
 #: changes neither the cost nor the result by a single bit. The strictest useful
 #: value is therefore free, and correct.
+#:
+#: The engine applies it by raising, which discards the whole comparison. This
+#: adapter applies the same test itself instead — see :func:`_undetermined` — so
+#: an undetermined quantile blanks that one metric and nothing else.
 QUANTILE_GUARD_MM = 0.001
+
+#: What the compiled engine is actually given as ``error_mm``. The argument does
+#: nothing there except decide when to raise (the C++ only checks it is
+#: positive), so lifting it out of reach turns the refusal off and leaves every
+#: number bit-identical. The engine still reports each quantile's gap, and
+#: :data:`QUANTILE_GUARD_MM` is applied to those gaps here.
+_ENGINE_REFUSAL_LIFTED_MM = 1e300
+
+#: The quantiles the guard applies to: the row column each fills, and the name
+#: the engine gives its gap.
+_GUARDED_QUANTILES = (
+    ("poly_median_distance_mm", "median", "2D median contour distance"),
+    ("poly_hd95_mm", "hd95", "2D Hausdorff 95%"),
+)
 
 #: In the reference engine the same argument is the *sampling step*: the kernel
 #: walks each boundary in bins of ``2 * error_mm`` and the cost is inversely
@@ -114,6 +137,10 @@ class ContourRegions:
     #: Planes whose topology was resolved by composing nested rings rather than
     #: read from an explicit XOR declaration. Zero for most structures.
     nested_planes: int = 0
+    #: References in the file that pointed at nothing and were set aside before
+    #: parsing, in words. Empty for a structure set that is internally
+    #: consistent, which is most of them. See :func:`_set_aside_dangling_references`.
+    references_set_aside: tuple[str, ...] = ()
 
     @property
     def empty(self) -> bool:
@@ -130,6 +157,10 @@ class PolygonMetrics:
     engine: str = ""
     #: The engine's full output, for the audit sidecar. Not for the table.
     detail: dict[str, Any] = field(default_factory=dict)
+    #: Metrics the comparison could not determine although it succeeded, keyed
+    #: by row column, with the reason. Their cells are absent from ``values``;
+    #: every other metric is reported as normal.
+    undefined: dict[str, str] = field(default_factory=dict)
 
     @property
     def available(self) -> bool:
@@ -165,10 +196,15 @@ def parse_structure(dataset: Any, roi_number: int, grid: ContourGrid) -> Contour
     reading, and refusing one is better than picking one — but it does mean a
     structure can carry mask metrics and no polygon metrics. None were found in
     the reference cohort.
+
+    References that point at nothing are set aside first; see
+    :func:`_set_aside_dangling_references` for which, and why that is not the
+    same as ignoring them.
     """
+    source, set_aside = _set_aside_dangling_references(dataset, int(roi_number), grid)
     try:
         parsed = _compat.parse_compatible(
-            dataset, int(roi_number), grid.as_parser_grid(), allow_nested=True
+            source, int(roi_number), grid.as_parser_grid(), allow_nested=True
         )
     except _fast_geometry.Unsupported as exc:
         raise ContoursUnavailableError(f"contours not readable: {exc}") from exc
@@ -179,7 +215,165 @@ def parse_structure(dataset: Any, roi_number: int, grid: ContourGrid) -> Contour
         geometric_type=str(roi.geometric_type),
         vertices=int(roi.vertices),
         nested_planes=int(nested),
+        references_set_aside=set_aside,
     )
+
+
+def _set_aside_dangling_references(
+    dataset: Any, roi_number: int, grid: ContourGrid
+) -> tuple[Any, tuple[str, ...]]:
+    """Hand the parser this ROI without the references that point at nothing.
+
+    The parser checks two references before it will read a contour: the ROI's
+    ``ReferencedFrameOfReferenceUID`` must be the image series' frame, and each
+    contour's ``ContourImageSequence`` must name the slice the contour lies on.
+    Both exist to catch a contour placed on the wrong image. Neither separates a
+    reference that *contradicts* the image from one that names nothing in the
+    data at all, and real exports produce the second kind: a structure set
+    written against one copy of a CT and loaded beside another whose UIDs were
+    remapped carries references to slices that are not there. On the tender H&N
+    cohort that was one vendor of seven, every structure, every patient.
+
+    A reference to nothing is unverifiable, not wrong. So it is set aside, and
+    the contour's placement is established the way the mask path has always
+    established it — from its coordinates — except more strictly: the parser
+    still requires every contour to lie within
+    :data:`~autoseg_evaluator.core.contour_grid.PLANE_ALIGNMENT_BUDGET_MM` of a
+    slice plane and inside the image bounds, and the mask path requires neither.
+
+    What is set aside, and only when it is unambiguous:
+
+    * **A frame the structure set never declares.** A per-ROI frame must be one
+      of those listed in the set's own ``ReferencedFrameOfReferenceSequence``.
+      When it is none of them, and the set declares exactly one frame, and that
+      frame is this image series', the ROI is read in it. There is no other
+      frame it could mean.
+    * **Image references of which none resolves.** Only all-or-nothing: if any
+      of this ROI's references name a slice in this series, they all stay and
+      the parser checks each one.
+
+    What is still refused, with a reason naming which it was:
+
+    * an ROI number the structure set lists more or less than once;
+    * a frame the set *does* declare that is not this series' — a structure
+      drawn on another image, which coordinates alone cannot place;
+    * an undeclared frame in a set declaring several, or none matching;
+    * references of which some resolve and some do not.
+
+    The dataset passed in is never modified: it is cached and shared with the
+    mask path. When something is set aside the parser gets a one-ROI view built
+    from the same data elements, which also keeps the nested-ring path's copy of
+    the dataset down to one structure instead of a hundred. The returned notes
+    are for the audit record and never contain a UID.
+    """
+    entries = [
+        r
+        for r in getattr(dataset, "StructureSetROISequence", None) or []
+        if int(r.ROINumber) == roi_number
+    ]
+    if len(entries) != 1:
+        raise ContoursUnavailableError(
+            f"contours not readable: ROI number {roi_number} is listed "
+            f"{len(entries)} times in this structure set, so which entry it means "
+            "is ambiguous"
+        )
+
+    set_aside: list[str] = []
+    frame = grid.frame_of_reference_uid
+    stated = str(getattr(entries[0], "ReferencedFrameOfReferenceUID", "") or "")
+    if stated != frame:
+        declared = {
+            str(item.FrameOfReferenceUID)
+            for item in getattr(dataset, "ReferencedFrameOfReferenceSequence", None) or []
+            if getattr(item, "FrameOfReferenceUID", None)
+        }
+        if stated in declared:
+            raise ContoursUnavailableError(
+                "contours not readable: this structure is defined in a different "
+                "Frame of Reference from the image series it is measured on, so its "
+                "coordinates cannot be placed on those slices"
+            )
+        if declared != {frame}:
+            raise ContoursUnavailableError(
+                "contours not readable: this structure names a Frame of Reference "
+                "its own structure set does not declare, and the set does not "
+                "declare this image series' frame as its only one, so there is no "
+                "single frame to read it in"
+            )
+        set_aside.append(
+            "the structure's Frame of Reference UID is not declared by its own "
+            "structure set; read in the set's only declared frame, which is the "
+            "image series' frame"
+        )
+
+    items = [
+        r
+        for r in getattr(dataset, "ROIContourSequence", None) or []
+        if int(r.ReferencedROINumber) == roi_number
+    ]
+    references = [
+        str(getattr(ref, "ReferencedSOPInstanceUID", "") or "")
+        for item in items
+        for contour in getattr(item, "ContourSequence", None) or []
+        for ref in getattr(contour, "ContourImageSequence", None) or []
+    ]
+    resolved = sum(uid in grid.sops for uid in references)
+    drop_references = bool(references) and resolved == 0
+    if 0 < resolved < len(references):
+        raise ContoursUnavailableError(
+            f"contours not readable: {len(references) - resolved} of this "
+            f"structure's {len(references)} contour image references name slices "
+            "that are not in this image series while the rest do, so which images "
+            "it was drawn on is ambiguous"
+        )
+    if drop_references:
+        set_aside.append(
+            f"{len(references)} contour image references name no slice in this "
+            "image series; each contour was placed from its coordinates instead, "
+            f"within {PLANE_ALIGNMENT_BUDGET_MM:g} mm of a slice plane and inside "
+            "the image bounds"
+        )
+
+    if not set_aside:
+        return dataset, ()
+    return _one_roi_view(entries[0], items, roi_number, frame, drop_references), tuple(set_aside)
+
+
+def _one_roi_view(
+    entry: Any, items: Sequence[Any], roi_number: int, frame: str, drop_references: bool
+) -> Dataset:
+    """A structure set holding only this ROI, sharing the original's elements.
+
+    Elements are carried across by reference, so nothing is converted or
+    copied: a view of a large structure costs a few hundred small objects, not a
+    second copy of its coordinates.
+    """
+    view = Dataset()
+    roi = Dataset()
+    roi.add(entry["ROINumber"])
+    roi.ReferencedFrameOfReferenceUID = frame
+    view.StructureSetROISequence = [roi]
+
+    rebuilt = []
+    for item in items:
+        holder = Dataset()
+        holder.ReferencedROINumber = roi_number
+        contours = []
+        for contour in getattr(item, "ContourSequence", None) or []:
+            kept = Dataset()
+            for keyword in ("ContourGeometricType", "NumberOfContourPoints", "ContourData"):
+                if keyword in contour:
+                    kept.add(contour[keyword])
+            if not drop_references and "ContourImageSequence" in contour:
+                kept.add(contour["ContourImageSequence"])
+            contours.append(kept)
+        # An empty sequence stays absent, so the parser's own "missing contour
+        # sequence" refusal still fires exactly as it would have.
+        if contours:
+            holder.ContourSequence = contours
+        rebuilt.append(holder)
+    view.ROIContourSequence = rebuilt
+    return view
 
 
 def _unpack_compat(parsed: Any) -> tuple[Any, int]:
@@ -199,6 +393,55 @@ def _unpack_compat(parsed: Any) -> tuple[Any, int]:
     elif isinstance(policy, int):
         nested = int(policy)
     return roi, nested
+
+
+# ---- Quantiles the data do not determine ----------------------------------
+
+
+def _undetermined(raw: Mapping[str, Any]) -> dict[str, str]:
+    """Which reported quantiles the contours leave undetermined, and why.
+
+    A quantile of the distance distribution is the distance within which that
+    share of the boundary length lies. If the boundary has no length at any
+    distance across some interval, and exactly that share lies below it, then
+    every value in the interval meets the definition. Take half the boundary
+    coinciding with the other contour and half 2 mm away: any median from 0 to
+    2 mm is correct. A computer settles it by whether a running sum of lengths
+    rounds to just under or just over one half — noise worth 2 mm.
+
+    The compiled engine finds that interval for each direction and quantile. It
+    refuses when the interval is wider than ``2 * QUANTILE_GUARD_MM``, which
+    voids the whole comparison. This applies the same test with two
+    differences:
+
+    * **Per metric.** One undetermined quantile blanks that metric. The maximum,
+      the mean and APL are determined whatever the quantile does.
+    * **On the reported value, not on each direction.** The table shows the
+      larger of the two directions. If one direction could be anything from 0
+      to 2 mm and the other is exactly 2 mm, the larger is 2 mm either way, and
+      reporting it is not a guess.
+
+    The value is never chosen from inside the interval. When the reported value
+    is undetermined the cell stays empty and the reason names the interval.
+    """
+    reasons: dict[str, str] = {}
+    for column, name, label in _GUARDED_QUANTILES:
+        brackets = []
+        for side in ("a", "b"):
+            value = float(raw[f"{side}_{name}_mm"])
+            gap = float(raw[f"{side}_quantile_mass_gap_{name}_mm"])
+            brackets.append((value - gap / 2, value + gap / 2))
+        # The reported value is the larger direction, so it can lie anywhere
+        # between the larger of the lower ends and the larger of the upper ends.
+        low = max(lo for lo, _ in brackets)
+        high = max(hi for _, hi in brackets)
+        if high - low > 2 * QUANTILE_GUARD_MM:
+            reasons[column] = (
+                f"undefined: {label} could be anything from {max(low, 0.0):.3g} to "
+                f"{high:.3g} mm; the distance distribution has a gap there, and "
+                "which side is reported would depend on floating-point rounding"
+            )
+    return reasons
 
 
 # ---- Engines ---------------------------------------------------------------
@@ -228,13 +471,27 @@ class _Engine:
         """
         try:
             raw = self._compare(a, b, float(tolerance_mm))
-        except AmbiguousQuantileError as exc:
+        except (AmbiguousQuantileError, _ReferenceAmbiguousQuantileError) as exc:
+            # Only the reference engine still gets here: it cannot report a
+            # quantile's gap without raising, so it loses the whole comparison.
             return PolygonMetrics(status=f"undefined: {exc}", engine=self.label)
         except ValueError as exc:
             return PolygonMetrics(status=f"undefined: {exc}", engine=self.label)
         except (RuntimeError, ArithmeticError) as exc:
             return PolygonMetrics(status=f"unavailable: {exc}", engine=self.label)
-        return PolygonMetrics(values=self._row(raw), engine=self.label, detail=raw)
+        values = self._row(raw)
+        undefined = self._undetermined(raw)
+        for column in undefined:
+            values.pop(column, None)
+        return PolygonMetrics(values=values, engine=self.label, detail=raw, undefined=undefined)
+
+    def _undetermined(self, raw: dict[str, Any]) -> dict[str, str]:
+        """Quantiles the data do not determine, keyed by row column.
+
+        Only an engine that reports each quantile's gap can say; the default
+        is that none are.
+        """
+        return {}
 
     @property
     def label(self) -> str:
@@ -258,16 +515,23 @@ class _FastEngine(_Engine):
 
     @property
     def settings(self) -> dict[str, Any]:
-        return {**super().settings, "quantile_guard_mm": QUANTILE_GUARD_MM}
+        return {
+            **super().settings,
+            "quantile_guard_mm": QUANTILE_GUARD_MM,
+            "quantile_guard_scope": "per metric, on the reported (larger-direction) value",
+        }
 
     def _compare(self, a: Any, b: Any, tolerance_mm: float) -> dict[str, Any]:
         return _fast.compare(
             a,
             b,
             taus=[tolerance_mm],
-            error_mm=QUANTILE_GUARD_MM,
+            error_mm=_ENGINE_REFUSAL_LIFTED_MM,
             missing_plane_policy=MISSING_PLANE_POLICY,
         )
+
+    def _undetermined(self, raw: dict[str, Any]) -> dict[str, str]:
+        return _undetermined(raw)
 
     def _row(self, raw: dict[str, Any]) -> dict[str, float]:
         apl = raw["apl"][0]

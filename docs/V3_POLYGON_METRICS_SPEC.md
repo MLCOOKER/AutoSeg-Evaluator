@@ -335,6 +335,86 @@ falls back rather than loading anything wrong.
 Where no binary matches the platform, D5's reference engine runs instead and the
 UI says which engine produced the numbers.
 
+### D8 — References that point at nothing are set aside, not treated as mismatches
+
+*Added after the first end-to-end run on real data (2026-09-23).* On the tender
+H&N cohort (10 patients, 7 structure sets each), every 2D metric in the run came
+back `unavailable: contours not readable: Frame mismatch or ambiguous ROI`. The
+3D metrics on the same rows were fine.
+
+The parser checks two references before it reads a contour: the ROI's
+`ReferencedFrameOfReferenceUID` must equal the image series' frame, and every
+`ContourImageSequence` entry must name the slice the contour lies on. Six of the
+seven vendors satisfy both. The Varian (Eclipse) structure sets satisfy neither,
+in all ten patients:
+
+- They declare exactly one frame in `ReferencedFrameOfReferenceSequence`, and it
+  is the CT's. Every ROI then names a *different* frame UID that the file never
+  declares and that appears nowhere else in it. That breaks DICOM's own rule: a
+  per-ROI frame must be one of the declared ones.
+- None of their 47,495 contour image references name a slice in the loaded CT,
+  although their series reference does name it.
+
+This is the signature of a structure set exported against a copy of the CT whose
+UIDs were remapped differently from the copy distributed with it. When Varian is
+the ground truth, every row fails.
+
+(RaySearch and Radformation carry a different PatientID from the CT, an
+anonymisation alias. The metadata layer already merges those by Frame of
+Reference, and their references all resolve. They are not part of this.)
+
+The mask stream reads neither reference. It places every contour from its
+coordinates, which is why it was unaffected.
+
+**Decision.** A reference that *contradicts* the image is a refusal. A reference
+to something *absent* from the data is unverifiable, and it is set aside. The
+vendored parser does not tell the two apart. `grid['sops'].get(uid)` returns
+`None` for a missing slice, and `None != z`. The adapter separates them before
+the parser runs:
+
+- **An undeclared per-ROI frame** is read in the structure set's declared frame.
+  This only happens when the set declares exactly one frame and that frame is
+  the image series'. There is no other frame it could mean.
+- **Image references of which none resolve** are dropped from a one-ROI view
+  handed to the parser. The rule is all-or-nothing: if some resolve and others
+  do not, the structure is refused as ambiguous.
+
+Still refused, each with its own message instead of the parser's combined one:
+a declared frame that is not the series' (a structure drawn on another image);
+an undeclared frame in a set declaring several; references that resolve to the
+*wrong* slice; an ROI number listed more than once.
+
+Once references are set aside, placement rests on geometry the parser still
+enforces. Every contour must lie within 0.001 mm of a slice plane and inside the
+image bounds. That is stricter than the mask stream, which has neither check.
+Setting references aside therefore brings the polygon stream up to the mask
+stream's evidence for placement, and no further.
+
+The cached dataset is never modified, because it is shared with the mask path
+and with every other pair. The view carries the original data elements by
+reference, so it copies no coordinates. What was set aside is recorded per
+structure in the audit sidecar under `references_set_aside`, in words and
+without a UID.
+
+**Measured on the cohort** (every ROI of all 70 structure sets, through the
+adapter):
+
+| Vendor | Parsed before | Parsed after | Still refused, and why |
+|---|---|---|---|
+| Varian | **0 / 447** | **435 / 447** | 11 out of CT bounds, 1 no contour sequence |
+| A | 478 / 478 | 478 / 478 | — |
+| B | 861 / 866 | 861 / 866 | 5 self-intersecting rings |
+| C | 674 / 675 | 674 / 675 | 1 no contour sequence |
+| D | 773 / 773 | 773 / 773 | — |
+| Radformation | 892 / 896 | 892 / 896 | 4 out of CT bounds |
+| RaySearch | 1030 / 1033 | 1030 / 1033 | 2 out of CT bounds, 1 self-intersecting ring |
+
+The other six vendors are unchanged ROI for ROI. Their structure sets are
+consistent, so the adapter passes them to the parser as loaded. Varian's twelve
+remaining refusals are the same kinds the other vendors produce. Before, the
+frame check hid them. Every Eye_L, Parotid_R and mandible across all seven
+vendors now parses: 196 of 196, including Varian's 26 of 26.
+
 ---
 
 ## 5. Where the code goes
@@ -429,13 +509,53 @@ has no polygons. Availability is a property of the **comparison pair**: both
 sides must be native RTSS. This covers the Tab 2 multi-observer consensus and the
 Tab 3 drawer-pool modes.
 
-**Raises at runtime** — no common planes, `AmbiguousQuantileError`, resource
-limit (v0.2 keeps a five-million-envelope-piece guard), invalid geometry.
+**Raises at runtime** — no common planes, resource limit (v0.2 keeps a
+five-million-envelope-piece guard), invalid geometry, and, on the reference
+engine only, `AmbiguousQuantileError`.
 
-Both land in a dedicated `poly_status` column, caught at the ROI-pair boundary. A
+**Undetermined per metric** — on the compiled engine, a median or HD95 the
+contours do not determine blanks that one cell (D9). The rest of the row stands.
+
+All land in a dedicated `poly_status` column, caught at the ROI-pair boundary. A
 polygon failure must not void the mask metrics on the same row, so it is separate
 from the existing row-level `error`. An empty numeric cell beside a stated
 reason; never a zero, never a silent omission from a cohort summary.
+
+### D9 — An undetermined quantile blanks one metric, judged on the reported value
+
+*Added 2026-09-23.* A quantile of the arc-length distance distribution is not
+unique when the CDF is flat at exactly that share of the length. Example: half
+the boundary coincides with the other contour, half sits 2 mm away, and nothing
+lies in between. Every value in [0, 2] mm then fits, and floating-point rounding
+of the cumulative length picks the side. The compiled engine measures that
+interval (`quantile_mass_gap_*`) and raises when it is wider than `2 * error_mm`.
+Measured on that example, both engines refused. Raising discards the whole
+comparison: HD100 2.83 mm, HD95 2.44 mm, mean 1.11 mm and APL 80 mm, all
+well-defined, were lost with the median.
+
+Two over-refusals, corrected in the adapter:
+
+1. **Scope.** The engine's `error_mm` does nothing except decide when to raise:
+   the C++ only checks that it is positive. The adapter therefore passes
+   `1e300`, reads the gaps, and applies the same `2 * QUANTILE_GUARD_MM` test
+   itself, blanking only the affected cell. A test pins that lifting the guard
+   leaves every output bit-identical.
+2. **Symmetry.** The engine tests each direction, but the table reports the
+   larger. The reported value's interval is `[max(a_lo, b_lo), max(a_hi, b_hi)]`.
+   It is determined when that interval is within the guard, even if one
+   direction's is not. In the same example drawn 2 mm *wider*, the ground-truth
+   direction spans [0, 2] and the test direction is exactly 2, so the reported
+   median is 2 mm either way. It used to be refused and is now reported.
+
+A value is never picked from inside an undetermined interval. The cell stays
+empty, `poly_status` names the interval (only for a metric the user selected),
+and the audit record keeps it under `undefined`. The reference engine cannot
+report gaps without raising, so it still refuses the whole pair. Its status now
+reads `undefined:` like the compiled engine's, instead of `unavailable:`.
+
+For comparison, the mask stream has the same exposure and resolves it silently:
+DeepMind's `compute_robust_hausdorff` takes `np.searchsorted` on a floating-point
+cumulative area.
 
 ---
 
@@ -692,6 +812,8 @@ reference engine. Nothing further is needed from the supplier to start.
 | D5 | Ships a `0.2.0.dev2` prototype as the default engine | Reproduces the published acceptance set exactly and agrees with the independent v0.1 to 1e-12 mm; the v0.1 engine is retained as audit reference and fallback, and the engine version is recorded on every row |
 | D6 | Builds the Linux binary ourselves rather than taking one from the supplier | Per-platform revalidation on every push is what catches an OS whose math library moves a result; the supplier is explicit the flags do not promise bitwise cross-OS equality. Accepts that the Linux binary is validated by us |
 | D7 | Separate `error_mm` for each engine | The argument names one thing and means two; one value for both costs three orders of magnitude |
+| D8 | References naming nothing in the data are set aside before the strict parser runs | The parser cannot tell a reference that contradicts the image from one naming a slice that is not loaded. One vendor of seven on a real cohort wrote only the second kind, and lost every structure to it (0 → 435 of 447). Contradictions still refuse, geometric placement is still enforced, and the parser is unmodified |
+| D9 | The engine's quantile refusal is lifted and reapplied per metric, on the reported (larger-direction) value | Raising discarded every well-defined metric with the one undetermined quantile, and refused medians the other direction had already settled. Same threshold; a value is still never chosen from inside the interval |
 | — | Shapely 2.0.6 rather than 2.1.2 | Permitted by both packages' ranges; 56/56 and 49/49 tests plus the full 150-pair suite and 44 stress cases verified on ours |
 | ~~D2~~ | ~~`error_mm` 0.05~~ | Withdrawn in revision 2 — the setting no longer affects cost or value |
 

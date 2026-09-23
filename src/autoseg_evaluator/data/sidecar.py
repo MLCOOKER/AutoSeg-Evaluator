@@ -97,6 +97,13 @@ def build(rows: Iterable[Mapping[str, Any]], *, settings: Mapping[str, Any] | No
                 "Applies to the mask stream only. The polygon stream's shared-plane "
                 "rule already excludes contours outside the ground truth's planes."
             ),
+            "references_set_aside": (
+                "Polygon stream only. A structure set's frame or image references "
+                "that named nothing in the loaded data were set aside, and the "
+                "contours were placed from their coordinates. Each still had to "
+                "lie within 0.001 mm of a slice plane and inside the image bounds. "
+                "The mask stream reads neither reference."
+            ),
         },
         "records": records,
     }
