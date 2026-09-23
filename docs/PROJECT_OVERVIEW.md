@@ -1,6 +1,6 @@
-# AutoSeg Evaluator v2 — Project Overview
+# AutoSeg Evaluator v3 — Project Overview
 
-A comprehensive reference for the v2.1 codebase. Written for two audiences:
+A comprehensive reference for the v3 codebase. Written for two audiences:
 
 1. **A clinician/researcher writing a technical note manuscript** — every
    algorithm, parameter default, and design decision is documented with the
@@ -20,25 +20,27 @@ the table of contents.
 1. [Motivation & scope](#motivation--scope)
 2. [Tech stack & licensing](#tech-stack--licensing)
 3. [Repository layout](#repository-layout)
-4. [User-facing workflow (the six tabs)](#user-facing-workflow-the-six-tabs)
+4. [User-facing workflow (the seven tabs)](#user-facing-workflow-the-seven-tabs)
 5. [Data model](#data-model)
 6. [Matching pipeline (organ-name canonicalisation)](#matching-pipeline-organ-name-canonicalisation)
-7. [Mask creation (RTSTRUCT → binary)](#mask-creation-rtstruct--binary)
-8. [Data linking](#data-linking)
-9. [Geometric metrics](#geometric-metrics)
-10. [Volume + centre-of-mass metrics](#volume--centre-of-mass-metrics)
-11. [Added Path Length (APL)](#added-path-length-apl)
-12. [Dose-volume histogram (DVH)](#dose-volume-histogram-dvh)
-13. [STAPLE consensus](#staple-consensus)
-14. [Build Consensus GT workflow](#build-consensus-gt-workflow)
-15. [Session save / load](#session-save--load)
-16. [Performance engineering](#performance-engineering)
-17. [Validation & test suite](#validation--test-suite)
-18. [Theming & accessibility](#theming--accessibility)
-19. [Distribution model](#distribution-model)
-20. [Known limitations / future work](#known-limitations--future-work)
-21. [Quick literature index](#quick-literature-index)
-22. [Glossary of acronyms](#glossary-of-acronyms)
+7. [Reading the contours (both streams)](#reading-the-contours-both-streams)
+8. [Mask creation (RTSTRUCT → binary)](#mask-creation-rtstruct--binary)
+9. [Data linking](#data-linking)
+10. [3D mask metrics](#3d-mask-metrics)
+11. [Volume + centre-of-mass metrics](#volume--centre-of-mass-metrics)
+12. [2D contour metrics](#2d-contour-metrics)
+13. [Dose-volume histogram (DVH)](#dose-volume-histogram-dvh)
+14. [STAPLE consensus](#staple-consensus)
+15. [Build Consensus GT workflow](#build-consensus-gt-workflow)
+16. [Organ grouping and the Report tab](#organ-grouping-and-the-report-tab)
+17. [Session save / load](#session-save--load)
+18. [Performance engineering](#performance-engineering)
+19. [Validation & test suite](#validation--test-suite)
+20. [Theming & accessibility](#theming--accessibility)
+21. [Distribution model](#distribution-model)
+22. [Known limitations / future work](#known-limitations--future-work)
+23. [Quick literature index](#quick-literature-index)
+24. [Glossary of acronyms](#glossary-of-acronyms)
 
 ---
 
@@ -79,6 +81,23 @@ to leave the GUI.
 - Bit-for-bit validated against `google-deepmind/surface-distance` and
   PlatiPy APL on the sample-data cohort (HN1/HN2/HN3).
 
+**v2 → v3 highlights** (see [`V3_RELEASE_STATUS.md`](V3_RELEASE_STATUS.md)
+for what each moves):
+- **Two metric streams.** 3D mask metrics sit beside 2D contour metrics
+  measured on the RTSTRUCT outlines themselves (APL, NAPL, 2D Hausdorff, mean
+  and median contour distance). Mask APL is removed: added path length needs
+  the edge as drawn, so it now comes only from the 2D stream.
+- **One reading of every contour** shared by both streams, and a half-open
+  3D fill that keeps shapes' true area.
+- **Sub-voxel (`continuous`) rasteriser as the default**; the v1 fill is kept
+  as the opt-in `legacy` backend.
+- **Data linking by explicit reference**, dose → structure set → series, with
+  no RTPLAN and ambiguity settled by the user.
+- **Canonical organ grouping** and a **Report tab** with per-organ paired
+  statistics, figures and PDF export.
+- **Metric definitions** dialog and an optional **audit record** beside every
+  export.
+
 ---
 
 ## Tech stack & licensing
@@ -93,7 +112,10 @@ to leave the GUI.
 | dicompyler-core | 0.5.6 | BSD-3 | DVH calculation (`dvhcalc.get_dvh`) |
 | numpy | latest | BSD-3 | Array math |
 | scipy | latest | BSD-3 | Distance transforms, filters |
-| scikit-image | latest | BSD-3 | Polygon rasterisation (RTSTRUCT → mask) |
+| scikit-image | latest | BSD-3 | `legacy` rasteriser fill; contour tracing in the viewer |
+| shapely | 2.x | BSD-3 | Contour reading (loops → regions) and 2D geometry |
+| native contour metrics | 0.1.0 / 0.2.0.dev2 | see `third_party/` | 2D contour metric engines, vendored byte-identical |
+| matplotlib | latest | PSF-based | Report figures; dose colour map |
 | pytest | latest | MIT | Test runner |
 
 **Overall project licence**: Apache-2.0 (see `LICENSE`).
@@ -120,50 +142,80 @@ autoseg-evaluator/
 │   ├── app.py                       # QApplication setup, theme apply
 │   ├── core/                        # Pure algorithms (no Qt deps)
 │   │   ├── matching.py              # Levenshtein+cosine, canonicalise, Match
-│   │   ├── masks.py                 # RTSTRUCT→mask, truncation, DICOM I/O
-│   │   ├── metrics.py               # compute_geometric_metrics aggregator
+│   │   ├── contour_reading.py       # Loops → regions, shared by both streams
+│   │   ├── masks.py                 # RTSTRUCT→mask (reading + half-open fill), truncation, DICOM I/O
+│   │   ├── metrics.py               # 3D mask metrics: compute_geometric_metrics
 │   │   ├── surface_distance.py      # google-deepmind port (verbatim)
+│   │   ├── contour_grid.py          # Image series → frame for the 2D metrics
+│   │   ├── polygon_metrics.py       # 2D contour metrics: placement, engines, results
 │   │   ├── staple.py                # STAPLE wrapper + adaptive bbox
 │   │   ├── dvh.py                   # dicompyler-core wrapper
+│   │   ├── dose.py                  # Dose resampled onto the CT (viewer overlay)
+│   │   ├── organ_groups.py          # Canonical organ key: base / laterality / qualifier
+│   │   ├── statistics.py            # Wilcoxon, Hodges–Lehmann, rank-biserial, sign test
+│   │   ├── acquisition.py           # Allowlisted, non-identifying acquisition tags
+│   │   ├── likert.py                # Qualitative assessment model
+│   │   ├── readable.py              # Metric prose, units, axis scales, tolerances
 │   │   └── source_labels.py         # Vendor-detection cascade
+│   ├── vendor/                      # Supplied 2D metric engines — do not edit
 │   ├── data/                        # In-memory models + persistence
 │   │   ├── metadata.py              # MetadataLibrary, RTSTRUCTEntry, etc.
+│   │   ├── linkage.py               # Explicit-reference series / dose resolution
+│   │   ├── organ_index.py           # Organ grouping over the loaded cohort
 │   │   ├── results.py               # ResultsManager + canonical column order
-│   │   ├── session.py               # Session JSON schema (v3)
+│   │   ├── report.py                # Report model: cases, pairing, directions
+│   │   ├── sidecar.py               # .audit.json beside an export
+│   │   ├── session.py               # Session JSON schema (v6)
 │   │   └── synonyms.py              # TG-263 dict loader / flattener
 │   ├── workers/
 │   │   ├── scan_worker.py           # Background folder scan
 │   │   └── metrics_worker.py        # Background metric compute (QThread)
 │   ├── ui/
-│   │   ├── main_window.py           # 5-tab shell, menus, session I/O
+│   │   ├── main_window.py           # 7-tab shell, menus, session I/O
 │   │   ├── theme.py                 # qt-material theme apply
 │   │   ├── tabs/                    # One file per tab
 │   │   │   ├── load_data.py
 │   │   │   ├── build_consensus.py
 │   │   │   ├── match_contours.py
+│   │   │   ├── qualitative.py
 │   │   │   ├── compute.py
-│   │   │   └── results.py
+│   │   │   ├── results.py
+│   │   │   └── report.py
 │   │   ├── dialogs/
 │   │   │   ├── source_labels.py     # Manage Source Labels (sortable + bulk)
+│   │   │   ├── data_links.py        # Review Data Links (ambiguous series / dose)
 │   │   │   ├── replacement_rules.py # Find→Replace rules
 │   │   │   ├── template.py          # Define auto-match template
-│   │   │   └── visualization.py     # CT + contour overlay viewer
+│   │   │   ├── organ_labels.py      # Label Organs (curation for the statistics)
+│   │   │   ├── metric_definitions.py  # How every metric is computed
+│   │   │   └── visualization.py     # Match Contours viewer: GT + tests, dose wash
 │   │   └── widgets/
 │   │       ├── collapsible_box.py   # Accordion-section primitive
 │   │       ├── dicom_tree.py        # Tab 1 cohort tree
 │   │       ├── loaded_contours_tree.py  # Tab 3 left-side tree
 │   │       ├── organ_drawer.py      # Tab 3 accordion drawer
-│   │       ├── progress_panel.py    # Tab 4 progress UI
+│   │       ├── multiplanar_viewer.py  # Shared CT + contour viewer
+│   │       ├── progress_panel.py    # Tab 5 progress UI
+│   │       ├── stat_plots.py        # Report figures
 │   │       └── signal_bar.py        # Similarity pip strip
 │   ├── resources/
 │   │   └── synonyms.json            # 663 canonicals, ~17k variants
 │   └── utils/
 │       ├── paths.py
 │       └── settings.py              # settings.json round-trip
-├── tests/                           # 341-test pytest suite
-├── scripts/
+├── tests/                           # pytest suite (tests/vendor: supplier acceptance)
+├── scripts/                         # Validators, report generators, bundle build
+│   ├── validate_against_upstream.py     # Masks + 3D metrics vs PlatiPy / DeepMind
+│   ├── validate_polygon_metrics.py      # 2D metrics vs published values
+│   ├── validate_contour_reading.py      # Shared reading vs what it replaced, on a cohort
+│   ├── validate_staple_against_upstream.py
+│   ├── validate_dvh_against_upstream.py
+│   ├── compare_rasterisers.py
+│   ├── make_register_tables.py          # Worked examples for the statistics register
+│   ├── build_portable.py
 │   └── build_synonyms.py            # Regenerate synonyms.json from TG-263 CSV
-├── docs/PROJECT_OVERVIEW.md         # (this file)
+├── third_party/native_contour_metrics/  # Provenance, licences, C++ source, acceptance data
+├── docs/                            # This file, specs, registers, validation reports
 ├── pyproject.toml
 ├── requirements.txt
 ├── README.md
@@ -184,13 +236,17 @@ run in a QThread cleanly.
 
 ---
 
-## User-facing workflow (the six tabs)
+## User-facing workflow (the seven tabs)
 
 ```
-1. Load Data           → 2. Build Consensus GT  → 3. Match Contours    → 4. Compute → 5. Results
-   folder scan,          (optional)               drawers per organ,     metric run    table + CSV
-   source labels,        STAPLE-derive            GT + tests per         + DVH
-   cohort tree           a synthetic GT           patient
+1. Load Data        → 2. Build Consensus GT → 3. Match Contours    → 4. Qualitative
+   folder scan,        (optional)              drawers per organ,     (optional)
+   data links,         STAPLE-derive           organ labels,          Likert grading
+   source labels       a synthetic GT          visualise
+
+→ 5. Compute         → 6. Results           → 7. Report
+   3D + 2D + DVH        table, CSV,             per-organ statistics,
+   metric run           audit record            figures, PDF
 ```
 
 ### Tab 1 — Load Data
@@ -292,7 +348,7 @@ dialog + cancel. Results table sortable; CSV export + Ctrl+A+C with headers.
 synthetic `RTSTRUCTEntry` objects in `MetadataLibrary` with source label
 `"STAPLE Consensus"`. Downstream tabs see these like any other RTSS but the
 actual STAPLE consensus is computed *on-the-fly at compute time* using
-Tab 4's STAPLE config.
+the Compute tab's STAPLE settings.
 
 **Synthetic RTSS model:** `is_synthetic_consensus=True`, `file_path=""`,
 `constituent_groups: dict[synthetic_roi_number, list[(real_sop_uid, real_roi_number)]]`.
@@ -319,6 +375,19 @@ Generate replaces the entry in place.
    template criterion, find the best-matching ROI per organ, build an
    `OrganDrawer` per organ with the GT and one auto-matched test row per
    non-GT RTSTRUCT.
+4. **Label Organs…** — [`ui/dialogs/organ_labels.py`](../src/autoseg_evaluator/ui/dialogs/organ_labels.py):
+   set the canonical organ each drawer is reported under in the statistics.
+   Labels are label-only — they never merge drawers — and persist on
+   explicit session save. See [Organ grouping and the Report tab](#organ-grouping-and-the-report-tab).
+
+**Visualize** (per patient in each drawer) opens
+[`ui/dialogs/visualization.py`](../src/autoseg_evaluator/ui/dialogs/visualization.py):
+the ground truth and every matched test contour on the reference CT, in the
+same multiplanar viewer the Qualitative tab uses (planes, level/window, zoom,
+pan, contour opacity and thickness). It adds a per-source legend and, when the
+patient has an RT Dose, a dose colour wash with an opacity control and scale.
+The ground truth is drawn over every test and the view opens on its middle
+slice.
 
 **Drawer model** (one per organ, in [`ui/widgets/organ_drawer.py`](../src/autoseg_evaluator/ui/widgets/organ_drawer.py)):
 - Per-drawer header toggles: `Truncate`, `vs GT`, `vs STAPLE`, `GT in pool`.
@@ -383,11 +452,28 @@ saved in the session (schema v4) and re-emitted into Results on load.
 
 **File:** [`src/autoseg_evaluator/ui/tabs/compute.py`](../src/autoseg_evaluator/ui/tabs/compute.py)
 
-**Per-metric checkboxes** with descriptive tooltips. Default ON:
-Dice, Surface Dice, HD100, HD95, MSD, Volume, COM offset. Default OFF: APL.
+**Two geometry groups side by side**, because they are two methods, not one
+list: a reader compares them where they sit together.
 
-**Surface Dice τ** and **APL τ** tolerance spinboxes (default 3 mm each
-— matches Nikolov 2018 and PlatiPy / Vaassen 2020).
+- **3D mask metrics (rasterised)** — Dice, Surface Dice, 3D Hausdorff 100% and
+  95%, Mean Surface Distance, Volume, COM offset; all on by default. **Surface
+  Dice τ** spinbox, default 3 mm (Nikolov 2018).
+- **2D contour metrics (native RTSS polygons)** — APL, NAPL, 2D Hausdorff 100%
+  and 95%, 2D mean and median contour distance; all off by default, so an
+  existing install does not start producing a second set of columns because it
+  was upgraded. **APL τ** spinbox, default 3 mm. A note states which 2D engine
+  will run (compiled, or the portable reference engine where no library is
+  packaged). All six come from one engine call, so a narrower selection buys a
+  narrower table, not a shorter run.
+
+**Metric definitions…** opens [`ui/dialogs/metric_definitions.py`](../src/autoseg_evaluator/ui/dialogs/metric_definitions.py),
+the reference for exactly how every metric is computed: what it is measured
+on, how the two directions are combined, how contours are read, which planes
+take part in the 2D metrics and why truncation does not affect them.
+
+**Record audit detail** decides, before the run, whether the detail behind
+every number is kept for a `.audit.json` beside the export (it cannot be
+recovered from a finished table).
 
 **STAPLE consensus parameters** (collapsible group):
 - `max_iterations` default 100 (BraTS / Asman & Landman convention).
@@ -436,9 +522,15 @@ end of the canonical block.
 **Visual column groups:** custom `_BandedHeaderView` paints a 4-pixel
 coloured stripe along the bottom of each header section, keyed to the
 column's family — identifier (indigo), volumetric overlap (cyan),
-surface distance (orange), APL (yellow), volume + COM (green), STAPLE
-(pink), qualitative/Likert (brown), DVH (purple). Tooltip names the band
-on hover.
+surface distance (orange), 2D contour metrics (teal), volume + COM
+(green), STAPLE (pink), qualitative/Likert (brown), DVH (purple). Tooltip
+names the band on hover. 2D and 3D Hausdorff are named as such in the
+headers, so the two streams cannot be confused.
+
+**2D status column:** a 2D metric that could not be computed leaves its cell
+empty and says why here — a consensus ground truth has no contours, the
+structures share no plane, a contour is off its slice plane, a median or 95%
+value is undetermined. Never a zero.
 
 **Qualitative (Likert) columns (v2.6.0):** `likert_<grader>` scores plus
 `Qualitative` (assessed yes/no) and `Blinded` flags. They are stored
@@ -446,9 +538,10 @@ against the contour and **overlaid onto its existing metric row** at read
 time (so each contour stays one row), positioned immediately before the
 first dose column.
 
-**Tolerance values in headers:** Surface Dice / APL columns read e.g.
-`Surface Dice @ 3.00 mm`, `Mean APL @ 3.00 mm`, `Total APL @ 3.00 mm`
-so CSVs computed at different tolerances can't silently merge.
+**Tolerance values in headers:** Surface Dice and the 2D APL columns read
+e.g. `Surface Dice @ 3.00 mm`, `2D APL (mm) @ 3.00 mm`, each with its own
+stream's tolerance, so CSVs computed at different tolerances can't silently
+merge.
 
 **DVH Δ-vs-GT columns (v2.4.1):** when DVH is enabled, each test row's
 DVH metric also gets a `… Δ vs GT` column (test − GT) — e.g. `D2cc (Gy)
@@ -456,7 +549,23 @@ DVH metric also gets a `… Δ vs GT` column (test − GT) — e.g. `D2cc (Gy)
 and CSV.
 
 **Excel-friendly copy:** `Ctrl+A` then `Ctrl+C` copies all rows + headers
-as TSV. **Export CSV…** writes to disk.
+as TSV. **Export CSV…** writes to disk, and when the run recorded audit
+detail, a `results.audit.json` beside it ([`data/sidecar.py`](../src/autoseg_evaluator/data/sidecar.py)):
+both directions of each distance, what each stream measured over, how each
+contour was read, the rasteriser and 2D engine with their settings. It holds
+no patient identifiers beyond those already in the table.
+
+### Tab 7 — Report
+
+**File:** [`src/autoseg_evaluator/ui/tabs/report.py`](../src/autoseg_evaluator/ui/tabs/report.py)
+
+Per-organ comparison of sources on the computed results. Pick the ground truth
+(a consensus is preferred where one exists), a metric — grouped into 3D mask,
+2D contour, dosimetric and other families so a reader never slides between two
+Hausdorffs unnoticed — and a comparison; the tab shows paired statistics,
+forest, paired and distribution figures, a coverage table, and an acquisition
+summary. **Export PDF** writes the page as a clinical report. See
+[Organ grouping and the Report tab](#organ-grouping-and-the-report-tab).
 
 ---
 
@@ -501,12 +610,12 @@ MetadataLibrary
 - `metric_columns()` returns the canonical column order
   (`CANONICAL_METRIC_COLUMNS`) PLUS any dynamic columns (user `D{X}_gy`,
   `V{X}gy_cc`) appended via `_dynamic_metric_sort_key`.
-- `metric_display_label(key, *, sd_tau_mm=None, apl_tau_mm=None)` —
+- `metric_display_label(key, *, sd_tau_mm=None, poly_tau_mm=None)` —
   static `_METRIC_LABELS` dict + dynamic DVH naming + τ-decorated
-  Surface Dice / APL labels.
-- `set_tolerances(sd_tau_mm, apl_tau_mm)` — stamped at compute start by
-  `MainWindow._on_compute_requested`; consulted by the table refresh
-  and CSV export.
+  Surface Dice and 2D APL / NAPL labels, each with its own stream's τ.
+- `set_tolerances(sd_tau_mm, poly_tau_mm=None)` / `tolerances()` — stamped at
+  compute start by `MainWindow._on_compute_requested`; consulted by the table
+  refresh, CSV export, audit record and Report tab.
 - `export_csv(path)` — meta columns + display-label headers + formatted
   cells (`_format_cell` — 6-sig-fig floats, NaN → empty, bools as
   `True`/`False`).
@@ -561,6 +670,48 @@ TG-263 (blue) from fuzzy (amber) matches in the Tab 3 drawers.
 
 ---
 
+## Reading the contours (both streams)
+
+**File:** [`src/autoseg_evaluator/core/contour_reading.py`](../src/autoseg_evaluator/core/contour_reading.py)
+
+An RTSTRUCT stores outlines, not regions. Before either metric stream measures
+anything, `read_outlines()` reads each structure's outlines on each slice into
+a region — which loops are islands, which are holes, what an outline that
+touches or crosses itself encloses. The 3D stream fills those regions onto
+voxels and the 2D stream measures their outlines, so the two can differ only in
+how they measure, never in what they take the contour to be. (Before v3 the
+mask path combined every loop by exclusive-or and the 2D path used a stricter
+parser, and they disagreed on touching, overlapping and self-crossing loops;
+spec D10.)
+
+| What is on the slice | How it is read |
+|---|---|
+| Loops declared `CLOSEDPLANAR_XOR` | overlaps cancel, as declared |
+| Loops apart | separate islands |
+| A loop inside a loop | a hole; an island inside a hole is inside again, by depth |
+| Loops touching at an edge or a point | merged |
+| Loops partially overlapping, or one loop drawn twice | **refused** — union and hole are both plausible and give different tissue |
+| One outline touching or crossing itself | the region it encloses when the even-odd and non-zero winding rules agree on it; lines enclosing nothing (a spike) dropped; **refused** when the rules disagree |
+| An outline enclosing no area | dropped |
+
+Decisions are area-based at 1e-8 mm², so rounding cannot flip a classification
+between the two streams' coordinate frames. A refused structure gets no
+metrics in either stream, and the row's error names the rule and the slice.
+Anything interpreted rather than read as declared is recorded per structure in
+the audit record (`contour_reading`).
+
+**Placement stays per stream**, because the streams need different things: the
+3D fill uses the nearest slice and allows half a slice of tilt; the 2D metrics
+need every contour within 0.001 mm of its slice plane and inside the image.
+
+`scripts/validate_contour_reading.py` checks the reading on a real cohort
+against what it replaced. On the tender H&N cohort (5,166 structures) the 2D
+regions were identical to the supplier's parser on all 5,143 structures both
+read, and every one of the 22,123 3D voxels that changed had its centre exactly
+on an outline edge.
+
+---
+
 ## Mask creation (RTSTRUCT → binary)
 
 **File:** [`src/autoseg_evaluator/core/masks.py`](../src/autoseg_evaluator/core/masks.py)
@@ -568,25 +719,36 @@ TG-263 (blue) from fuzzy (amber) matches in the Tab 3 drawers.
 **Two selectable backends:** per call via `backend=`, process-wide via
 `set_default_rasteriser()`, or with the `AUTOSEG_RASTERISER` env var.
 
-1. For each contour's `ContourData`, reshape physical points to `(N, 3)` and
-   map physical → voxel coordinates. **This step is the only difference
-   between the backends:**
-   - `continuous` (**default**) — `TransformPhysicalPointToContinuousIndex`,
-     preserving sub-voxel position. Derived from dcmrtstruct2nii v5's
-     `DcmPatientCoords2Mask` (MIT; see [`NOTICE`](../NOTICE) for the licence
-     and the list of local modifications). The transform is vectorised as a
-     single NumPy matmul (`physical_points_to_continuous_index`).
-   - `legacy` — `TransformPhysicalPointToIndex`, snapping every vertex to the
-     nearest voxel centre. The original PlatiPy-derived port.
-2. Verify the contour is planar in *image* space (continuous backend: within
-   `PLANARITY_TOLERANCE_VOXELS`; legacy: identical integer Z), else drop the ROI.
-3. Rasterise the 2D polygon via `skimage.draw.polygon` — **identical in both
-   backends** (`polygon2mask`, which dcmrtstruct2nii calls, is a thin wrapper
-   around it).
-4. **XOR** the slice mask into the running 3D mask (handles donut shapes
-   like rectum lumen / spinal canal).
-5. Output a binary `sitk.Image` that shares spacing / origin / direction
-   with the reference image.
+**`continuous` (default)** — derived from dcmrtstruct2nii v5's
+`DcmPatientCoords2Mask` (MIT; see [`NOTICE`](../NOTICE)):
+
+1. Map each contour's physical points to **continuous** voxel coordinates
+   (`physical_points_to_continuous_index`, one NumPy matmul), preserving
+   sub-voxel position.
+2. Assign each contour to the nearest slice; a contour spanning more than
+   `PLANARITY_TOLERANCE_VOXELS` through-plane refuses the structure, and
+   contours on slices outside the image are skipped.
+3. Read the loops on each slice into regions with
+   [the shared reading](#reading-the-contours-both-streams) (in voxel units,
+   so the coordinates filled are the coordinates read).
+4. Fill each region with a **half-open scanline**: a voxel is inside when its
+   centre is inside the region, and a centre exactly on an edge belongs to one
+   side only (`low <= row < high`, `start <= column < end`). Shapes keep their
+   true area, and two regions sharing an edge neither both claim nor both drop
+   the voxels along it. Away from such ties the voxels are exactly those
+   scikit-image's point-in-polygon fill selected before v3.
+5. Output a binary `sitk.Image` that shares spacing / origin / direction with
+   the reference image.
+
+`mask_with_reading()` returns the mask with what the reading interpreted, and
+raises `MaskConversionError` naming the reason; `extract_mask_for_roi()` keeps
+the older contract of returning `None`.
+
+**`legacy`** — the v1 PlatiPy-derived port, kept to reproduce v1: every vertex
+is snapped to the nearest voxel centre (`TransformPhysicalPointToIndex`), each
+contour is filled with `skimage.draw.polygon`, and loops on a slice are
+combined by exclusive-or. It does not use the shared reading, and the audit
+record says so.
 
 **Why the default changed.** The fill rule includes a voxel when its *centre*
 lies inside the polygon — equivalent to ">50 % of the voxel covered" for a
@@ -603,11 +765,16 @@ was larger in **every** case. See
 `scripts/compare_rasterisers.py`.
 
 **Supported contour geometry:** `legacy` accepts only `CLOSED_PLANAR` (judged
-from the first contour in the ROI). `continuous` accepts `CLOSED_PLANAR` and
-`INTERPOLATED_PLANAR`, checked per contour, and returns `None` for any ROI
-containing an unsupported type (including the standard `CLOSEDPLANAR_XOR`) so
-it surfaces as a failed conversion rather than a zero-volume structure. On the
-HN1 multi-vendor set both backends converted exactly the same 357 of 389 ROIs.
+from the first contour in the ROI). `continuous` accepts what the shared
+reading accepts — `CLOSED_PLANAR`, `INTERPOLATED_PLANAR` and `CLOSEDPLANAR_XOR`
+(which before v3 got no mask) — and refuses open and point contours as a failed
+conversion rather than a zero-volume structure.
+
+**The half-open fill moved some masks.** On the tender H&N cohort 547 of 5,166
+masks changed, every changed voxel an edge tie. Almost all were one vendor's —
+the only one drawing along rows and columns of voxel centres — whose volumes
+fell 0.1–3.5 % (6.25 % on a small eye): the previous fill had over-counted them.
+Results for that vendor from before v3 are superseded.
 
 **Truncation** (`truncate_to_gt_z_extent`): zeroes out test-mask slices
 that fall outside the GT's craniocaudal extent. Returns the truncated
@@ -679,10 +846,18 @@ persisted.
 
 ---
 
-## Geometric metrics
+## 3D mask metrics
 
 **File:** [`src/autoseg_evaluator/core/metrics.py`](../src/autoseg_evaluator/core/metrics.py)
-**Underlying primitives:** [`core/surface_distance.py`](../src/autoseg_evaluator/core/surface_distance.py)
+**Underlying primitives:** [`core/surface_distance.py`](../src/autoseg_evaluator/core/surface_distance.py),
+Google DeepMind's surface-distance embedded verbatim
+
+Computed on the binary masks from [Mask creation](#mask-creation-rtstruct--binary).
+Each mask's surface elements come from its 2×2×2 voxel neighbourhoods, each
+weighted by its surface area (mm²), and distances to the other surface come
+from a Euclidean distance transform, so every distance is quantised to the
+voxel lattice. The two directions are combined by taking the **larger** for
+the Hausdorffs and the **equal average** for the mean surface distance.
 
 `compute_geometric_metrics(gt_mask, test_mask, config)` is the
 high-level aggregator; it dispatches to:
@@ -702,9 +877,13 @@ but `sitk.GetArrayFromImage` returns `(z, y, x)`. `compute_surface_distances`
 (via `scipy.ndimage.distance_transform_edt(sampling=…)`) expects
 `sampling` in the SAME axis order as the input array. v1 inadvertently
 passed `(x, y, z)` to a `(z, y, x)` array; v2 reorders correctly. This
-was verified by computing all six metric families against the upstream
-`surface-distance` and PlatiPy packages on the SAMPLE DATA HN1 cohort —
-Δ = 0.00e+00 across every metric.
+was verified by computing every surface-distance metric against the upstream
+`surface-distance` package on the SAMPLE DATA HN1 cohort — Δ = 0.00e+00
+across every metric.
+
+Added path length is deliberately not among the 3D metrics: it measures
+boundary to be redrawn, which needs the edge as drawn rather than as a voxel
+staircase, so it is a [2D contour metric](#2d-contour-metrics).
 
 ---
 
@@ -728,23 +907,74 @@ methods section of any manuscript using this tool.
 
 ---
 
-## Added Path Length (APL)
+## 2D contour metrics
 
-**Implementation in:** [`core/metrics.py`](../src/autoseg_evaluator/core/metrics.py)
-(`_apl_per_slice`, `apl_total`, `apl_mean`)
+**Files:** [`core/polygon_metrics.py`](../src/autoseg_evaluator/core/polygon_metrics.py)
+(placement, engine choice, results), [`core/contour_grid.py`](../src/autoseg_evaluator/core/contour_grid.py)
+(the image series as a frame), [`vendor/`](../src/autoseg_evaluator/vendor/)
+(the supplied engines, byte-identical). Design and every decision:
+[`V3_POLYGON_METRICS_SPEC.md`](V3_POLYGON_METRICS_SPEC.md).
 
-Faithful port of **PlatiPy's** `compute_metric_total_apl` /
-`compute_metric_mean_apl`. Per slice, the APL is the count of GT
-contour voxels NOT within τ mm of the test contour. The total is the
-sum across slices × in-plane spacing; the mean is the average over
-slices that contributed any voxels (returns `NaN` when no slice
-contributed, matching PlatiPy's `np.mean([])` semantics).
+Measured directly on the line segments the RTSTRUCT stores — nothing
+rasterised, nothing sampled onto a grid, no vertex moved — to the definitions of
+Boukerroui, Vasquez Osorio, Brunenberg & Gooding (2023), Supplement A. Both
+structures are placed in one orthonormal millimetre frame built from the ground
+truth's image series, their loops are read by
+[the shared reading](#reading-the-contours-both-streams), and each contour is
+assigned to the slice plane it lies on.
 
-**τ default = 3 mm** (PlatiPy default; Vaassen 2020).
+| Column | Definition |
+|---|---|
+| `poly_apl_mm` / `poly_apl_reverse_mm` | Length of one contour lying further than τ from the other (mm). Forward: ground truth not covered by the test — boundary to draw. Reverse: test not covered by the ground truth — boundary to remove |
+| `poly_napl` / `poly_napl_reverse` | The same as a fraction of that contour's total length, 0–1 |
+| `poly_hd100_mm` | Largest distance from either contour to the other on the same plane, found continuously along the segments |
+| `poly_hd95_mm` | 95th percentile of those distances, weighted by arc length |
+| `poly_mean_distance_mm` | Arc-length-weighted mean distance |
+| `poly_median_distance_mm` | Arc-length-weighted median distance |
+| `poly_planes_joint` / `_gt_only` / `_test_only` | How many planes both contours reach, and how many only one does (diagnostics, not metrics) |
 
-APL operates in SimpleITK's `(x, y, z)` space directly (no numpy
-reordering), per PlatiPy. Validated bit-for-bit against the upstream
-package on the SAMPLE DATA cohort.
+**Planes.** Distance metrics use only planes where **both** structures have a
+contour; a plane reached by only one is excluded and counted in the plane
+columns rather than hidden. APL counts a ground-truth plane the test never
+reached in full. Because the shared-plane rule already excludes test contours
+outside the ground truth's range, the truncation option (a 3D-stream control)
+does not affect the 2D columns.
+
+**Directions.** Each direction is computed separately; HD100, HD95 and the
+median take the **larger**, the mean takes the **equal average**. APL and NAPL
+are reported in both directions. All are zero for identical contours, and in
+the Report tab lower is better.
+
+**Tolerance.** APL / NAPL take their own τ (default 3 mm), set in the 2D group
+on the Compute tab and decorated into the headers.
+
+**Engines.** `fast` — the compiled continuous-envelope engine, the default,
+roughly 60–150× quicker. `reference` — pure Python, the audit trail and the
+fallback wherever no compiled library is packaged. `AUTOSEG_POLYGON_ENGINE`
+forces one. The engine and its settings are recorded with every result in the
+audit record.
+
+**Undefined is reported, never substituted.** A comparison the metrics cannot
+describe leaves its cells empty and says why in the **2D status** column: a
+consensus ground truth (born as a mask, no contours), no shared plane, a contour
+off its slice plane or outside the image. A median or 95% value the contours do
+not determine — the distance distribution has a gap at exactly that share of
+the length — blanks only its own cell and the status gives the range; it is
+judged on the reported (larger-direction) value (spec D9). A structure set
+whose references name nothing in the loaded data is read from its coordinates
+(spec D8).
+
+**Validation.** [`POLYGON_VALIDATION_REPORT.md`](POLYGON_VALIDATION_REPORT.md):
+the supplier's 150 published pairs and 44 stress cases, then the same pairs
+through this application's adapter and from the DICOM files through its own
+grid and reading, all within the suppliers' thresholds (largest disagreement
+~5e-10 mm).
+
+**Mask APL, removed in v3.** v1 and v2 reported `apl_mean` / `apl_total`, a
+port of PlatiPy's per-slice dilation on the rasterised masks (Vaassen 2020).
+It was removed on the principle that edge metrics belong to the contour stream
+(spec D3), so **v1 APL values are historical, not reproducible by v3**.
+Commit `7b6cec1` is the last that computes it.
 
 ---
 
@@ -802,7 +1032,7 @@ per-rater STAPLE rows; **never the GT**, which defines the extent. The
 default (`z_extent_mm = None`) path is byte-identical to before, so the
 bit-for-bit dicompyler equivalence still holds.
 
-**GT-vs-dose row:** when DVH is enabled in Tab 4, the worker emits one
+**GT-vs-dose row:** when DVH is enabled on the Compute tab, the worker emits one
 extra row per (patient × organ) with the GT contour's own dose
 statistics, `comparison_mode = "gt_dose"`, geometric columns empty,
 DVH columns populated. Lets the user compare manual-GT dose against
@@ -870,11 +1100,11 @@ IEEE TMI 2004). For each call:
    GT contributes to the EM (default ON — "no true truth" framing per
    Warfield 2004; OFF for evaluating AI ensemble vs reference framing).
 
-2. **Synthetic GT (Tab 2 → Tab 3 → Tab 4)** — Tab 2 builds a STAPLE
+2. **Synthetic GT (Tab 2 → Tab 3 → Compute)** — Tab 2 builds a STAPLE
    consensus from 2+ manual observers, registers it as a synthetic
    RTSS, and Tab 3 designates it as the GT. The worker rasterises
    constituents on-the-fly and runs STAPLE at compute time using
-   Tab 4's STAPLE config. The drawer's `vs STAPLE` auto-disables
+   the Compute tab's STAPLE settings. The drawer's `vs STAPLE` auto-disables
    (running STAPLE on STAPLE is methodologically meaningless).
 
 **Result-row schema (v2.4).** Every STAPLE computation, from either
@@ -947,14 +1177,14 @@ User loads folder
    MetadataLibrary.register_synthetic_consensus(...)
        │
        ▼
-   consensusGenerated signal → MainWindow refreshes Tab 3 + Tab 4 trees
+   consensusGenerated signal → MainWindow hands the library to Match Contours + Compute
        │
        ▼
    Tab 3: synthetic RTSS appears in Loaded Contours tree with source
    label "STAPLE Consensus" and bold styling.
        │
        ▼
-   Tab 4: worker detects synthetic GT in _get_mask via _find_rtstruct_entry,
+   Compute: worker detects synthetic GT in _get_mask via _find_rtstruct_entry,
    calls _synthesise_consensus_mask which rasterises every constituent
    and runs compute_staple. Cached under the synthetic key for the rest
    of the run.
@@ -965,14 +1195,14 @@ User loads folder
 **Class:** `_InterManualMetricsDialog` in `build_consensus.py`
 
 Pre-flight settings dialog (`_InterObserverSettingsDialog`) lets the
-user pick which metrics to compute + override Surface Dice / APL
-tolerances. Progress dialog ticks per `(group × organ)` with full
+user pick which 3D mask metrics to compute + override the Surface Dice
+tolerance. Progress dialog ticks per `(group × organ)` with full
 cancel responsiveness (cancel-check threaded into both the per-organ
 loop AND the per-rater-pair inner loop). Results table:
 
 - Columns: `Patient`, `Source label`, `Organ`, `Rater A`, `Rater B`,
-  then metric columns with τ values baked into the Surface Dice / APL
-  headers.
+  then metric columns with the τ value baked into the Surface Dice
+  header.
 - Sortable QTableWidget; Ctrl+A → Ctrl+C copies all rows + headers as
   TSV; **Export CSV…** writes a CSV file.
 - Per-organ mask eviction inside `_compute_inter_manual_rows` caps peak
@@ -984,9 +1214,50 @@ loop AND the per-rater-pair inner loop). Results table:
 |---|---|---|
 | **Use case** | Multi-manual studies — combine N manuals into the single GT used for AI comparison | All-as-raters — every contour in a drawer (GT + tests) is one rater |
 | **STAPLE input** | Only the user-selected manual RTSSes | GT + every test contour |
-| **STAPLE output use** | Synthetic GT visible in Tab 3, designated as `Manual` reference | Per-rater sens/spec + consensus summary rows in Tab 5 |
-| **Compute timing** | At Tab 4 metric run (on-the-fly) | At Tab 4 metric run (also on-the-fly) |
+| **STAPLE output use** | Synthetic GT visible in Tab 3, designated as `Manual` reference | Per-rater sens/spec + consensus summary rows in Results (Tab 6) |
+| **Compute timing** | At the Compute tab's run (on-the-fly) | At the Compute tab's run (also on-the-fly) |
 | **Allowed together?** | No — if the GT is a synthetic STAPLE consensus, Tab 3's `vs STAPLE` is auto-disabled |
+
+---
+
+## Organ grouping and the Report tab
+
+**Grouping:** [`core/organ_groups.py`](../src/autoseg_evaluator/core/organ_groups.py),
+[`data/organ_index.py`](../src/autoseg_evaluator/data/organ_index.py),
+[`ui/dialogs/organ_labels.py`](../src/autoseg_evaluator/ui/dialogs/organ_labels.py).
+The many spellings of one organ are collapsed so statistics can pool them,
+without ever pooling two organs. Names are grouped on a structured key —
+`(base, laterality, qualifier)` — and **only `base` is ever fuzzy-matched**:
+on this project's own matcher left/right pairs of one organ score 0.82–0.93
+while different organs score 0.38–0.45, so no threshold separates them and
+laterality has to be extracted. Assignment runs in tiers — manual >
+dictionary > stripped > fuzzy > unassigned — and a fuzzy result is a
+proposal, never applied unconfirmed. Curation happens in the Matching tab
+(**Label Organs…**); labels never merge drawers, and persist on explicit
+session save (`organ_assignments`, session v6).
+
+**Report:** [`ui/tabs/report.py`](../src/autoseg_evaluator/ui/tabs/report.py),
+[`data/report.py`](../src/autoseg_evaluator/data/report.py),
+[`core/statistics.py`](../src/autoseg_evaluator/core/statistics.py),
+[`ui/widgets/stat_plots.py`](../src/autoseg_evaluator/ui/widgets/stat_plots.py).
+A case is a (patient, planning CT) pair, so two courses are never collapsed
+into one; a patient with more than one case is left out of the paired
+comparison, and the tab says so, rather than having one course picked for it.
+For each organ and metric the tab compares two sources on their paired cases: Wilcoxon signed-rank with Pratt's zero handling and an exact
+conditional p-value, a Hodges–Lehmann estimate with the confidence set
+obtained by inverting the same test, rank-biserial correlation, and an exact
+sign test alongside. **Each organ is its own question and its p-value is
+reported unadjusted.** Metric directions (lower or higher is better) and axis
+bounds come from [`core/readable.py`](../src/autoseg_evaluator/core/readable.py)
+and `data/report.py`, and the 2D plane counts are left out as diagnostics.
+The acquisition summary reads only an allowlist of non-identifying tags
+([`core/acquisition.py`](../src/autoseg_evaluator/core/acquisition.py)); the
+PDF export writes the page as a clinical report.
+
+Every statistical decision, with worked examples regenerated from the shipped
+code by `scripts/make_register_tables.py`, is in
+[`V3_REPORT_STATISTICS_REGISTER.md`](V3_REPORT_STATISTICS_REGISTER.md); the tab's
+design is in [`V3_REPORT_TAB_SPEC.md`](V3_REPORT_TAB_SPEC.md).
 
 ---
 
@@ -994,7 +1265,7 @@ loop AND the per-rater-pair inner loop). Results table:
 
 **File:** [`src/autoseg_evaluator/data/session.py`](../src/autoseg_evaluator/data/session.py)
 
-**Schema version: 5.** Past versions still load (missing fields default
+**Schema version: 6.** Past versions still load (missing fields default
 to empty); future versions are refused with a clear error. **v4** adds the
 `qualitative` block (graders, their fixed per-grader configs, and each
 grader's order / scores / cursor) so an in-progress qualitative run resumes
@@ -1003,13 +1274,19 @@ the answers given in Review Data Links, keyed by
 `linkage.override_key(patient_id, rtstruct_sop_uid, kind)` — so a cohort whose
 links had to be settled by hand does not have to be settled again on reload.
 They are applied by Tab 1 as soon as the rescan completes, and an override
-naming data that is no longer present is ignored rather than fatal.
+naming data that is no longer present is ignored rather than fatal. **v6** adds
+`organ_assignments`, mapping a raw ROI name to the organ it was grouped under,
+so a cohort whose names had to be sorted out by hand is not sorted out again.
+
+Metric selections and tolerances are application settings (`settings.json`),
+not session data. Settings for removed features — mask APL's `apl_mean`,
+`apl_total` and `apl_tolerance_mm` — are dropped on load.
 
 **Top-level JSON shape:**
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 6,
   "saved_at": "2026-05-25T14:30:00+00:00",
   "folder": "C:/path/to/cohort",
   "replacement_rules": [{"find": "...", "replace": "..."}],
@@ -1048,6 +1325,7 @@ naming data that is no longer present is ignored rather than fatal.
     "PATIENT_ID|<rtstruct SOP UID>|series": "<chosen SeriesInstanceUID>",
     "PATIENT_ID|<rtstruct SOP UID>|dose": "<chosen dose SOPInstanceUID>"
   },
+  "organ_assignments": {"Parotid Lt": "Parotid_L"},
   "qualitative": {
     "started": true, "active_rater": "Alice",
     "raters": ["Alice", "Bob"],
@@ -1074,16 +1352,24 @@ respected, manually-curated existing tests preserved.
 
 ## Performance engineering
 
-### Per-patient cache eviction (Tab 4 metrics worker)
+### Per-patient cache eviction (metrics worker)
 
 **File:** [`src/autoseg_evaluator/workers/metrics_worker.py`](../src/autoseg_evaluator/workers/metrics_worker.py)
 
 Group iteration is sorted **patient-major** in `_enumerate_groups`. When
 the loop crosses a patient boundary, `_evict_patient_caches` pops the
 CT, dose dataset, all masks, and all RTSTRUCT pydicom datasets for the
-previous patient. Peak RAM is bounded by a single patient's data
-instead of the entire cohort's. `gc.collect()` is called to reclaim
-SimpleITK's C++-backed memory.
+previous patient, and the 2D stream's grids and prepared structures with
+them. Peak RAM is bounded by a single patient's data instead of the entire
+cohort's. `gc.collect()` is called to reclaim SimpleITK's C++-backed memory.
+
+### Reading and filling contours once
+
+Each structure is read and filled once per run however many sources it is
+compared against; the 2D stream likewise prepares each structure once. The
+half-open scanline fill replaced scikit-image's per-voxel point-in-polygon
+test, taking the tender H&N cohort's fills from 815 s to 219 s (3.7×),
+reading step included.
 
 ### Early CT eviction within the last group per patient
 
@@ -1117,14 +1403,14 @@ on the next `setValue` tick.
 
 ## Validation & test suite
 
-**Test runner:** pytest, 341 tests, ~9 s wall clock.
+**Test runner:** pytest, over 1,100 tests, about 80 s wall clock.
 
 **Coverage highlights:**
 
 | File | Tests | What it pins |
 |---|---|---|
 | `test_surface_distance.py` | ~30 | Bit-for-bit parity with `google-deepmind/surface-distance` on synthetic + SAMPLE-DATA fixtures |
-| `test_metrics.py` | ~15 | APL parity with PlatiPy; geometric metric aggregator |
+| `test_metrics.py` | ~19 | 3D metric aggregator; a configuration still asking for the removed mask APL gets none |
 | `test_matching.py` | ~20 | Levenshtein + cosine algorithm, canonicalisation, method labelling (tg263 / fuzzy / none), Match dataclass |
 | `test_tg263_synonyms.py` | ~20 | Bridging cases (Eyeball_L → Eye_L, OpticNerve_L → OpticNrv_L, etc.) AND pitfall non-collapses (Eye_L ≠ Eye_R, VB_L ≠ VB_R, Bone_Lacrimal ≠ Glnd_Lacrimal); regression tests for the four matcher-substitution bugs |
 | `test_staple.py` | ~15 | StapleConfig defaults (MICCAI), adaptive bbox sizing, outlier-rater detection |
@@ -1137,8 +1423,14 @@ on the next `setValue` tick.
 | `test_widgets.py` | ~10 | OrganDrawer mutations, drag-drop payload format |
 | `test_compute_tab.py` | ~10 | Compute config emission, settings round-trip |
 | `test_match_logic.py` / `test_source_labels.py` | ~10 | Smaller utility tests |
-| `test_platipy_equivalence.py` | 4 | PlatiPy mask-rasteriser equivalence on a synthetic CT + RTSTRUCT (square, donut with XOR hole, multi-slice) |
-| `test_metrics_equivalence.py` | 8 | Bit-for-bit equivalence of Dice / HD100 / HD95 / Surface Dice @ 3 mm / mean surface distance against ``google-deepmind/surface-distance`` and APL total / mean against PlatiPy 0.7.2 |
+| `test_platipy_equivalence.py` | 4 | `legacy` rasteriser equivalence with PlatiPy on a synthetic CT + RTSTRUCT (square, donut with XOR hole, multi-slice) |
+| `test_rasteriser_backends.py` | ~17 | `continuous` fill: dcmrtstruct2nii conformance, identity with the previous fill away from edge ties, half-open edge rule, no seam between touching loops, refusals with reasons, and the 3D mask being exactly the fill of the region the 2D stream reads |
+| `test_contour_reading.py` | ~25 | Every loop rule on its smallest case (holes, islands, touching, overlap, duplicates, pinches, spikes, figure-of-eight, double winding), and identity with the vendored parser on everything it accepts |
+| `test_polygon_metrics.py` / `test_metrics_worker_polygon.py` | ~45 | 2D adapter: engine choice, placement, dangling references, undetermined quantiles per metric, availability, caching, audit notes |
+| `tests/vendor/` | ~105 | The suppliers' own acceptance tests, and every vendored file against its SHA-256 manifest |
+| `test_report_model.py` / `test_report_tab.py` / `test_statistics.py` | ~255 | Pairing, coverage, metric directions and diagnostics, the statistics against worked examples, figures and PDF export |
+| `test_metrics_equivalence.py` | 6 | Bit-for-bit equivalence of Dice / HD100 / HD95 / Surface Dice @ 3 mm / mean surface distance against ``google-deepmind/surface-distance`` |
+| `test_settings.py` | 3 | Settings for removed features dropped on load and on the next save |
 | `test_staple_equivalence.py` | 3 | Bit-for-bit equivalence of AutoSeg's STAPLE wrapper (per-rater sensitivity/specificity + binary consensus) against a direct ``SimpleITK.STAPLEImageFilter`` invocation, on a synthetic 3-rater fixture |
 | `test_dvh_equivalence.py` | ~7 | Bit-for-bit equivalence of AutoSeg's DVH statistics (Dmin/Dmean/Dmax, D% , Dcc, VGy) against ``dicompyler-core``; single-slice OAR recovery (explicit thickness); z-extent truncation drops/restores contour planes |
 | `test_version.py` | 3 | `__version__` resolution + portable-bundle `_version.py` fallback |
@@ -1150,20 +1442,23 @@ a PHI-safe markdown report under `docs/` and reproducible via a script under
 
 | Engine | Reference | Result | Report |
 |---|---|---|---|
-| Mask rasterisation | PlatiPy 0.7.2 | 110/110 ROIs voxel-exact | `VALIDATION_REPORT.md` |
-| 7 geometric metrics | surface-distance + PlatiPy | 63/63 comparisons Δ = 0 | `VALIDATION_REPORT.md` |
+| `legacy` mask rasterisation | PlatiPy 0.7.2 | 110/110 ROIs voxel-exact | `VALIDATION_REPORT.md` |
+| 5 surface-distance metrics | `surface-distance` | 45/45 comparisons Δ = 0 | `VALIDATION_REPORT.md` (its 63 also covered the since-removed mask APL) |
+| 2D contour metrics | the suppliers' published values | 150/150 pairs through the adapter and from DICOM; largest error ~5e-10 mm; 44 stress cases | `POLYGON_VALIDATION_REPORT.md` |
+| Shared contour reading | vendored parser (2D), previous fill (3D) | 5,143/5,143 regions identical; all 22,123 changed voxels edge ties | `scripts/validate_contour_reading.py`, run on the tender cohort (V3_POLYGON_METRICS_SPEC.md, D10) |
 | STAPLE consensus | `SimpleITK.STAPLEImageFilter` | 55/55 consensus runs bit-exact (sens/spec + voxels) | `STAPLE_VALIDATION_REPORT.md` |
 | DVH dose statistics | `dicompyler-core` 0.5.6 | 2970/2970 stat comparisons Δ = 0 (297 ROIs) | `DVH_VALIDATION_REPORT.md` |
 
 The STAPLE and DVH reference libraries (`SimpleITK`, `dicompyler-core`) are
 core dependencies, so their equivalence tests run in CI with no extra
 install; `surface-distance` and `platipy` are installed explicitly in the CI
-workflow for the mask/metric equivalence tests.
+workflow for the mask/metric equivalence tests. The 2D engines' own acceptance
+scripts run in CI too, on a compiled library built on the runner for Linux.
 
 **Bit-for-bit PlatiPy parity for mask rasterisation** (v2.3.1):
 [`test_platipy_equivalence.py`](../tests/test_platipy_equivalence.py)
-generates a tiny synthetic CT + RTSTRUCT and asserts AutoSeg's
-`extract_mask_for_roi` produces a numpy-equal output to PlatiPy's
+generates a tiny synthetic CT + RTSTRUCT and asserts AutoSeg's `legacy`
+rasteriser produces a numpy-equal output to PlatiPy's
 `transform_point_set_from_dicom_struct` across three ROI shapes:
 single-slice square, donut (XOR-produced hole), and multi-slice
 square. CI installs `platipy>=0.7` explicitly so this test runs on
@@ -1172,7 +1467,7 @@ sample cohort: **110/110 ROIs voxel-exact across two RTSSes**,
 including donut-shaped Spinal_Canal, 4.9M-voxel BODY, and structures
 down to 88 voxels (Lens_L).
 
-**Bit-for-bit metric parity across seven metrics** (v2.3.2):
+**Bit-for-bit metric parity across the surface-distance metrics** (v2.3.2):
 [`test_metrics_equivalence.py`](../tests/test_metrics_equivalence.py)
 extends the regression net to the metric implementations themselves.
 On a synthetic GT/Test pair with non-trivial overlap (offset 12-mm
@@ -1182,22 +1477,23 @@ is asserted equal to:
 * `surface_distance.compute_dice_coefficient` — volumetric Dice,
 * `surface_distance.compute_robust_hausdorff` at 100% and 95% — HD100 / HD95,
 * `surface_distance.compute_surface_dice_at_tolerance` at 3 mm — Surface Dice,
-* `surface_distance.compute_average_surface_distance` — mean surface distance,
-* `platipy.imaging.label.comparison.compute_metric_total_apl` — Total APL,
-* `platipy.imaging.label.comparison.compute_metric_mean_apl` — Mean APL.
+* `surface_distance.compute_average_surface_distance` — mean surface distance.
 
 The test was also verified offline on the HN1 cohort across nine
 shared organ pairs (brainstem, spinal cord, mandible, larynx, oral
-cavity, bilateral parotids, bilateral cochleae): **63/63 metric–ROI
-comparisons produced zero absolute difference** (max |Δ| = 0.000e+00
-across every metric). CI installs both `platipy>=0.7` and
-`surface-distance` so the regression test runs on every push.
+cavity, bilateral parotids, bilateral cochleae): **every metric–ROI
+comparison produced zero absolute difference** (max |Δ| = 0.000e+00).
+At v2.3.2 that was 63/63, including mask APL against PlatiPy; mask APL was
+removed in v3 and its parity checks with it. CI installs `surface-distance`
+so the regression test runs on every push.
 
 **Reviewer-ready validation report** ([`docs/VALIDATION_REPORT.md`](VALIDATION_REPORT.md)):
 generated by [`scripts/validate_against_upstream.py`](../scripts/validate_against_upstream.py),
 it contains the full per-ROI per-metric breakdown on the HN1 cohort
-(110 ROIs of mask comparison, 9 ROIs × 7 metrics) plus the software
-environment versions. PHI-safe by construction: no SOPInstanceUIDs,
+(110 ROIs of mask comparison, 9 ROIs × 7 metrics at v2.3.2) plus the software
+environment versions. The script now compares the five surface-distance
+metrics and pins its PlatiPy mask check to the `legacy` rasteriser, the only
+backend meant to match PlatiPy; regenerating the report needs the HN1 data. PHI-safe by construction: no SOPInstanceUIDs,
 no filenames, no patient identifiers, no dates, no institution
 metadata — only anonymised ROI display names and numeric voxel /
 metric values. Anyone can re-run the script against their own
@@ -1276,11 +1572,21 @@ bumping `pyproject.toml` updates the window title bar and every other
 - Voxel-counting volume (vs. contour-integral volume from the original
   DICOM points). ~1-3 % difference for small structures. Documented in
   the data-model section.
-- Mask creation rounds physical points to integer voxels via
-  `TransformPhysicalPointToIndex` — standard practice but introduces
-  sub-voxel error. Matches PlatiPy / rt-utils / dcmrtstruct2nii.
-- `CLOSED_PLANAR` contour geometry only; `POINT` and `OPEN_PLANAR` are
-  skipped (matches v1).
+- 3D mask metrics are quantised to the voxel lattice: anything thinner than
+  a voxel — a narrow gap, a sliver, a thin hole — can appear or vanish
+  depending on where voxel centres fall. The 2D contour metrics have no such
+  limit.
+- Closed contours only (`CLOSED_PLANAR`, `INTERPOLATED_PLANAR`,
+  `CLOSEDPLANAR_XOR`); `POINT` and `OPEN_*` structures are refused.
+- Loops with no single reading — partial overlaps, duplicated loops, an
+  outline wound twice round an area — are refused in both streams rather than
+  guessed.
+- The two streams check placement differently: a contour lying outside the
+  image is trimmed by the 3D fill but refuses the 2D metrics, and a contour up
+  to half a slice off-plane is filled in 3D but must lie within 0.001 mm of its
+  plane for the 2D metrics.
+- The 2D compiled engine ships for Windows and is built in CI for Linux;
+  macOS runs the slower reference engine.
 - DVH for the STAPLE consensus uses the thresholded binary mask, not
   the probabilistic mask (which would require a different DVH
   formulation entirely).
@@ -1367,6 +1673,23 @@ bumping `pyproject.toml` updates the window title bar and every other
   Results row as `likert_<grader>` + `Qualitative` / `Blinded` columns. Also a
   **dose-overlay colour wash** in the Tab-3 slice viewer (`core/dose.py`).
 
+### v3.0.0 (in development)
+- **Two metric streams** — 2D contour metrics (APL, NAPL, 2D Hausdorff 100 /
+  95 %, mean and median contour distance) beside the 3D mask metrics; **mask
+  APL removed** (v1 APL values become historical). Metric definitions dialog,
+  optional audit record.
+- **One shared contour reading** for both streams, and a half-open 3D fill
+  (moves one vendor's masks on the tender cohort; see
+  [Mask creation](#mask-creation-rtstruct--binary)).
+- **Sub-voxel `continuous` rasteriser as the default**, `legacy` opt-in.
+- **Data linking by explicit reference**, no RTPLAN; ambiguity settled in Tab 1.
+- **Canonical organ grouping**, **Report tab** (Tab 7) with per-organ paired
+  statistics, figures and PDF export; session schema v6.
+- The Match Contours visualiser uses the Qualitative tab's multiplanar viewer.
+
+See [`V3_RELEASE_STATUS.md`](V3_RELEASE_STATUS.md) for what remains before
+release.
+
 ### Pending features
 - **Docs**: full user guide, hospital deployment doc, metrics reference,
   developer guide.
@@ -1393,7 +1716,9 @@ bumping `pyproject.toml` updates the window title bar and every other
 | Hausdorff 95 % robust metric | Aydin et al., *Med Phys* 2021 |
 | Mean surface distance | Standard summary; google-deepmind/surface-distance impl. |
 | Surface Dice + tolerance | Nikolov et al., DeepMind 2018 (arXiv:1809.04430) |
-| Added Path Length | Vaassen et al., *Phys Med* 2020 (PlatiPy implementation) |
+| Added Path Length (concept; v1–v2 mask version) | Vaassen et al., *Phys Med* 2020 (PlatiPy implementation) |
+| 2D contour metrics (APL, NAPL, HD, mean / median distance) | Boukerroui, Vasquez Osorio, Brunenberg & Gooding, *Phys Imaging Radiat Oncol* 26 (2023) 100436, Supplement A |
+| Wilcoxon signed-rank, Hodges–Lehmann, rank-biserial | see [`V3_REPORT_STATISTICS_REGISTER.md`](V3_REPORT_STATISTICS_REGISTER.md) |
 | STAPLE | Warfield, Zou & Wells, MICCAI 2002 / IEEE TMI 2004 |
 | STAPLE in multi-atlas pipelines | Heckemann *NeuroImage* 2006; Iglesias & Sabuncu *Med Image Anal* 2015 |
 | STAPLE adaptive prior / bbox | Asman & Landman, *IEEE TMI* 2011 ("COLLATE") |
@@ -1414,6 +1739,7 @@ bumping `pyproject.toml` updates the window title bar and every other
 - **GT** — Ground Truth contour
 - **HD** — Hausdorff Distance
 - **MSD** — Mean Surface Distance
+- **NAPL** — Normalised Added Path Length (APL as a fraction of contour length)
 - **OAR** — Organ at Risk
 - **PRV** — Planning Risk Volume (expanded OAR)
 - **PMB** — Physics in Medicine and Biology (journal)
@@ -1426,7 +1752,12 @@ bumping `pyproject.toml` updates the window title bar and every other
 
 ---
 
-*Document version 6 — updated 2026-06-18 against v2.6.0.
+*Document version 7 — updated 2026-09-24 for v3.0.0 (in development): two
+metric streams with mask APL removed, the shared contour reading and half-open
+fill, data linking, organ grouping and the Report tab, and the shared viewer in
+Match Contours.
+
+Version 6 — updated 2026-06-18 against v2.6.0.
 Tracks: portable bundle + CI/release pipeline (v2.1), `D at volume (cc)`
 DVH input + window-title fix (v2.2), template source-label match +
 expanded Manage Source Labels columns (v2.3), the Tab 2 multi-observer

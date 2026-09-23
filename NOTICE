@@ -8,9 +8,9 @@ This product includes software derived from third-party open-source projects.
 ================================================================================
 dcmrtstruct2nii
 ================================================================================
-`autoseg_evaluator.core.masks._rasterise_roi_continuous` is ADAPTED FROM
-`DcmPatientCoords2Mask.convert` in dcmrtstruct2nii v5
-(https://github.com/Sikerdebaard/dcmrtstruct2nii, Zenodo DOI
+`autoseg_evaluator.core.masks._fill_structure` (with its quiet wrapper
+`_rasterise_roi_continuous`) is ADAPTED FROM `DcmPatientCoords2Mask.convert` in
+dcmrtstruct2nii v5 (https://github.com/Sikerdebaard/dcmrtstruct2nii, Zenodo DOI
 10.5281/zenodo.4037864). It is not the upstream converter and does not run the
 upstream package.
 
@@ -22,11 +22,20 @@ Modifications made in this project:
   * Out-of-range slice indices are skipped. Upstream indexes the array with a
     rounded z, so a negative z silently writes into the LAST slice.
   * Contour planarity is checked in continuous index space against a tolerance;
-    a non-planar contour aborts the ROI rather than being flattened onto the
+    a non-planar contour refuses the ROI rather than being flattened onto the
     first vertex's slice.
-  * An ROI containing any unsupported ContourGeometricType (e.g. the standard
-    CLOSEDPLANAR_XOR) returns None rather than an all-background mask, so it is
-    reported as a failed conversion instead of a zero-volume structure.
+  * The loops on each slice are read into regions by this project's shared
+    contour reading (`core/contour_reading.py`) instead of being filled one by
+    one and combined by exclusive-or. Holes, islands and touching loops are
+    read as drawn, CLOSEDPLANAR_XOR as declared; partial overlaps, duplicated
+    loops and outlines wound twice round an area are refused.
+  * Each region is filled with a half-open scanline written for this project,
+    replacing upstream's point-in-polygon fill: a voxel centre exactly on an
+    edge belongs to one side only. Away from such ties the same voxels are
+    filled.
+  * A structure that cannot be converted is reported with its reason
+    (MaskConversionError) rather than as an all-background mask, so it is never
+    mistaken for a zero-volume structure.
   * The reference image's spacing/origin/direction are restored on the result
     (upstream's engine drops them and repairs this in its facade).
   * The per-vertex coordinate transform is vectorised with NumPy.

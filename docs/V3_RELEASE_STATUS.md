@@ -159,20 +159,21 @@ against Stream A.
 
 ---
 
-## Documentation still to write
+## Documentation
 
-The features above landed with their design records — the statistics register,
-the report tab spec, the rasteriser comparison — but the **user-facing** docs
-still describe the application as it was before v3:
+**Done with phase 7 (2026-09-24).** `README.md` and `docs/PROJECT_OVERVIEW.md`
+now describe v3: seven tabs, both metric streams, the shared contour reading
+and half-open fill, organ grouping and the Report tab, the audit record, and
+mask APL's removal with what it means for v1 values. `NOTICE` records the new
+changes to the code adapted from dcmrtstruct2nii.
+`docs/POLYGON_VALIDATION_REPORT.md` was regenerated through the shared reading.
 
-- `docs/PROJECT_OVERVIEW.md` walks through "the six tabs". There are seven; the
-  Report tab is not described anywhere in it, and neither is the organ-grouping
-  curation added to the Matching tab.
-- `README.md`'s numbered workflow stops at Results, so the Report tab is
-  missing from it, as is the organ curation now in step 3.
-- Mask-APL is described as a shipped metric throughout both, and in the
-  manuscript Methods. That text has to be rewritten when #5 removes it, not
-  before — otherwise the docs describe an application that does not exist yet.
+**Still to do, outside this repository:** the manuscript Methods text describes
+mask APL and needs the matching change.
+
+**Stale by design:** `docs/VALIDATION_REPORT.md` was generated at v2.3.2 and
+includes the since-removed mask APL rows. Regenerating it needs the HN1 data;
+the README and overview say what it covers.
 
 ## Carried risks
 

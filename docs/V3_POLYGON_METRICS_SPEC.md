@@ -907,7 +907,7 @@ an ROI compared against five sources should be prepared once.
 | 4 | ✅ **Done.** Worker integration, availability, caching, 8 tests | metrics computed |
 | 5 | ✅ **Done.** Tab 5 split, settings round-trip, 6 tests | metrics selectable |
 | 6 | ✅ **Done.** Declared columns, `2D`/`3D` naming, Report families, definitions dialog, optional two-stream sidecar | metrics reportable |
-| 7 | ✅ **Done.** Mask APL removed (D3), settings keys retired, validator pinned to legacy for PlatiPy parity | numbers move |
+| 7 | ✅ **Done.** Mask APL removed (D3), settings keys retired, validator pinned to legacy for PlatiPy parity; README, project overview and NOTICE brought up to v3 | numbers move |
 
 Phases 1–3 change nothing a user can see, deliberately: the numerical path is
 proven against the published reference, through our own adapter, before it is
