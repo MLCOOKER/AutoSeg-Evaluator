@@ -74,7 +74,7 @@ def build(rows: Iterable[Mapping[str, Any]], *, settings: Mapping[str, Any] | No
                 "slices_removed": row.get("truncated_slices"),
                 "extent_removed_mm": row.get("truncated_extent_mm"),
             }
-        for stream in ("mask", "polygon"):
+        for stream in ("mask", "polygon", "dvh"):
             if detail.get(stream):
                 record[stream] = detail[stream]
         if row.get("error"):
@@ -111,6 +111,17 @@ def build(rows: Iterable[Mapping[str, Any]], *, settings: Mapping[str, Any] | No
                 "contours were placed from their coordinates. Each still had to "
                 "lie within 0.001 mm of a slice plane and inside the image bounds. "
                 "The mask stream reads neither reference."
+            ),
+            "dvh": (
+                "How each structure's dose statistics were taken. source: contours "
+                "(integrated over the regions the contour reading produced) or mask "
+                "(a consensus, which has no contours). subsample_target_mm: the "
+                "finest of 0.25, 0.5 and 1 mm keeping the structure within ten million "
+                "samples, or null when even 1 mm would not and each voxel was sampled "
+                "once; samples_per_voxel and subsample_spacing_mm (x, y, z) are what "
+                "that came to on the CT's voxels. outside_dose_grid_cc: volume beyond "
+                "the dose grid, counted at 0 Gy. D{x} is read from a histogram of "
+                "bin_gy bins."
             ),
         },
         "records": records,

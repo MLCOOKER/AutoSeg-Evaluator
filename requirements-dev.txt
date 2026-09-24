@@ -4,3 +4,6 @@ pytest>=8.0
 pytest-qt>=4.4
 ruff>=0.4
 pyinstaller>=6.5
+# scripts/validate_dvh_methods.py (the DVH benchmark)
+dicompyler-core>=0.5.6,<1
+openpyxl>=3.1

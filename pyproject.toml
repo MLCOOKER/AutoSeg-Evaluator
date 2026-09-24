@@ -45,7 +45,6 @@ dependencies = [
     "scipy>=1.11",
     "scikit-image>=0.22",
     "matplotlib>=3.8",
-    "dicompyler-core>=0.5.6",
     # Backs the vendored native polygon-metric kernels
     # (src/autoseg_evaluator/vendor). Previously present only transitively.
     "shapely>=2.0,<3",
@@ -57,6 +56,13 @@ dev = [
     "pytest-qt>=4.4",
     "ruff>=0.4",
     "pyinstaller>=6.5",
+]
+# scripts/validate_dvh_methods.py: scores v2's dicompyler-core DVH beside v3's
+# own, and reads the Nelms et al. 2015 analytic tables. Not needed to run the
+# application, which no longer uses dicompyler-core.
+validation = [
+    "dicompyler-core>=0.5.6",
+    "openpyxl>=3.1",
 ]
 
 [project.scripts]

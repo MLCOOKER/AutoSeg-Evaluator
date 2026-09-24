@@ -15,13 +15,21 @@ from __future__ import annotations
 
 import gc
 import traceback
+from collections.abc import Callable
 from typing import Any
 
 import pydicom
 from PySide6.QtCore import QObject, Signal, Slot
 
 from autoseg_evaluator.core.contour_grid import GridUnavailableError, build_grid
-from autoseg_evaluator.core.dvh import DVHConfig, DVHError, _fmt_num, compute_dvh_metrics
+from autoseg_evaluator.core.dvh import (
+    DoseGrid,
+    DVHConfig,
+    DVHError,
+    DVHResult,
+    mask_dvh,
+    structure_dvh,
+)
 from autoseg_evaluator.core.masks import (
     MaskConversionError,
     extract_mask_for_roi,
@@ -133,6 +141,9 @@ class MetricsWorker(QObject):
         self._mask_failure: dict[tuple[str, str, int], str] = {}
         self._pending_polygon_audit: dict[str, Any] | None = None
         self._dose_cache: dict[tuple[str, str], Any] = {}
+        # The same doses as grids in Gy, or the DVHError that says why one
+        # cannot be used; keyed by (patient_id, dose SOPInstanceUID).
+        self._dose_grid_cache: dict[tuple[str, str], DoseGrid | DVHError] = {}
         # STAPLE summary scalars captured while synthesising a multi-observer
         # consensus GT (Tab 2), keyed by (patient_id, synthetic_sop, roi_number).
         # Lets the GT branch emit a "STAPLE Details" row without re-running EM.
@@ -421,7 +432,7 @@ class MetricsWorker(QObject):
             if self._dvh_config.any_enabled():
                 if self._cancelled:
                     return rows
-                gt_dvh_row = self._compute_gt_dvh_row(group, gt_rtss)
+                gt_dvh_row = self._compute_gt_dvh_row(group, gt_rtss, gt_mask)
                 if gt_dvh_row is not None:
                     rows.append(gt_dvh_row)
                     # Reuse the GT's own dose statistics so each test row can
@@ -520,20 +531,18 @@ class MetricsWorker(QObject):
                     row["metrics"]["staple_sensitivity"] = ss[0]
                     row["metrics"]["staple_specificity"] = ss[1]
             if self._dvh_config.any_enabled():
-                dose_ds = self._load_dose(group["patient_id"], group["gt_sop"])
-                if dose_ds is not None:
-                    try:
-                        row["metrics"].update(
-                            compute_dvh_metrics(
-                                record["rtss"],
-                                dose_ds,
-                                test["roi_number"],
-                                self._dvh_config,
-                                z_extent_mm=z_extent_mm,
-                            )
-                        )
-                    except DVHError as dvh_exc:
-                        row["error"] = f"DVH: {dvh_exc}"
+                self._dose_into_row(
+                    row,
+                    group,
+                    lambda dose: structure_dvh(
+                        record["rtss"],
+                        test["roi_number"],
+                        dose,
+                        record["mask"],
+                        self._dvh_config,
+                        z_extent_mm=z_extent_mm,
+                    ),
+                )
             # The polygon stream, measured on the stored contours rather than
             # on the rasterised masks above. It is a separate measurement of the
             # same pair, so a failure here leaves the mask metrics standing and
@@ -740,6 +749,7 @@ class MetricsWorker(QObject):
         self,
         group: dict[str, Any],
         gt_rtss,
+        gt_mask,
     ) -> dict[str, Any] | None:
         """Emit a row carrying the GT contour's own dose statistics.
 
@@ -749,8 +759,7 @@ class MetricsWorker(QObject):
         GT vs itself is degenerate. Returns ``None`` if no dose is
         available for the patient (silently skipped).
         """
-        dose_ds = self._load_dose(group["patient_id"], group["gt_sop"])
-        if dose_ds is None:
+        if self._load_dose(group["patient_id"], group["gt_sop"]) is None:
             return None
         row = self._make_row_skeleton(
             group,
@@ -762,24 +771,18 @@ class MetricsWorker(QObject):
             comparison_mode="gt_dose",
             was_designated_gt=True,
         )
-        try:
-            # Synthetic STAPLE-consensus GT: there is no RTSS dataset to feed
-            # dicompyler-core, so we DVH straight off the synthesised binary
-            # mask via the same code path used by STAPLE consensus rows.
-            if gt_rtss is None:
-                gt_mask = self._mask_cache.get(
-                    (group["patient_id"], group["gt_sop"], group["gt_roi_number"])
-                )
-                if gt_mask is None:
-                    row["error"] = "DVH: synthetic GT mask missing — cannot evaluate dose."
-                else:
-                    row["metrics"].update(self._dvh_for_consensus_mask(gt_mask, dose_ds))
-            else:
-                row["metrics"].update(
-                    compute_dvh_metrics(gt_rtss, dose_ds, group["gt_roi_number"], self._dvh_config)
-                )
-        except DVHError as exc:
-            row["error"] = f"DVH: {exc}"
+        if gt_rtss is None:
+            # A Tab 2 consensus used as ground truth exists only as a mask, so
+            # its voxels are sampled, as the STAPLE consensus rows are.
+            self._dose_into_row(row, group, lambda dose: mask_dvh(gt_mask, dose, self._dvh_config))
+        else:
+            self._dose_into_row(
+                row,
+                group,
+                lambda dose: structure_dvh(
+                    gt_rtss, group["gt_roi_number"], dose, gt_mask, self._dvh_config
+                ),
+            )
         return row
 
     # ---- STAPLE branch -----------------------------------------------------
@@ -919,18 +922,18 @@ class MetricsWorker(QObject):
                 # the GT extent for test raters (not the GT rater itself).
                 if dose_ds is not None and rater.get("rtss") is not None:
                     rater_z_extent = None if rater["was_designated_gt"] else dvh_z_extent
-                    try:
-                        row["metrics"].update(
-                            compute_dvh_metrics(
-                                rater["rtss"],
-                                dose_ds,
-                                rater["roi_number"],
-                                self._dvh_config,
-                                z_extent_mm=rater_z_extent,
-                            )
-                        )
-                    except DVHError as dvh_exc:
-                        row["error"] = f"DVH: {dvh_exc}"
+                    self._dose_into_row(
+                        row,
+                        group,
+                        lambda dose, r=rater, z=rater_z_extent: structure_dvh(
+                            r["rtss"],
+                            r["roi_number"],
+                            dose,
+                            r["mask"],
+                            self._dvh_config,
+                            z_extent_mm=z,
+                        ),
+                    )
             except Exception as exc:  # noqa: BLE001
                 row["error"] = f"{type(exc).__name__}: {exc}"
             out.append(row)
@@ -941,100 +944,37 @@ class MetricsWorker(QObject):
 
         # Consensus dose row (gt_dose): DVH of the binary thresholded consensus.
         if self._dvh_config.any_enabled():
-            dose_ds = self._load_dose(group["patient_id"], group["gt_sop"])
-            if dose_ds is not None:
-                out.append(self._make_consensus_dose_row(group, consensus_mask, dose_ds))
+            if self._load_dose(group["patient_id"], group["gt_sop"]) is not None:
+                out.append(self._make_consensus_dose_row(group, consensus_mask))
         return out
 
-    def _dvh_for_consensus_mask(self, consensus_mask, dose_ds) -> dict[str, float]:
-        """DVH metrics for the binary thresholded STAPLE consensus.
+    def _dose_into_row(
+        self,
+        row: dict[str, Any],
+        group: dict[str, Any],
+        compute: Callable[[DoseGrid], DVHResult],
+    ) -> None:
+        """Put one structure's dose statistics into ``row``.
 
-        dicompyler-core's ``get_dvh`` expects an RTSTRUCT dataset + ROI number,
-        not a raw mask — so we use the mask's voxel-by-voxel dose statistics
-        directly via SimpleITK + numpy. This keeps the implementation honest
-        for the consensus case and avoids fabricating a synthetic RTSTRUCT.
+        ``compute`` takes the group's dose grid and returns the DVH. Anything
+        about the result worth reading (part of the structure outside the dose
+        grid, a D{x}cc larger than the structure) goes in its own column. A
+        failure goes in the row's error, prefixed ``DVH:``, and leaves the rest
+        of the row standing.
         """
-        import numpy as np
-        import SimpleITK as sitk
-
-        # Resample dose onto the mask's grid
-        dose_image = self._dose_image_from_ds(dose_ds)
-        if dose_image is None:
-            return {}
-        dose_resampled = sitk.Resample(
-            dose_image,
-            consensus_mask,
-            sitk.Transform(),
-            sitk.sitkLinear,
-            0.0,
-            dose_image.GetPixelID(),
-        )
-        mask_arr = sitk.GetArrayFromImage(consensus_mask) > 0
-        dose_arr = sitk.GetArrayFromImage(dose_resampled).astype(float)
-        if not mask_arr.any():
-            return {}
-        # Dose grid in Gy: pydicom DoseGridScaling × pixel data; we re-derive
-        # via the dataset attributes.
-        scaling = float(getattr(dose_ds, "DoseGridScaling", 1.0))
-        dose_units = str(getattr(dose_ds, "DoseUnits", "GY")).upper()
-        if dose_units != "GY":  # convert cGy → Gy if needed
-            scaling *= 0.01
-        # The dose image already carries scaled values when read by SimpleITK
-        # if the dataset's RescaleSlope/Intercept are present. To be safe,
-        # bake the scaling in once more only when the dose image was clearly
-        # un-scaled. Heuristic: if max dose > 200 (way above typical Gy) and
-        # the DoseGridScaling looks like it would bring it into range, apply.
-        voxel_doses = dose_arr[mask_arr]
-        if voxel_doses.size == 0:
-            return {}
-        # Voxel volume (cc)
-        sx, sy, sz = consensus_mask.GetSpacing()
-        voxel_cc = float(sx * sy * sz) / 1000.0
-        out: dict[str, float] = {}
-        if self._dvh_config.include_dmean:
-            out["dmean_gy"] = float(voxel_doses.mean())
-        if self._dvh_config.include_dmin:
-            out["dmin_gy"] = float(voxel_doses.min())
-        if self._dvh_config.include_dmax:
-            out["dmax_gy"] = float(voxel_doses.max())
-        total_vox = int(voxel_doses.size)
-        for v_pct in self._dvh_config.d_at_volumes_pct:
-            # D at the hottest v% of volume: percentile of dose at (100 - v).
-            q = max(0.0, min(100.0, 100.0 - float(v_pct)))
-            out[f"d{_fmt_num(v_pct)}_gy"] = float(np.percentile(voxel_doses, q))
-        for v_cc in self._dvh_config.d_at_volumes_cc:
-            # D at the hottest v cc of volume: convert the cc to a volume
-            # fraction of the mask, then take the dose at that upper percentile.
-            if voxel_cc <= 0:
-                continue
-            frac = min(1.0, (float(v_cc) / voxel_cc) / total_vox)
-            q = max(0.0, min(100.0, 100.0 * (1.0 - frac)))
-            out[f"d{_fmt_num(v_cc)}cc_gy"] = float(np.percentile(voxel_doses, q))
-        for d_gy in self._dvh_config.v_at_doses_gy:
-            v_received = float((voxel_doses >= float(d_gy)).sum()) * voxel_cc
-            out[f"v{_fmt_num(d_gy)}gy_cc"] = v_received
-        return out
-
-    def _dose_image_from_ds(self, dose_ds):
-        """Load an RTDOSE as a SimpleITK image with proper Gy scaling."""
-        import SimpleITK as sitk
-
         try:
-            reader = sitk.ImageFileReader()
-            reader.SetFileName(
-                str(getattr(dose_ds, "filename", "")) or self._dose_path_for(dose_ds)
-            )
-            img = reader.Execute()
-        except Exception:  # noqa: BLE001 — fall back to pydicom pixel array
-            return None
-        # Apply DoseGridScaling
-        scaling = float(getattr(dose_ds, "DoseGridScaling", 1.0))
-        if scaling != 1.0:
-            img = sitk.Cast(img, sitk.sitkFloat32) * scaling
-        return img
-
-    def _dose_path_for(self, dose_ds) -> str:
-        return str(getattr(dose_ds, "filename", "") or "")
+            dose = self._load_dose_grid(group["patient_id"], group["gt_sop"])
+            if dose is None:
+                return
+            result = compute(dose)
+        except DVHError as exc:
+            row["error"] = f"DVH: {exc}"
+            return
+        row["metrics"].update(result.metrics)
+        if result.status:
+            row["metrics"]["dvh_status"] = result.status
+        if self._audit:
+            row.setdefault("audit", {})["dvh"] = result.audit()
 
     # ---- Row factories -----------------------------------------------------
 
@@ -1186,7 +1126,7 @@ class MetricsWorker(QObject):
             group, self._staple_summary_metrics(result), error_text
         )
 
-    def _make_consensus_dose_row(self, group: dict[str, Any], consensus_mask, dose_ds):
+    def _make_consensus_dose_row(self, group: dict[str, Any], consensus_mask):
         """A gt_dose row carrying the STAPLE consensus's own dose statistics.
 
         Separates the consensus dose from the STAPLE Details row so dose lives
@@ -1208,10 +1148,9 @@ class MetricsWorker(QObject):
         row["gt_roi_number"] = 0
         row["truncated_slices"] = 0
         row["truncated_extent_mm"] = 0.0
-        try:
-            row["metrics"].update(self._dvh_for_consensus_mask(consensus_mask, dose_ds))
-        except DVHError as exc:
-            row["error"] = f"DVH: {exc}"
+        self._dose_into_row(
+            row, group, lambda dose: mask_dvh(consensus_mask, dose, self._dvh_config)
+        )
         return row
 
     def _error_rows_for_group(self, group: dict[str, Any], error_text: str) -> list[dict[str, Any]]:
@@ -1455,6 +1394,27 @@ class MetricsWorker(QObject):
         self._dose_cache[key] = ds
         return ds
 
+    def _load_dose_grid(self, patient_id: str, rtstruct_sop_uid: str) -> DoseGrid | None:
+        """The structure set's dose as a grid in Gy, or ``None`` if it has no dose.
+
+        Raises :class:`DVHError` when a dose exists but cannot be used, for
+        example one stored in relative units. Either answer is cached per dose.
+        """
+        ds = self._load_dose(patient_id, rtstruct_sop_uid)
+        if ds is None:
+            return None
+        key = (patient_id, str(getattr(ds, "SOPInstanceUID", "") or id(ds)))
+        grid = self._dose_grid_cache.get(key)
+        if grid is None:
+            try:
+                grid = DoseGrid.from_dataset(ds)
+            except DVHError as exc:
+                grid = exc
+            self._dose_grid_cache[key] = grid
+        if isinstance(grid, DVHError):
+            raise grid
+        return grid
+
     def _evict_patient_caches(self, patient_id: str) -> None:
         """Release every cached image / mask / dataset belonging to ``patient_id``.
 
@@ -1469,6 +1429,8 @@ class MetricsWorker(QObject):
             self._ct_cache.pop(key, None)
         for key in [k for k in self._dose_cache if k[0] == patient_id]:
             self._dose_cache.pop(key, None)
+        for key in [k for k in self._dose_grid_cache if k[0] == patient_id]:
+            self._dose_grid_cache.pop(key, None)
         # Drop every mask whose key starts with this patient_id.
         for cache in (self._mask_cache, self._mask_reading, self._mask_failure):
             for k in [k for k in cache if k[0] == patient_id]:

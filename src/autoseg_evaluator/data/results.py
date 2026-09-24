@@ -99,6 +99,9 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
     # DVH (static built-ins) — kept at the very right so all dose-related
     # columns cluster together and dynamic D{X}/V{X} columns naturally
     # follow without being separated from Dmin/Dmean/Dmax by other metrics.
+    # The status says when a structure reaches outside the dose grid, or a
+    # D{X}cc is larger than the structure; it is blank otherwise.
+    "dvh_status",
     "dmin_gy",
     "dmean_gy",
     "dmax_gy",
@@ -143,6 +146,7 @@ _METRIC_LABELS: dict[str, str] = {
     "com_dy_mm": "COM Δy (mm)",
     "com_dz_mm": "COM Δz (mm)",
     # DVH (static)
+    "dvh_status": "Dose status",
     "dmin_gy": "Dmin (Gy)",
     "dmean_gy": "Dmean (Gy)",
     "dmax_gy": "Dmax (Gy)",

@@ -37,19 +37,21 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ### Added
 - **DVH method validation** (`scripts/validate_dvh_methods.py`,
-  `docs/DVH_METHOD_VALIDATION.md`). It scores the current dicompyler-core path
-  and four alternatives against analytic truth:
+  `docs/DVH_METHOD_VALIDATION.md`). It scores the DVH this version ships, v2's
+  dicompyler-core DVH and the other alternatives considered against analytic
+  truth:
   - the Nelms et al. 2015 datasets, Tests 1–3, beside the paper's Pinnacle3 and
     PlanIQ results;
   - 576 disc phantoms with closed-form DVHs;
   - structures up to 6,220 cc, for timing.
 
-  It found three defects in the current path:
-  - D*x* reported as 0 Gy, on D99 in 49 of the 100 Nelms cases;
-  - dose sampled only at dose-grid points;
-  - supersampled dose misplaced by half a dose pixel on average.
-
-  Measurement only; the DVH method itself is unchanged.
+  Every method but v2's is the application's own `core.dvh`, so the report
+  measures the code that runs. It needs the new `validation` extra.
+- **A *Dose status* column.** It is blank unless something about a structure's
+  dose statistics needs saying: part of the structure lies outside the dose
+  grid (that part counts as 0 Gy, and the column gives its share of the
+  volume), or a requested D{X}cc is larger than the structure (the cell is left
+  empty rather than zero).
 - **Precision and recall** as 3D mask metrics, behind one *Precision + recall*
   checkbox (on by default). Precision is the share of the test's volume inside
   the ground truth and falls with over-segmentation; recall is the share of the
@@ -181,6 +183,34 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   which numbers the release moves.
 
 ### Changed
+- **DVHs are integrated over the contours themselves, not taken from
+  dicompyler-core.** ⚠️ **This moves every DVH number.**
+  - **How it works.** Each structure is read by the same rules as the geometric
+    metrics. Each contour stands for a slab one CT slice thick, divided into
+    sub-cells that each count for exactly the area of the region inside them.
+    The dose is interpolated trilinearly at each sub-cell's centroid, and the
+    samples accumulate into a histogram of 1 mGy bins.
+  - **Spacing.** Sub-cells are 0.25 mm for small organs. The spacing is the
+    finest of 0.25, 0.5 and 1 mm that keeps a structure within ten million
+    samples. A structure past that even at 1 mm, such as a body contour, is
+    sampled once per voxel, so no structure takes much more than a second.
+  - **Consensus structures.** A STAPLE or Tab 2 consensus has no contours. Its
+    voxels are sampled by the same rule, so a consensus comparison no longer
+    mixes two DVH methods.
+  - **Accuracy.** Against the analytic datasets of Nelms et al. 2015, 10 of 195
+    dose-volume parameters are more than 3 % off on their Test 2. v2's
+    dicompyler-core DVH had 140; PlanIQ, in the paper, had 18.
+  - **Defects this removes.** v2's DVH had three:
+    - it reported D99 and D95 as 0 Gy whenever the coldest 1 cGy bin held more
+      than 2 % or 10 % of the volume, which was D99 in 49 of the 100 Nelms
+      cases;
+    - it sampled the dose only at dose-grid points;
+    - its supersampling for very small structures misplaced the dose by half a
+      dose pixel on average.
+  - **Single-plane structures.** A structure drawn on one slice now counts as
+    one CT slice thick. v2 used the dose grid's slice spacing.
+  - **Dependencies.** dicompyler-core leaves the runtime dependencies, for the
+    `validation` extra.
 - **Session schema v4 → v5 → v6.** v5 adds `link_overrides`, recording the
   answers given in Review Data Links so a cohort whose links needed settling by
   hand does not need settling again on reload. v6 adds `organ_assignments`,
@@ -237,6 +267,11 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   is also 3.7x faster.
 
 ### Removed
+- **`scripts/validate_dvh_against_upstream.py` and `tests/test_dvh_equivalence.py`.**
+  Both checked that v2's DVH reported dicompyler-core's numbers unaltered; with
+  dicompyler-core gone from the application there is nothing left to check.
+  `docs/DVH_VALIDATION_REPORT.md` stays, marked historical. `tests/test_dvh.py`
+  replaces the tests, against answers known exactly.
 - **Mask-based Added Path Length (`apl_mean`, `apl_total`).** ⚠️ **v1 APL values
   are now historical, not reproducible by this version.** Added path length
   measures boundary that would have to be redrawn. That needs the edge as drawn,

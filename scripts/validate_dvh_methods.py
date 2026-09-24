@@ -1,10 +1,11 @@
 """Score candidate DVH methods against DVHs whose true values are known.
 
-Roadmap item #7. AutoSeg computes structure-set DVHs today with dicompyler-core,
-which samples each contour on the dose grid. The alternative is to compute them
-from the 3D masks the geometric metrics already use. This script scores every
-candidate against two sets of analytic ground truth and writes the tables the
-decision is made from.
+Roadmap item #7. Until v3.0.0 AutoSeg computed structure-set DVHs with
+dicompyler-core, which samples each contour on the dose grid. Since v3.0.0 it
+integrates the dose over the contours themselves (``core.dvh``). This script
+scores the method shipped, v2's, and every alternative considered against
+analytic ground truth, and writes the tables the choice was made from and the
+paper cites.
 
 Benchmarks
 ----------
@@ -30,10 +31,10 @@ Large structures (built here)
 
 Methods
 -------
-dicompyler     Production today (``core.dvh.compute_dvh_metrics``): dicompyler-core
-               tests each dose-grid point in each contour plane.
+dicompyler     v2's DVH, frozen here: dicompyler-core tests each dose-grid point
+               in each contour plane.
 dicompyler-ss  The same, supersampled in-plane to a quarter of the dose pixel on
-               every structure (production does this only as a zero-volume retry).
+               every structure (v2 did this only as a zero-volume retry).
 mask           The 3D mask the geometric metrics use (shared reading, half-open
                fill: ``core.masks.mask_with_reading``), with the dose interpolated
                trilinearly at each voxel centre.
@@ -42,6 +43,12 @@ mask-ss        The same voxels, with the dose integrated over each voxel by
 polygon        No voxels: the shared reading's regions themselves, weighted by the
                exact area they cover of every sub-cell, with the same dose
                sub-sampling. This is a DVH from the raw polygons.
+autoseg        What v3 ships (``core.dvh.structure_dvh``): polygon, with the
+               finest of 0.25, 0.5 and 1 mm that keeps a structure within ten
+               million samples.
+
+Every method but the dicompyler rows is ``core.dvh`` itself, with the spacing
+forced where the method names one.
 
 Usage::
 
@@ -76,23 +83,25 @@ import shapely
 import SimpleITK as sitk
 from pydicom.dataset import Dataset, FileDataset
 from pydicom.uid import ExplicitVRLittleEndian, RTDoseStorage, RTStructureSetStorage, generate_uid
-from scipy import ndimage, optimize
-from shapely.geometry.polygon import orient
+from scipy import optimize
 
 from autoseg_evaluator import __version__ as autoseg_version
 from autoseg_evaluator.core.dvh import (
+    SLIVER,
+    DoseGrid,
     DVHConfig,
+    DVHResult,
     _find_roi_contour,
-    _single_plane_thickness,
-    _statistic_value,
-    _supersample_resolution,
-    compute_dvh_metrics,
+    _index_to_world,
+    mask_dvh,
+    polygon_cells,
+    structure_dvh,
 )
 from autoseg_evaluator.core.masks import _fill_structure, mask_with_reading
 
 warnings.filterwarnings("ignore", module="pydicom")
 
-METHODS = ("dicompyler", "dicompyler-ss", "mask", "mask-ss", "polygon")
+METHODS = ("dicompyler", "dicompyler-ss", "mask", "mask-ss", "polygon", "autoseg")
 SAMPLED = ("mask-ss", "polygon")  # the methods that take a sub-sample spacing
 METRICS = ("volume_cc", "dmin", "dmax", "dmean", "d99", "d95", "d5", "d1", "d0.03cc")
 LABEL = {
@@ -117,71 +126,6 @@ CONFIG = DVHConfig(
     d_at_volumes_cc=[0.03],
     v_at_doses_gy=[],
 )
-PRODUCTION_KEY = {
-    "dmin_gy": "dmin",
-    "dmax_gy": "dmax",
-    "dmean_gy": "dmean",
-    "d99_gy": "d99",
-    "d95_gy": "d95",
-    "d5_gy": "d5",
-    "d1_gy": "d1",
-    "d0.03cc_gy": "d0.03cc",
-}
-CHUNK = 2_000_000  # points per interpolation call, to bound memory
-BIN_GY = 0.001  # dose histogram bin of the sampled methods
-# A sub-cell covered by less than this share is floating-point residue from an
-# edge lying along a grid line, and is dropped.
-SLIVER = 1e-9
-
-
-# --------------------------------------------------------------------------
-# Dose
-# --------------------------------------------------------------------------
-
-
-@dataclass
-class DoseGrid:
-    """An RT Dose grid in Gy, sampled by trilinear interpolation."""
-
-    values: np.ndarray  # (frames, rows, columns)
-    origin_xy: np.ndarray  # x, y of the first voxel centre, mm
-    spacing_xy: np.ndarray  # column spacing (x), row spacing (y), mm
-    frame_z: np.ndarray  # z of each frame, increasing, mm
-
-    @classmethod
-    def from_dataset(cls, ds: Dataset) -> DoseGrid:
-        if not np.allclose(np.asarray(ds.ImageOrientationPatient, float), [1, 0, 0, 0, 1, 0]):
-            raise ValueError("only axial, unrotated dose grids are handled here")
-        values = ds.pixel_array.astype(np.float64) * float(ds.DoseGridScaling)
-        if values.ndim == 2:
-            values = values[None]
-        position = np.asarray(ds.ImagePositionPatient, float)
-        frame_z = position[2] + np.asarray(ds.GridFrameOffsetVector, float)
-        if frame_z[0] > frame_z[-1]:
-            values, frame_z = values[::-1], frame_z[::-1]
-        spacing = np.asarray(ds.PixelSpacing, float)
-        return cls(
-            np.ascontiguousarray(values),
-            position[:2],
-            np.array([spacing[1], spacing[0]]),
-            np.ascontiguousarray(frame_z),
-        )
-
-    def sample(self, points: np.ndarray) -> np.ndarray:
-        """Dose at each ``(x, y, z)`` point; NaN outside the grid."""
-        out = np.empty(len(points))
-        frames = np.arange(len(self.frame_z), dtype=np.float64)
-        for start in range(0, len(points), CHUNK):
-            p = points[start : start + CHUNK]
-            column = (p[:, 0] - self.origin_xy[0]) / self.spacing_xy[0]
-            row = (p[:, 1] - self.origin_xy[1]) / self.spacing_xy[1]
-            frame = np.interp(p[:, 2], self.frame_z, frames, left=-1.0, right=len(frames))
-            out[start : start + len(p)] = ndimage.map_coordinates(
-                self.values, [frame, row, column], order=1, mode="constant", cval=np.nan
-            )
-        return out
-
-
 # --------------------------------------------------------------------------
 # One structure against one dose, and what a method returns
 # --------------------------------------------------------------------------
@@ -193,7 +137,7 @@ class Case:
     roi: int
     dose_ds: Dataset
     dose: DoseGrid
-    ct: sitk.Image  # geometry only: masks read nothing else from it
+    ct: sitk.Image  # geometry only: masks and contours read nothing else from it
 
 
 @dataclass
@@ -202,7 +146,7 @@ class Result:
     volume_at: Callable[[np.ndarray], np.ndarray]  # cumulative DVH, cc at >= dose
     seconds: float = 0.0  # one structure against one dose, from nothing
     samples: int = 0
-    outside: int = 0  # samples that fell outside the dose grid
+    outside: int = 0  # 1 when part of the structure lay outside the dose grid
     error: str = ""
     # dicompyler only: its own histogram read with the lookup the other methods use
     corrected: dict[str, float] | None = None
@@ -218,7 +162,8 @@ def weighted_result(dose_gy: np.ndarray, volume_cc: np.ndarray) -> Result:
     """DVH statistics of dose samples, each standing for a volume.
 
     ``D{x}`` is the lowest dose the hottest x of the volume receives: walk the
-    samples from the hottest down and stop where their volume reaches x.
+    samples from the hottest down and stop where their volume reaches x. The
+    same reading as :meth:`~autoseg_evaluator.core.dvh.DoseHistogram.dose_at`.
     """
     order = np.argsort(dose_gy, kind="stable")[::-1]
     dose = dose_gy[order]
@@ -249,13 +194,58 @@ def weighted_result(dose_gy: np.ndarray, volume_cc: np.ndarray) -> Result:
     return Result(metrics, volume_at, samples=int(dose.size))
 
 
-# --------------------------------------------------------------------------
-# The methods
-# --------------------------------------------------------------------------
+# ---- v2's DVH, frozen ----------------------------------------------------
+# Until v3.0.0 AutoSeg called dicompyler-core like this (``core/dvh.py`` at
+# acced87, where every case below was checked equal to its
+# ``compute_dvh_metrics``). Kept here, not in the application, so the report
+# can go on scoring what v2 reported.
+
+
+def _statistic_value(dvh, expression: str) -> float:
+    try:
+        stat = dvh.statistic(expression)
+    except Exception:  # noqa: BLE001 — dvh.statistic raises various ValueError subclasses
+        return math.nan
+    try:
+        return float(getattr(stat, "value", stat))
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def _contour_plane_count(rtss: Dataset, roi: int) -> int | None:
+    for item in getattr(rtss, "ROIContourSequence", []) or []:
+        if int(getattr(item, "ReferencedROINumber", -1)) != int(roi):
+            continue
+        heights = {
+            round(float(c.ContourData[2]), 2)
+            for c in getattr(item, "ContourSequence", []) or []
+            if getattr(c, "ContourData", None) and len(c.ContourData) >= 3
+        }
+        return len(heights)
+    return None
+
+
+def _single_plane_thickness(rtss: Dataset, dose_ds: Dataset, roi: int) -> float | None:
+    """v2 gave a one-plane structure the dose grid's slice spacing as its thickness."""
+    planes = _contour_plane_count(rtss, roi)
+    if planes is None or planes >= 2:
+        return None
+    offsets = getattr(dose_ds, "GridFrameOffsetVector", None)
+    if offsets is None or len(offsets) < 2:
+        return None
+    spacing = abs(float(offsets[1]) - float(offsets[0]))
+    return spacing if spacing > 0 else None
+
+
+def _supersample_resolution(dose_ds: Dataset, factor: int = 4) -> tuple[float, float] | None:
+    spacing = getattr(dose_ds, "PixelSpacing", None)
+    if not spacing or len(spacing) < 2:
+        return None
+    return float(spacing[0]) / factor, float(spacing[1]) / factor
 
 
 def dicompyler_result(case: Case, *, supersample: bool) -> Result:
-    """dicompyler-core, as production calls it or supersampled in-plane."""
+    """dicompyler-core, as v2 called it, or supersampled in-plane throughout."""
     from dicompylercore import dvhcalc
 
     kwargs = {
@@ -266,7 +256,7 @@ def dicompyler_result(case: Case, *, supersample: bool) -> Result:
         kwargs["interpolation_resolution"] = _supersample_resolution(case.dose_ds)
     dvh = dvhcalc.get_dvh(case.rtss, case.dose_ds, case.roi, **kwargs)
     if not supersample and not dvh.volume:
-        # Production retries a structure that missed every dose-grid point.
+        # v2 retried a structure that missed every dose-grid point.
         dvh = dvhcalc.get_dvh(
             case.rtss,
             case.dose_ds,
@@ -285,17 +275,6 @@ def dicompyler_result(case: Case, *, supersample: bool) -> Result:
     for x in (99, 95, 5, 1):
         metrics[f"d{x}"] = _statistic_value(dvh, f"D{x}")
     metrics["d0.03cc"] = _statistic_value(dvh, "D0.03cc")
-    if not supersample:
-        # This is meant to be production's number, not a re-implementation of it.
-        production = compute_dvh_metrics(case.rtss, case.dose_ds, case.roi, CONFIG)
-        differ = [
-            name
-            for key, name in PRODUCTION_KEY.items()
-            if not math.isclose(production[key], metrics[name], rel_tol=1e-12, abs_tol=1e-12)
-            and not (math.isnan(production[key]) and math.isnan(metrics[name]))
-        ]
-        if differ:
-            raise AssertionError(f"differs from compute_dvh_metrics on {differ}")
     counts = np.asarray(dvh.cumulative.counts, float)
     width = float(dvh.bins[1] - dvh.bins[0])
 
@@ -314,236 +293,51 @@ def dicompyler_result(case: Case, *, supersample: bool) -> Result:
     return Result(metrics, volume_at, corrected=corrected)
 
 
-def odd_factor(spacing_mm: float, target_mm: float | None) -> int:
-    """Sub-samples per voxel edge: the fewest reaching ``target_mm``, and odd.
-
-    Odd, so one sub-sample sits on the voxel centre, where the unsampled
-    methods put their only one (PlanIQ supersamples by odd factors too).
-    """
-    if not target_mm:
-        return 1
-    k = max(1, math.ceil(spacing_mm / target_mm - 1e-9))
-    return k if k % 2 else k + 1
+# ---- The application's own engine ----------------------------------------
 
 
-def sub_offsets(factors: list[int]) -> np.ndarray:
-    """Sub-sample positions inside one voxel, ``(m, 3)`` in voxel units."""
-    axes = [(np.arange(k) + 0.5) / k - 0.5 for k in factors]
-    gx, gy, gz = np.meshgrid(*axes, indexing="ij")
-    return np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
-
-
-def index_to_world(image: sitk.Image, index: np.ndarray) -> np.ndarray:
-    origin = np.asarray(image.GetOrigin(), float)
-    spacing = np.asarray(image.GetSpacing(), float)
-    direction = np.asarray(image.GetDirection(), float).reshape(3, 3)
-    return origin + (index * spacing) @ direction.T
-
-
-class DoseHistogram:
-    """A differential DVH built up sample by sample, in bins of ``BIN_GY``.
-
-    Memory stays at one array of bins however many samples a structure takes,
-    so a large structure can be sampled finely a slice at a time. Dmin, Dmax
-    and Dmean are kept exactly; D{x} is read to the centre of its bin, within
-    half a bin (0.5 mGy) of the sample it stands for.
-    """
-
-    def __init__(self) -> None:
-        self.volume = np.zeros(1 << 16)
-        self.total = 0.0
-        self.dose_volume = 0.0
-        self.low = math.inf
-        self.high = -math.inf
-        self.samples = 0
-        self.outside = 0
-
-    def add(self, dose: np.ndarray, volume_cc: np.ndarray) -> None:
-        inside = np.isfinite(dose)
-        self.samples += int(dose.size)
-        self.outside += int(dose.size - inside.sum())
-        dose, volume_cc = dose[inside], volume_cc[inside]
-        if not dose.size:
-            return
-        index = np.maximum(np.floor(dose / BIN_GY), 0).astype(np.int64)
-        top = int(index.max()) + 1
-        if top > self.volume.size:
-            grown = np.zeros(max(top, 2 * self.volume.size))
-            grown[: self.volume.size] = self.volume
-            self.volume = grown
-        self.volume[:top] += np.bincount(index, weights=volume_cc, minlength=top)
-        self.total += float(volume_cc.sum())
-        self.dose_volume += float(np.dot(dose, volume_cc))
-        self.low = min(self.low, float(dose.min()))
-        self.high = max(self.high, float(dose.max()))
-
-    def result(self) -> Result:
-        if self.total <= 0:
-            raise ValueError("no sample lies inside the dose grid")
-        filled = np.nonzero(self.volume)[0]
-        result = weighted_result((filled + 0.5) * BIN_GY, self.volume[filled])
-        result.metrics.update(
-            volume_cc=self.total,
-            dmin=self.low,
-            dmax=self.high,
-            dmean=self.dose_volume / self.total,
-        )
-        result.samples, result.outside = self.samples, self.outside
-        return result
-
-
-def mask_dvh(case: Case, subsample_mm: float | None) -> Result:
-    """The production mask's voxels, each split into sub-samples if asked.
-
-    Streamed a slice at a time into a :class:`DoseHistogram`.
-    """
-    image, _notes = mask_with_reading(case.ct, case.rtss, case.roi)
-    mask = sitk.GetArrayViewFromImage(image)
-    spacing = np.asarray(case.ct.GetSpacing(), float)
-    offsets = sub_offsets([odd_factor(s, subsample_mm) for s in spacing])
-    weight = float(np.prod(spacing)) / 1000.0 / len(offsets)
-    per_chunk = max(1, CHUNK // len(offsets))
-    histogram = DoseHistogram()
-    for z in np.nonzero(mask.any(axis=(1, 2)))[0]:
-        y, x = np.nonzero(mask[z])
-        centres = np.stack([x, y, np.full(x.size, z)], axis=1).astype(np.float64)
-        for start in range(0, len(centres), per_chunk):
-            points = (centres[start : start + per_chunk, None, :] + offsets[None]).reshape(-1, 3)
-            dose = case.dose.sample(index_to_world(case.ct, points))
-            histogram.add(dose, np.full(len(points), weight))
-    return histogram.result()
-
-
-def _oriented_rings(region) -> list[np.ndarray]:
-    """Every ring of a region, outer boundaries anticlockwise and holes clockwise."""
-    rings = []
-    for part in getattr(region, "geoms", [region]):
-        part = orient(part, sign=1.0)
-        rings.append(np.asarray(part.exterior.coords))
-        rings.extend(np.asarray(hole.coords) for hole in part.interiors)
-    return rings
-
-
-def edge_pieces(rings: list[np.ndarray]) -> tuple[np.ndarray, ...]:
-    """The rings' edges cut at every unit grid line: ``(xa, ya, xb, yb)`` per piece.
-
-    Each piece then lies within one cell ``[i, i+1] x [j, j+1]``.
-    """
-    x0 = np.concatenate([r[:-1, 0] for r in rings])
-    y0 = np.concatenate([r[:-1, 1] for r in rings])
-    x1 = np.concatenate([r[1:, 0] for r in rings])
-    y1 = np.concatenate([r[1:, 1] for r in rings])
-    n = x0.size
-
-    def cuts(a0: np.ndarray, a1: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        lo = np.floor(np.minimum(a0, a1)) + 1  # grid lines strictly inside the edge
-        hi = np.ceil(np.maximum(a0, a1)) - 1
-        count = np.maximum(hi - lo + 1, 0).astype(np.int64)
-        edge = np.repeat(np.arange(n), count)
-        line = lo[edge] + (np.arange(int(count.sum())) - np.repeat(np.cumsum(count) - count, count))
-        return edge, (line - a0[edge]) / (a1[edge] - a0[edge])
-
-    ex, tx = cuts(x0, x1)
-    ey, ty = cuts(y0, y1)
-    edge = np.concatenate([np.arange(n), np.arange(n), ex, ey])
-    t = np.concatenate([np.zeros(n), np.ones(n), tx, ty])
-    order = np.lexsort((t, edge))
-    edge, t = edge[order], t[order]
-    same = edge[1:] == edge[:-1]
-    e, ta, tb = edge[1:][same], t[:-1][same], t[1:][same]
-    dx, dy = x1[e] - x0[e], y1[e] - y0[e]
-    return x0[e] + ta * dx, y0[e] + ta * dy, x0[e] + tb * dx, y0[e] + tb * dy
-
-
-def polygon_cells(region, fx: int, fy: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The sub-cells a region covers: where to sample each (voxel units), and its share.
-
-    Sub-cells are ``1/fx`` by ``1/fy`` of a voxel, aligned to the voxel edges.
-    Each is weighted by the exact area of the region inside it and sampled at
-    the centroid of that area, found without clipping by the signed-area
-    accumulation fonts are rasterised with. The outline is cut at every grid
-    line; a piece adds the signed area between itself and its cell's right side,
-    and its full height to every cell to its right in the same row, so a running
-    sum along each row gives every cell its covered area. The same sums of
-    first moments give the centroids. Outer boundaries run anticlockwise and
-    holes clockwise, so a hole subtracts. The work grows with the outline's
-    length, not the region's area.
-    """
-    minx, miny, maxx, maxy = region.bounds
-    ix0, iy0 = math.floor((minx + 0.5) * fx), math.floor((miny + 0.5) * fy)
-    nx = math.ceil((maxx + 0.5) * fx) - ix0
-    ny = math.ceil((maxy + 0.5) * fy) - iy0
-    scale, shift = np.array([fx, fy], float), np.array([ix0, iy0], float)
-    unit = shapely.transform(region, lambda c: (c + 0.5) * scale - shift)  # cell i: [i, i+1]
-    xa, ya, xb, yb = edge_pieces(_oriented_rings(unit))
-    i = np.clip(np.floor(0.5 * (xa + xb)).astype(np.int64), 0, nx - 1)
-    j = np.clip(np.floor(0.5 * (ya + yb)).astype(np.int64), 0, ny - 1)
-    # Each piece relative to its own cell's corner, so every term is of order one
-    # and a sliver's centroid does not drown in cancellation.
-    xa, xb, ya, yb = xa - i, xb - i, ya - j, yb - j
-    dy = yb - ya
-    band_y = 0.5 * (yb * yb - ya * ya)  # first moment in y of the piece's horizontal band
-    # Within the piece's own cell: the part between the piece and the cell's right side.
-    own_area = dy * (1.0 - 0.5 * (xa + xb))
-    own_x = 0.5 * dy * (1.0 - (xa * xa + xa * xb + xb * xb) / 3.0)
-    own_y = band_y - dy * (2 * ya * xa + ya * xb + yb * xa + 2 * yb * xb) / 6.0
-    grids = np.zeros((5, ny, nx))
-    for k, values in enumerate((own_area, own_x, own_y, dy, band_y)):
-        np.add.at(grids[k], (j, i), values)
-    own_area, own_x, own_y, height, height_y = grids
-    # Every cell to the right in the row gets the piece's whole band.
-    height = np.cumsum(height, axis=1) - height
-    height_y = np.cumsum(height_y, axis=1) - height_y
-    area = -(own_area + height)
-    moment_x = -(own_x + 0.5 * height)
-    moment_y = -(own_y + height_y)
-    covered = area > SLIVER
-    share = area[covered]
-    row, column = np.nonzero(covered)
-    x = (column + moment_x[covered] / share + ix0) / fx - 0.5
-    y = (row + moment_y[covered] / share + iy0) / fy - 0.5
-    return x, y, np.minimum(share, 1.0)
-
-
-def polygon_dvh(case: Case, subsample_mm: float | None) -> Result:
-    """The shared reading's regions, weighted by the exact area of each sub-cell.
-
-    Through-plane each region fills its slice (the slab every method assumes)
-    and is sampled at the same sub-slab positions as ``mask-ss``. Streamed a
-    slice at a time into a :class:`DoseHistogram`.
-    """
-    item = _find_roi_contour(case.rtss, case.roi)
-    _volume, reading = _fill_structure(case.ct, item)
-    spacing = np.asarray(case.ct.GetSpacing(), float)
-    fx, fy, fz = (odd_factor(s, subsample_mm) for s in spacing)
-    z_offsets = (np.arange(fz) + 0.5) / fz - 0.5
-    cell_cc = float(np.prod(spacing)) / (fx * fy * fz) / 1000.0
-    histogram = DoseHistogram()
-    for z_index, region in reading.regions.items():
-        if region.is_empty:
-            continue
-        x, y, coverage = polygon_cells(region, fx, fy)
-        for start in range(0, x.size, CHUNK):
-            xs, ys = x[start : start + CHUNK], y[start : start + CHUNK]
-            weight = coverage[start : start + CHUNK] * cell_cc
-            for dz in z_offsets:
-                points = np.stack([xs, ys, np.full(xs.size, z_index + dz)], axis=1)
-                histogram.add(case.dose.sample(index_to_world(case.ct, points)), weight)
-    return histogram.result()
+def engine_result(dvh: DVHResult) -> Result:
+    """The report's statistics, read from the histogram the application built."""
+    histogram = dvh.histogram
+    total = histogram.total_cc
+    metrics = {
+        "volume_cc": total,
+        "dmin": histogram.low,
+        "dmax": histogram.high,
+        "dmean": histogram.dose_volume / total,
+    }
+    for x in (99, 95, 5, 1):
+        metrics[f"d{x}"] = histogram.dose_at(total * x / 100)
+    metrics["d0.03cc"] = histogram.dose_at(0.03)
+    return Result(
+        metrics,
+        histogram.volume_at,
+        samples=histogram.samples,
+        outside=int(histogram.outside_cc > 0),
+    )
 
 
 def run_method(method: str, case: Case, subsample_mm: float | None = None) -> Result:
-    """One method on one structure and dose, timed from nothing; a failure is a result."""
+    """One method on one structure and dose, timed from nothing; a failure is a result.
+
+    Everything but the dicompyler rows is ``core.dvh`` itself: ``autoseg``
+    exactly as the application runs it, the others with the spacing forced.
+    """
     start = time.perf_counter()
     try:
         if method in ("dicompyler", "dicompyler-ss"):
             result = dicompyler_result(case, supersample=method == "dicompyler-ss")
-        elif method == "mask":
-            result = mask_dvh(case, None)
-        elif method == "mask-ss":
-            result = mask_dvh(case, subsample_mm)
+        elif method in ("mask", "mask-ss"):
+            mask, _notes = mask_with_reading(case.ct, case.rtss, case.roi)
+            spacing = math.inf if method == "mask" else subsample_mm  # inf: voxel centres only
+            result = engine_result(mask_dvh(mask, case.dose, CONFIG, spacing_mm=spacing))
         elif method == "polygon":
-            result = polygon_dvh(case, subsample_mm)
+            dvh = structure_dvh(
+                case.rtss, case.roi, case.dose, case.ct, CONFIG, spacing_mm=subsample_mm
+            )
+            result = engine_result(dvh)
+        elif method == "autoseg":
+            result = engine_result(structure_dvh(case.rtss, case.roi, case.dose, case.ct, CONFIG))
         else:
             raise ValueError(f"unknown method {method}")
     except Exception as exc:  # noqa: BLE001 — a failure is a result to report
@@ -1178,7 +972,7 @@ LARGE_RETIME_S = 5.0  # a run faster than this is timed twice and the faster kep
 
 
 def large_variants() -> list[tuple[str, float | None]]:
-    return [("dicompyler", None), ("mask", None)] + [
+    return [("dicompyler", None), ("autoseg", None), ("mask", None)] + [
         (m, s) for m in SAMPLED for s in LARGE_SPACINGS
     ]
 
@@ -1334,7 +1128,7 @@ def check_polygon_cells(root: Path | None, seed: int) -> str:
 
 
 def check_sampler(root: Path | None) -> str:
-    """Our trilinear sampling against SimpleITK's, which production uses today."""
+    """The application's trilinear sampling against SimpleITK's, which v2's consensus used."""
     if root is None:
         return "not run (no Nelms data)"
     rtss = pydicom.dcmread(str(nelms_structure_path(root, "Sphere_10_0")))
@@ -1343,14 +1137,15 @@ def check_sampler(root: Path | None) -> str:
     grid = DoseGrid.from_dataset(dose_ds)
     mask, _notes = mask_with_reading(ct, rtss, closed_roi(rtss))
     image = sitk.GetImageFromArray(grid.values)
-    image.SetOrigin((*grid.origin_xy, grid.frame_z[0]))
-    image.SetSpacing((*grid.spacing_xy, float(grid.frame_z[1] - grid.frame_z[0])))
+    image.SetOrigin(tuple(grid.origin))
+    frame = float(grid.frame_offsets[1] - grid.frame_offsets[0])
+    image.SetSpacing((grid.pixel_spacing[1], grid.pixel_spacing[0], frame))
     resampled = sitk.GetArrayFromImage(
         sitk.Resample(image, mask, sitk.Transform(), sitk.sitkLinear, 0.0, sitk.sitkFloat64)
     )
     inside = sitk.GetArrayViewFromImage(mask) > 0
     z, y, x = np.nonzero(inside)
-    ours = grid.sample(index_to_world(mask, np.stack([x, y, z], axis=1).astype(float)))
+    ours = grid.sample(_index_to_world(mask, np.stack([x, y, z], axis=1).astype(float)))
     return f"{float(np.max(np.abs(ours - resampled[inside]))):.1e} Gy"
 
 
@@ -1782,6 +1577,7 @@ def lookup_section(nelms: list[dict], discs: list[dict]) -> list[str]:
         "dicompyler-ss (lookup corrected)",
         "mask-ss",
         "polygon",
+        "autoseg",
     ]
     rows = []
     subset = ("volume_cc", *CLINICAL)
@@ -1888,10 +1684,11 @@ def write_report(
         "`python scripts/validate_dvh_methods.py --nelms <folder> --out "
         "docs/DVH_METHOD_VALIDATION.md`.",
         "",
-        "Roadmap item #7: should structure-set DVHs keep coming from dicompyler-core, or "
-        "come from the same contour reading as the geometric metrics? Every candidate "
-        "is scored here against DVHs whose true values are known exactly. This report "
-        "records the measurements; the decision is recorded separately.",
+        "Roadmap item #7. Until v3.0.0 AutoSeg took structure-set DVHs from "
+        "dicompyler-core; since v3.0.0 it integrates the dose over the contours "
+        "themselves (**autoseg** below). That method, v2's, and every alternative "
+        "considered are scored here against DVHs whose true values are known exactly. "
+        "The decision and its reasons are recorded in `docs/V3_RELEASE_STATUS.md`.",
         "",
         "## Methods",
         "",
@@ -1900,7 +1697,7 @@ def write_report(
         ["Method", "Contours read by", "Dose sampled at", "Each sample stands for"],
         [
             [
-                "dicompyler",
+                "dicompyler (v2)",
                 "dicompyler-core: every loop tested, loops combined by exclusive-or",
                 "each dose-grid point in each contour plane; the dose interpolated "
                 "between dose planes only",
@@ -1931,6 +1728,13 @@ def write_report(
                 "centroid of the part covered",
                 "the exact area of the region in its sub-cell × its share of the slice",
             ],
+            [
+                "**autoseg** (v3)",
+                "as polygon",
+                "as polygon, at the finest of 0.25, 0.5 and 1 mm that keeps the structure "
+                "within 10 million samples",
+                "as polygon",
+            ],
         ],
         align="llll",
     )
@@ -1945,9 +1749,10 @@ def write_report(
         "is read to the bin's centre. Polygon finds each sub-cell's covered area and its "
         "centroid exactly, without clipping, by the signed-area accumulation fonts are "
         "rasterised with, so its extra work grows with a structure's outline rather than "
-        "its area. The dicompyler rows are "
-        "production's numbers: each case is checked against "
-        "`core.dvh.compute_dvh_metrics`.",
+        "its area. Every method except the dicompyler rows is the application's own "
+        "`core.dvh`, with the spacing forced where the method names one. The dicompyler "
+        "rows reproduce v2's calls, frozen in this script; every case was checked equal "
+        "to v2's `compute_dvh_metrics` before v3 replaced it (commit `acced87`).",
         "",
         "## Nelms et al. 2015",
         "",
@@ -1990,14 +1795,18 @@ def write_report(
         f"- Closed-form disc truth against brute-force integration over the written "
         f"polygons (96-point Gauss-Legendre through each slab, exact polygon clipping), "
         f"largest difference as a share of the structure's volume: {checks['truth']}.",
-        f"- Trilinear dose sampling here against SimpleITK's resampling, which the "
-        f"consensus DVH uses today, at every voxel of a Nelms sphere: largest difference "
-        f"{checks['sampler']}.",
+        f"- The application's trilinear dose sampling against SimpleITK's resampling, "
+        f"which v2's consensus DVH used, at every voxel of a Nelms sphere: largest "
+        f"difference {checks['sampler']}.",
         "- Polygon's sub-cell coverage and centroids, found by accumulation, against "
         f"clipping every sub-cell with shapely (Nelms and disc outlines, 1-5 sub-cells "
         f"per voxel edge): {checks['cells']}.",
-        "- The dicompyler rows equal `compute_dvh_metrics` on every case (checked per case; "
-        "a mismatch would appear under Failures).",
+        "- The dicompyler rows are v2's calls, frozen in this script. Every case was "
+        "checked equal to v2's `compute_dvh_metrics` before v3 replaced it (commit "
+        "`acced87`), and the frozen copy reproduces that run exactly on all 100 Nelms "
+        "rows.",
+        "- Timings are single-threaded and comparable only within one run: regenerate "
+        "the report on an otherwise idle machine before quoting them.",
         "",
         "## Environment",
         "",

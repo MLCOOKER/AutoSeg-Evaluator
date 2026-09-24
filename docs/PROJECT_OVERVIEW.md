@@ -109,7 +109,7 @@ for what each moves):
 | qt-material | latest | BSD-2 | Theming (light + custom dark palette) |
 | SimpleITK | latest | Apache-2.0 | Image I/O, STAPLE filter, resampling |
 | pydicom | latest | MIT | DICOM dataset parsing |
-| dicompyler-core | 0.5.6 | BSD-3 | DVH calculation (`dvhcalc.get_dvh`) |
+| dicompyler-core | 0.5.6 | BSD-3 | v2's DVH, now scored only by the DVH benchmark (`validation` extra) |
 | numpy | latest | BSD-3 | Array math |
 | scipy | latest | BSD-3 | Distance transforms, filters |
 | scikit-image | latest | BSD-3 | `legacy` rasteriser fill; contour tracing in the viewer |
@@ -126,9 +126,10 @@ for what each moves):
   + GPL).
 - SimpleITK over raw ITK for the higher-level Pythonic API + bundled
   STAPLEImageFilter.
-- dicompyler-core (rather than a hand-rolled DVH calculator) for
-  conformance with the RTOG DVH convention and to avoid re-implementing
-  dose-grid → mask resampling.
+- The DVH is integrated over the contours by AutoSeg itself (v3) rather than
+  taken from dicompyler-core (v2): measured against analytic truth,
+  dicompyler-core's sampling and D{X} lookup were the largest DVH errors
+  (`docs/DVH_METHOD_VALIDATION.md`).
 
 ---
 
@@ -149,7 +150,7 @@ autoseg-evaluator/
 │   │   ├── contour_grid.py          # Image series → frame for the 2D metrics
 │   │   ├── polygon_metrics.py       # 2D contour metrics: placement, engines, results
 │   │   ├── staple.py                # STAPLE wrapper + adaptive bbox
-│   │   ├── dvh.py                   # dicompyler-core wrapper
+│   │   ├── dvh.py                   # DVH integrated over the contours (or a consensus mask)
 │   │   ├── dose.py                  # Dose resampled onto the CT (viewer overlay)
 │   │   ├── organ_groups.py          # Canonical organ key: base / laterality / qualifier
 │   │   ├── statistics.py            # Wilcoxon, Hodges–Lehmann, rank-biserial, sign test
@@ -209,7 +210,7 @@ autoseg-evaluator/
 │   ├── validate_polygon_metrics.py      # 2D metrics vs published values
 │   ├── validate_contour_reading.py      # Shared reading vs what it replaced, on a cohort
 │   ├── validate_staple_against_upstream.py
-│   ├── validate_dvh_against_upstream.py
+│   ├── validate_dvh_methods.py          # DVH vs Nelms et al. 2015 + analytic phantoms
 │   ├── compare_rasterisers.py
 │   ├── make_register_tables.py          # Worked examples for the statistics register
 │   ├── build_portable.py
@@ -982,57 +983,56 @@ Commit `7b6cec1` is the last that computes it.
 
 ## Dose-volume histogram (DVH)
 
-**File:** [`src/autoseg_evaluator/core/dvh.py`](../src/autoseg_evaluator/core/dvh.py)
+**File:** [`src/autoseg_evaluator/core/dvh.py`](../src/autoseg_evaluator/core/dvh.py).
+**Validated in** [`DVH_METHOD_VALIDATION.md`](DVH_METHOD_VALIDATION.md)
+(`scripts/validate_dvh_methods.py`).
 
-Thin wrapper around `dicompylercore.dvhcalc.get_dvh`. The wrapper:
+Since v3.0.0 the dose is integrated over the contours themselves; until then
+it came from dicompyler-core (see *Why it changed* below).
 
-- Accepts a `DVHConfig` dataclass (`include_dmin / include_dmean /
-  include_dmax / d_at_volumes_pct / d_at_volumes_cc / v_at_doses_gy`).
-  *(d_at_volumes_cc added in v2.2.)*
-- Outputs keys in canonical order: `dmin_gy, dmean_gy, dmax_gy, d{X}_gy
-  (for each X in d_at_volumes_pct), d{X}cc_gy (for each X in
-  d_at_volumes_cc), v{X}gy_cc (for each X in v_at_doses_gy)`.
-- Raises a clean `DVHError` (rather than letting `dicompylercore`'s
-  internal exceptions bubble) so the worker can write a `DVH: …` error
-  row instead of crashing the batch.
+**Method** (`structure_dvh`):
 
-**dicompylercore 0.5.6 syntax quirks** (already handled):
-- `dvh.statistic()` rejects `"D{X}%"` as an attribute name. The bare
-  `"D{X}"` form is interpreted as a relative-volume percentage and
-  returns dose in Gy.
-- `"D{X}cc"` returns dose to the hottest X cc — useful for small OARs
-  (cord, brainstem, chiasm) where a fixed % is noisy. Typical clinical
-  hotspot constraints: D0.1cc, D1cc, D2cc.
-- `"V{X}Gy"` still requires the unit suffix; the alternatives
-  `V{X}cc` / `V{X}%` mean different things in dicompyler-core.
+- The structure's loops are read by `core.masks.read_structure`, the reading
+  both geometric streams use, into one region per CT slice. Only the CT's
+  geometry is read, so a mask made on the CT serves as the reference after the
+  CT volume itself has been released.
+- Each region stands for a slab one slice thick. The slab is divided into
+  sub-cells aligned to the CT voxels, at the finest of 0.25, 0.5 and 1 mm
+  (`SPACINGS_MM`) that keeps the structure within ten million samples
+  (`MAX_SAMPLES`), rounded to an odd number per voxel edge so one sits on the
+  voxel centre. Small organs get 0.25 mm; only large targets get coarser. A
+  structure past the cap even at 1 mm (a body contour: on a 1.37 mm CT, "1 mm"
+  is still 27 samples a voxel) is sampled once per voxel (`VOXEL_CENTRES`).
+- Each sub-cell is weighted by the exact area of the region inside it and
+  sampled at that area's centroid. Both come from signed-area accumulation
+  along each row (`polygon_cells`), with no clipping, so the extra work grows
+  with the outline and the dose look-ups dominate the cost: about 0.4 s for a
+  33 cc sphere, 0.8 s at 268 cc and 1.2 s for a 6,220 cc cylinder,
+  single-threaded (the report's large-structure table).
+- The dose (`DoseGrid`: any patient orientation; Gy, or cGy converted) is
+  interpolated trilinearly, and the samples accumulate a slice at a time into
+  a histogram of 1 mGy bins (`DoseHistogram`).
+- Dmin, Dmean and Dmax are exact over the samples; D{X}% and D{X}cc are the
+  lowest dose the hottest X receives, read to the bin's centre; V{X}Gy is the
+  volume receiving at least X Gy.
 
-**Single-slice OARs (v2.4.1):** dicompyler-core derives slice thickness
-from the gap between adjacent contour planes, so a structure contoured
-on a *single* slice gets thickness 0 → volume 0 → no DVH. For that case
-the wrapper passes an explicit `thickness` (the dose grid's z-spacing,
-via `_single_plane_thickness`) so single-slice OARs still yield dose
-statistics.
+**Consensus structures** (`mask_dvh`): a STAPLE consensus, or a Tab 2
+consensus used as ground truth, has no contours. Its voxels are sub-sampled by
+the same spacing rule and read the same way, so a comparison against a
+consensus uses one DVH method on both sides.
 
-**Sub-dose-grid OARs (v2.5.1):** dicompyler rasterises a structure by a
-point-in-polygon test at each *dose-grid* voxel centre, so a structure
-smaller than the dose grid spacing (~1–2 voxels) can fall between the
-sample points, rasterise to zero volume, and get no DVH. When a structure
-that *has* contours yields zero volume, the wrapper retries once with
-`interpolation_resolution` = ¼ of the dose spacing (`_supersample_resolution`)
-so the tiny OAR is recovered. Only triggers for sub-grid structures (cheap),
-and never changes a structure that already computed.
+**Reported, not hidden:** a part of a structure outside the dose grid is
+counted at 0 Gy, and its share of the volume goes in the `dvh_status` column
+(*Dose status*); a D{X}cc larger than the structure is left empty, with the
+reason in the same column. A failure goes in the row's error as `DVH: …` and
+leaves the geometric columns standing. The audit sidecar records each DVH's
+source, sub-sample spacing, sample count and volume outside the grid.
 
-**Cranio-caudal truncation (v2.4.2):** `compute_dvh_metrics` takes an
-optional `z_extent_mm = (z_lo, z_hi)`. When the drawer's *Truncate*
-option is active, the worker computes the GT's physical z-extent
-(`core.masks.gt_z_extent_mm`, ±½ voxel) and passes it so the test ROI's
-contour planes outside that range are dropped (temporarily, restored in
-a `finally`) before dicompyler integrates — the contour-space twin of
-the test mask's voxel-space truncation, so the DVH describes the **same
-craniocaudal range as the geometric metrics**. Applied to test rows and
-per-rater STAPLE rows; **never the GT**, which defines the extent. The
-default (`z_extent_mm = None`) path is byte-identical to before, so the
-bit-for-bit dicompyler equivalence still holds.
+**Cranio-caudal truncation:** when the drawer's *Truncate* option is active,
+only the slices whose centre lies within the GT's extent
+(`core.masks.gt_z_extent_mm`, ±½ slice) are integrated: the same slices the
+truncated test mask keeps. Applied to test rows and per-rater STAPLE rows;
+never to the GT, which defines the extent.
 
 **GT-vs-dose row:** when DVH is enabled on the Compute tab, the worker emits one
 extra row per (patient × organ) with the GT contour's own dose
@@ -1045,13 +1045,21 @@ each AI vendor's dose side-by-side.
 reports both the absolute value and the deviation from the reference.
 The Δ columns cluster after the absolute DVH columns.
 
-**Synthetic-GT DVH:** when GT is a synthetic STAPLE consensus, the
-worker falls back to mask-based voxelwise dose statistics
-(`_dvh_for_consensus_mask`) because there's no RTSS dataset to feed
-dicompyler-core. (Switching all DVH to this mask method was prototyped
-and rejected: it diverged from dicompyler-core by up to ~50 % on V{X}Gy
-for small/low-dose structures, so contour-based DVH via dicompyler
-remains the engine for real RTSS structures.)
+**Why it changed (roadmap #7):** scored against the analytic datasets of
+Nelms et al. 2015, v2's dicompyler-core path had 140 of 195 dose-volume
+parameters more than 3 % off on their Test 2, against 10 for this method and
+18 for PlanIQ in the paper. It had three defects:
+
+- its D{X} lookup returns 0 Gy once the coldest 1 cGy bin holds more than
+  2 × (100 − X) % of the volume, which put D99 at 0 Gy in 49 of the 100 Nelms
+  cases;
+- it samples the dose only at dose-grid points in each contour plane;
+- its in-plane supersampling, v2's retry for the smallest structures,
+  misplaces the dose by half a dose pixel on average.
+
+A mask-based DVH was rejected in v2.4.2 because it differed from dicompyler
+by up to ~50 % on V{X}Gy. That was measured against dicompyler, not against
+truth.
 
 ---
 
@@ -1434,7 +1442,7 @@ on the next `setValue` tick.
 | `test_metrics_equivalence.py` | 6 | Bit-for-bit equivalence of Dice / HD100 / HD95 / Surface Dice @ 3 mm / mean surface distance against ``google-deepmind/surface-distance`` |
 | `test_settings.py` | 3 | Settings for removed features dropped on load and on the next save |
 | `test_staple_equivalence.py` | 3 | Bit-for-bit equivalence of AutoSeg's STAPLE wrapper (per-rater sensitivity/specificity + binary consensus) against a direct ``SimpleITK.STAPLEImageFilter`` invocation, on a synthetic 3-rater fixture |
-| `test_dvh_equivalence.py` | ~7 | Bit-for-bit equivalence of AutoSeg's DVH statistics (Dmin/Dmean/Dmax, D% , Dcc, VGy) against ``dicompyler-core``; single-slice OAR recovery (explicit thickness); z-extent truncation drops/restores contour planes |
+| `test_dvh.py` | ~34 | The DVH against answers known exactly: mean dose at the centroid in any linear dose, D{X} through-plane and in-plane, holes, a single plane; accumulated coverage against clipping; the spacing rule; dose grids in every orientation and GridFrameOffsetVector convention; units, the dose grid's edge, truncation, D{X}cc beyond the structure; mask against contours; the worker's dose columns, status and audit |
 | `test_version.py` | 3 | `__version__` resolution + portable-bundle `_version.py` fallback |
 
 **Empirical clinical validation:** every numerical engine was cross-checked
@@ -1449,11 +1457,11 @@ a PHI-safe markdown report under `docs/` and reproducible via a script under
 | 2D contour metrics | the suppliers' published values | 150/150 pairs through the adapter and from DICOM; largest error ~5e-10 mm; 44 stress cases | `POLYGON_VALIDATION_REPORT.md` |
 | Shared contour reading | vendored parser (2D), previous fill (3D) | 5,143/5,143 regions identical; all 22,123 changed voxels edge ties | `scripts/validate_contour_reading.py`, run on the tender cohort (V3_POLYGON_METRICS_SPEC.md, D10) |
 | STAPLE consensus | `SimpleITK.STAPLEImageFilter` | 55/55 consensus runs bit-exact (sens/spec + voxels) | `STAPLE_VALIDATION_REPORT.md` |
-| DVH dose statistics | `dicompyler-core` 0.5.6 | 2970/2970 stat comparisons Δ = 0 (297 ROIs) | `DVH_VALIDATION_REPORT.md` |
+| DVH | Nelms et al. 2015 analytic datasets; analytic disc phantoms | Test 1: 0/260 parameters > 3 % (PlanIQ 5); Test 2: 10/195 (PlanIQ 18); discs: worst 0.11 Gy at 1 Gy/mm | `DVH_METHOD_VALIDATION.md` (v2's dicompyler equivalence: `DVH_VALIDATION_REPORT.md`, historical) |
 
-The STAPLE and DVH reference libraries (`SimpleITK`, `dicompyler-core`) are
-core dependencies, so their equivalence tests run in CI with no extra
-install; `surface-distance` and `platipy` are installed explicitly in the CI
+The STAPLE reference library (`SimpleITK`) is a core dependency, so its
+equivalence test runs in CI with no extra install, and the DVH tests need no
+reference library at all, because they test against answers known exactly; `surface-distance` and `platipy` are installed explicitly in the CI
 workflow for the mask/metric equivalence tests. The 2D engines' own acceptance
 scripts run in CI too, on a compiled library built on the runner for Linux.
 

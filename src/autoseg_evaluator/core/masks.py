@@ -317,6 +317,25 @@ def _fill_structure(
     off a voxel centre. The area tolerance is converted to match.
     """
     size_x, size_y, size_z = dicom_image.GetSize()
+    reading = read_structure(dicom_image, roi_contours)
+    volume = np.zeros((size_z, size_y, size_x), dtype=bool)
+    for z, region in reading.regions.items():
+        volume[z] = _fill_region(region, size_y, size_x)
+    return volume, reading
+
+
+def read_structure(dicom_image: sitk.Image, roi_contours: pydicom.Dataset) -> ContourReading:
+    """One structure's loops, read into a region per slice of ``dicom_image``.
+
+    Regions are in the image's continuous (column, row) index units, keyed by
+    slice index; a slice outside the image is skipped. This is the reading both
+    the mask fill and the DVH integrate over, so they cover the same area.
+    Only the image's geometry is used, never its voxels.
+
+    Raises :class:`MaskConversionError` for coordinates that are incomplete or
+    not planar, and :class:`ContourReadingError` for loops the reading refuses.
+    """
+    size_z = dicom_image.GetSize()[2]
     spacing = dicom_image.GetSpacing()
     transform = _index_transform(dicom_image)  # invert the direction matrix once
 
@@ -341,11 +360,7 @@ def _fill_structure(
             continue
         outlines.append(Outline(z, idx[:, :2], str(getattr(contour, "ContourGeometricType", ""))))
 
-    reading = read_outlines(outlines, area_tolerance=AREA_TOLERANCE_MM2 / (spacing[0] * spacing[1]))
-    volume = np.zeros((size_z, size_y, size_x), dtype=bool)
-    for z, region in reading.regions.items():
-        volume[z] = _fill_region(region, size_y, size_x)
-    return volume, reading
+    return read_outlines(outlines, area_tolerance=AREA_TOLERANCE_MM2 / (spacing[0] * spacing[1]))
 
 
 def _fill_region(region, rows: int, columns: int) -> np.ndarray:

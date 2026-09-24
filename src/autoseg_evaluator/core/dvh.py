@@ -1,21 +1,60 @@
-"""Dose-Volume Histogram (DVH) metrics — thin wrapper around dicompylercore.
+"""Dose-volume statistics, integrated over the contours themselves.
 
-For each (RTSTRUCT, RTDOSE, ROI number) triple this module computes the
-user-requested Dmean / Dmax / Dmin plus arbitrary D@volume(%), D@volume(cc),
-and V@dose(Gy) points. Values are returned in Gy (doses) and cc (volumes).
+A structure's dose-volume histogram is the dose integrated over the region its
+contours enclose. The contours are read by the function the masks and the 2D
+metrics also use (:func:`~autoseg_evaluator.core.masks.read_structure`), into
+one region per CT slice, and each region stands for a slab one slice thick: the
+convention of every DVH method compared, and of the analytic benchmarks.
 
-``dicompylercore`` does the heavy lifting (dose-grid → mask resampling,
-DVH curve construction, statistic extraction). All errors are surfaced as
-``DVHError`` so the worker can write a clean error row instead of crashing
-the batch.
+Each slab is divided into sub-cells aligned to the CT voxels. A sub-cell is
+weighted by the exact area of the region inside it, found by signed-area
+accumulation along each row rather than by clipping, and the dose is
+interpolated trilinearly at the centroid of that area. The spacing is the
+finest of 0.25, 0.5 and 1 mm that keeps a structure's samples within ten
+million: small organs are sampled at 0.25 mm, where it matters, large targets
+at up to 1 mm, where it no longer does. A structure too large for that even at
+1 mm, such as a body contour, is sampled once per voxel. Samples accumulate a
+slice at a time into a histogram of 1 mGy bins, so memory does not grow with
+their number.
+
+A structure born as a mask has no contours: the STAPLE consensus, and a Tab 2
+consensus used as ground truth. Its voxels are sampled instead, with the same
+spacing rule, histogram and statistics.
+
+Validated against the analytic datasets of Nelms et al. 2015 (Med Phys
+42:4435) and against disc phantoms in ``docs/DVH_METHOD_VALIDATION.md``,
+produced by ``scripts/validate_dvh_methods.py``. Until v3 the DVH came from
+dicompyler-core, which that report also scores.
 """
 
 from __future__ import annotations
 
-import contextlib
 import math
 from dataclasses import dataclass, field
 from typing import Any
+
+import numpy as np
+import shapely
+import SimpleITK as sitk
+from scipy import ndimage
+from shapely.geometry.polygon import orient
+
+from autoseg_evaluator.core.contour_reading import ContourReadingError
+from autoseg_evaluator.core.masks import MaskConversionError, read_structure
+
+#: Sub-sample spacings tried, finest first.
+SPACINGS_MM = (0.25, 0.5, 1.0)
+#: The last resort, past the cap even at 1 mm: one sample per voxel, at its centre.
+VOXEL_CENTRES = math.inf
+#: The finest spacing is used whose samples stay within this many.
+MAX_SAMPLES = 10_000_000
+#: Dose histogram bin. D{x} is read to the centre of its bin.
+BIN_GY = 0.001
+#: A sub-cell covered by less than this share is floating-point residue from an
+#: edge lying along a grid line, and is dropped.
+SLIVER = 1e-9
+#: Points per interpolation call, to bound memory.
+CHUNK = 2_000_000
 
 
 class DVHError(Exception):
@@ -70,152 +109,6 @@ class DVHConfig:
         return keys
 
 
-def compute_dvh_metrics(
-    rtstruct_ds,
-    rtdose_ds,
-    roi_number: int,
-    config: DVHConfig,
-    z_extent_mm: tuple[float, float] | None = None,
-) -> dict[str, float]:
-    """Return the DVH metrics for one structure against one dose grid.
-
-    Parameters
-    ----------
-    rtstruct_ds:
-        A pydicom Dataset of the RTSTRUCT containing the ROI.
-    rtdose_ds:
-        A pydicom Dataset of the RTDOSE the structure is evaluated against.
-    roi_number:
-        ROINumber within the RTSTRUCT's StructureSetROISequence.
-    config:
-        Which metrics to extract.
-    z_extent_mm:
-        Optional ``(z_lo, z_hi)`` physical range (mm). When given, the ROI's
-        contour planes outside this craniocaudal range are dropped before the
-        DVH is computed — the contour-space equivalent of the test mask's
-        cranio-caudal truncation, so the DVH describes the same range as the
-        geometric comparison. The dataset is restored afterwards. ``None``
-        (the default) computes the DVH on the structure as drawn — the
-        behaviour validated bit-for-bit against dicompyler-core.
-
-    Raises
-    ------
-    DVHError
-        If dicompylercore can't compute a DVH for the structure (e.g. the
-        structure has no contours, lies outside the dose grid, etc.).
-    """
-    if not config.any_enabled():
-        return {}
-    try:
-        from dicompylercore import dvhcalc
-    except ImportError as exc:  # pragma: no cover — only triggered without dicompyler-core
-        raise DVHError(f"dicompyler-core not installed: {exc}") from exc
-
-    # Optionally truncate the ROI's contour planes to ``z_extent_mm`` for the
-    # duration of this call (restored in ``finally``). The worker runs
-    # single-threaded, so temporarily filtering the cached dataset is safe and
-    # avoids deep-copying the whole RTSS per row.
-    roi_contour = _find_roi_contour(rtstruct_ds, roi_number) if z_extent_mm is not None else None
-    saved_sequence = None
-    if roi_contour is not None and hasattr(roi_contour, "ContourSequence"):
-        saved_sequence = roi_contour.ContourSequence
-        lo, hi = z_extent_mm
-        roi_contour.ContourSequence = [
-            c
-            for c in saved_sequence
-            if (_contour_plane_z(c) is not None and lo <= _contour_plane_z(c) <= hi)
-        ]
-
-    try:
-        # dicompyler derives slice thickness from the gap between adjacent
-        # contour planes, so a structure contoured on a *single* slice gets
-        # thickness 0 → volume 0 → no DVH (a known dicompyler-core limitation).
-        # For that case we pass an explicit thickness — the dose grid's
-        # z-spacing — so single-slice OARs (and structures truncated down to one
-        # plane) still yield dose statistics.
-        thickness = _single_plane_thickness(rtstruct_ds, rtdose_ds, roi_number)
-        try:
-            dvh = dvhcalc.get_dvh(
-                rtstruct_ds, rtdose_ds, roi_number, calculate_full_volume=True, thickness=thickness
-            )
-        except Exception as exc:  # noqa: BLE001 — surface anything as a clean DVHError
-            raise DVHError(f"dvhcalc.get_dvh failed: {exc}") from exc
-
-        # dicompyler rasterises a structure by a point-in-polygon test at each
-        # dose-grid voxel centre, so a structure smaller than the dose grid
-        # spacing can fall *between* the sample points and rasterise to nothing
-        # → volume 0 → no DVH. When a structure that actually has contours
-        # yields zero volume, retry once on a supersampled grid so it still gets
-        # a DVH. Only ever triggers for small structures (so it's cheap), and
-        # never changes a structure that already computed.
-        if (dvh is None or getattr(dvh, "volume", 0) == 0) and _contour_plane_count(
-            rtstruct_ds, roi_number
-        ):
-            resolution = _supersample_resolution(rtdose_ds)
-            if resolution is not None:
-                # If the retry fails, keep the zero-volume result and fall
-                # through to the DVHError below.
-                with contextlib.suppress(Exception):
-                    dvh = dvhcalc.get_dvh(
-                        rtstruct_ds,
-                        rtdose_ds,
-                        roi_number,
-                        calculate_full_volume=True,
-                        thickness=thickness,
-                        interpolation_resolution=resolution,
-                    )
-
-        if dvh is None or getattr(dvh, "volume", 0) == 0:
-            raise DVHError(f"No DVH curve for ROI #{roi_number} (empty or outside dose grid).")
-
-        out: dict[str, float] = {}
-        # dicompylercore stores doses in the dose grid's native units (typically Gy).
-        if config.include_dmin:
-            out["dmin_gy"] = _safe(dvh.min)
-        if config.include_dmean:
-            out["dmean_gy"] = _safe(dvh.mean)
-        if config.include_dmax:
-            out["dmax_gy"] = _safe(dvh.max)
-
-        # dicompyler-core 0.5.6's ``DVH.statistic`` rejects ``D{X}%`` syntax
-        # (``%`` isn't a valid attribute char and the method bails with
-        # AttributeError). The bare-number form ``D{X}`` is interpreted as
-        # percentage and returns the dose to the hottest X% — which is what
-        # we want. ``D{X}cc`` returns the dose to the hottest X cc (useful
-        # for small OARs where a fixed % is noisy). ``V{X}Gy`` still needs
-        # its unit suffix because ``V{X}cc`` / ``V{X}%`` mean different
-        # things.
-        for v_pct in config.d_at_volumes_pct:
-            key = f"d{_fmt_num(v_pct)}_gy"
-            out[key] = _statistic_value(dvh, f"D{_fmt_num(v_pct)}")
-        for v_cc in config.d_at_volumes_cc:
-            key = f"d{_fmt_num(v_cc)}cc_gy"
-            out[key] = _statistic_value(dvh, f"D{_fmt_num(v_cc)}cc")
-        for d_gy in config.v_at_doses_gy:
-            key = f"v{_fmt_num(d_gy)}gy_cc"
-            out[key] = _statistic_value(dvh, f"V{_fmt_num(d_gy)}Gy")
-    finally:
-        if saved_sequence is not None:
-            roi_contour.ContourSequence = saved_sequence
-    return out
-
-
-def _safe(value) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return math.nan
-
-
-def _statistic_value(dvh, expression: str) -> float:
-    """Pull a single DVH point (e.g. ``D95%`` or ``V20Gy``) via dvh.statistic()."""
-    try:
-        stat = dvh.statistic(expression)
-    except Exception:  # noqa: BLE001 — dvh.statistic raises various ValueError subclasses
-        return math.nan
-    return _safe(getattr(stat, "value", stat))
-
-
 def _fmt_num(value: float) -> str:
     """Format a number for inclusion in a metric key — drops trailing ``.0``."""
     if isinstance(value, (int, float)) and float(value).is_integer():
@@ -223,20 +116,348 @@ def _fmt_num(value: float) -> str:
     return str(value)
 
 
-def _single_plane_thickness(rtstruct_ds, rtdose_ds, roi_number: int) -> float | None:
-    """Thickness to pass ``get_dvh`` for single-slice ROIs (else ``None``).
+# ---- The dose ------------------------------------------------------------
 
-    Returns ``None`` when the ROI spans 2+ contour planes — dicompyler then
-    infers the thickness from the inter-plane gap as usual. For a single-plane
-    ROI (where that inference yields 0 → no DVH) it returns the dose grid's
-    z-spacing as an explicit slab thickness so a DVH can still be computed.
-    Returns ``None`` if the plane count or dose spacing can't be determined,
-    in which case behaviour is unchanged from plain dicompyler.
+
+@dataclass(frozen=True, eq=False)
+class DoseGrid:
+    """An RT Dose grid in Gy, sampled by trilinear interpolation.
+
+    Any orientation: points are taken into the grid through its own row,
+    column and frame directions, so head-first, feet-first, prone and
+    decubitus grids are handled alike.
     """
-    n_planes = _contour_plane_count(rtstruct_ds, roi_number)
-    if n_planes is None or n_planes >= 2:
-        return None
-    return _dose_z_spacing(rtdose_ds)
+
+    values: np.ndarray  # (frames, rows, columns), Gy
+    origin: np.ndarray  # ImagePositionPatient: the first frame's first voxel, mm
+    row_direction: np.ndarray  # along a row: increasing column index
+    column_direction: np.ndarray  # down a column: increasing row index
+    normal: np.ndarray  # from frame to frame
+    pixel_spacing: tuple[float, float]  # (between rows, between columns), mm
+    frame_offsets: np.ndarray  # along the normal from the origin, increasing, mm
+
+    @classmethod
+    def from_dataset(cls, ds) -> DoseGrid:
+        # As the dose display reads it (core/dose.py): Gy when unstated, cGy
+        # converted, anything else (RELATIVE) refused.
+        units = str(getattr(ds, "DoseUnits", "") or "GY").strip().upper()
+        if units not in ("GY", "CGY"):
+            raise DVHError(f"the dose is in {units} units, not Gy")
+        try:
+            values = ds.pixel_array.astype(np.float64)
+        except Exception as exc:  # noqa: BLE001 — any decoding failure is the same answer
+            raise DVHError(f"the dose grid could not be read: {exc}") from exc
+        values *= float(getattr(ds, "DoseGridScaling", None) or 1.0)
+        if units == "CGY":
+            values *= 0.01
+        if values.ndim == 2:
+            values = values[None]
+        iop = np.asarray(ds.ImageOrientationPatient, float)
+        row_direction, column_direction = iop[:3], iop[3:]
+        offsets = np.asarray(getattr(ds, "GridFrameOffsetVector", None) or [0.0], float)
+        if offsets.size != values.shape[0]:
+            raise DVHError("the dose grid's frame offsets do not match its frames")
+        # DICOM allows offsets relative to the first frame (the first is 0) or
+        # absolute positions along the normal; both become relative here.
+        offsets = offsets - offsets[0]
+        order = np.argsort(offsets, kind="stable")
+        spacing = ds.PixelSpacing
+        return cls(
+            values=np.ascontiguousarray(values[order]),
+            origin=np.asarray(ds.ImagePositionPatient, float),
+            row_direction=row_direction,
+            column_direction=column_direction,
+            normal=np.cross(row_direction, column_direction),
+            pixel_spacing=(float(spacing[0]), float(spacing[1])),
+            frame_offsets=np.ascontiguousarray(offsets[order]),
+        )
+
+    def sample(self, points: np.ndarray) -> np.ndarray:
+        """Dose (Gy) at each ``(x, y, z)`` point in mm; NaN outside the grid."""
+        out = np.empty(len(points))
+        frames = np.arange(len(self.frame_offsets), dtype=np.float64)
+        for start in range(0, len(points), CHUNK):
+            d = points[start : start + CHUNK] - self.origin
+            column = (d @ self.row_direction) / self.pixel_spacing[1]
+            row = (d @ self.column_direction) / self.pixel_spacing[0]
+            along = d @ self.normal
+            if frames.size > 1:
+                frame = np.interp(along, self.frame_offsets, frames, left=-1.0, right=frames.size)
+            else:
+                frame = np.where(np.abs(along) <= 1e-3, 0.0, -1.0)
+            out[start : start + len(d)] = ndimage.map_coordinates(
+                self.values, [frame, row, column], order=1, mode="constant", cval=np.nan
+            )
+        return out
+
+
+class DoseHistogram:
+    """A differential DVH built up sample by sample, in bins of ``BIN_GY``.
+
+    Memory stays at one array of bins however many samples a structure takes.
+    Dmin, Dmax and Dmean are kept exactly; D{x} is read to the centre of its
+    bin, within half a bin (0.5 mGy) of the sample it stands for. A sample
+    outside the dose grid is counted at 0 Gy — the grid holds all the dose the
+    plan calculated — and its volume is reported.
+    """
+
+    def __init__(self) -> None:
+        self.volume = np.zeros(1 << 16)
+        self.total_cc = 0.0
+        self.outside_cc = 0.0
+        self.dose_volume = 0.0
+        self.low = math.inf
+        self.high = -math.inf
+        self.samples = 0
+
+    def add(self, dose: np.ndarray, volume_cc: np.ndarray) -> None:
+        if not dose.size:
+            return
+        outside = ~np.isfinite(dose)
+        if outside.any():
+            self.outside_cc += float(volume_cc[outside].sum())
+            dose = np.where(outside, 0.0, dose)
+        index = np.maximum(np.floor(dose / BIN_GY), 0).astype(np.int64)
+        top = int(index.max()) + 1
+        if top > self.volume.size:
+            grown = np.zeros(max(top, 2 * self.volume.size))
+            grown[: self.volume.size] = self.volume
+            self.volume = grown
+        self.volume[:top] += np.bincount(index, weights=volume_cc, minlength=top)
+        self.total_cc += float(volume_cc.sum())
+        self.dose_volume += float(np.dot(dose, volume_cc))
+        self.low = min(self.low, float(dose.min()))
+        self.high = max(self.high, float(dose.max()))
+        self.samples += int(dose.size)
+
+    def _bins(self) -> tuple[np.ndarray, np.ndarray]:
+        filled = np.nonzero(self.volume)[0]
+        return (filled + 0.5) * BIN_GY, self.volume[filled]
+
+    def dose_at(self, volume_cc: float) -> float:
+        """The lowest dose the hottest ``volume_cc`` of the structure receives."""
+        if volume_cc > self.total_cc * (1 + 1e-12):
+            return math.nan
+        dose, volume = self._bins()
+        hottest_first = np.cumsum(volume[::-1])
+        i = int(np.searchsorted(hottest_first, volume_cc - self.total_cc * 1e-12))
+        return float(dose[::-1][min(i, dose.size - 1)])
+
+    def volume_at(self, dose_gy) -> np.ndarray:
+        """Volume (cc) receiving at least each dose: the cumulative DVH."""
+        dose, volume = self._bins()
+        at_least = np.cumsum(volume[::-1])[::-1]
+        index = np.searchsorted(dose, np.asarray(dose_gy, float), side="left")
+        return np.where(index < dose.size, at_least[np.minimum(index, dose.size - 1)], 0.0)
+
+    def statistics(self, config: DVHConfig) -> tuple[dict[str, float], list[str]]:
+        """The statistics ``config`` asks for, and notes on any it could not give."""
+        out: dict[str, float] = {}
+        notes: list[str] = []
+        if config.include_dmin:
+            out["dmin_gy"] = self.low
+        if config.include_dmean:
+            out["dmean_gy"] = self.dose_volume / self.total_cc
+        if config.include_dmax:
+            out["dmax_gy"] = self.high
+        for v in config.d_at_volumes_pct:
+            out[f"d{_fmt_num(v)}_gy"] = self.dose_at(self.total_cc * float(v) / 100.0)
+        for v in config.d_at_volumes_cc:
+            out[f"d{_fmt_num(v)}cc_gy"] = self.dose_at(float(v))
+            if float(v) > self.total_cc:
+                notes.append(f"D{_fmt_num(v)}cc: the structure is only {self.total_cc:.3g} cc")
+        for d in config.v_at_doses_gy:
+            out[f"v{_fmt_num(d)}gy_cc"] = float(self.volume_at(float(d)))
+        return out, notes
+
+
+# ---- Where to sample -----------------------------------------------------
+
+
+def odd_factor(spacing_mm: float, target_mm: float) -> int:
+    """Sub-samples per voxel edge: the fewest no further apart than ``target_mm``, odd.
+
+    Odd, so one sub-sample always sits on the voxel centre.
+    """
+    k = max(1, math.ceil(spacing_mm / target_mm - 1e-9))
+    return k if k % 2 else k + 1
+
+
+def _factors(spacing: np.ndarray, target_mm: float) -> tuple[int, int, int]:
+    fx, fy, fz = (odd_factor(float(s), target_mm) for s in spacing)
+    return fx, fy, fz
+
+
+def choose_spacing(voxels: float, spacing: np.ndarray) -> float:
+    """The finest of ``SPACINGS_MM`` keeping ``voxels`` worth of samples within the cap.
+
+    ``voxels`` is the structure's size in CT voxels, so the sample count is
+    known before any is taken. Past the cap even at 1 mm (a body contour, whose
+    1 mm still means several samples per voxel on a coarse CT) the structure is
+    sampled once per voxel, at :data:`VOXEL_CENTRES`: at that size the voxel is
+    far below anything a dose statistic can resolve.
+    """
+    for target in SPACINGS_MM:
+        fx, fy, fz = _factors(spacing, target)
+        if voxels * fx * fy * fz <= MAX_SAMPLES:
+            return target
+    return VOXEL_CENTRES
+
+
+def _index_to_world(image: sitk.Image, index: np.ndarray) -> np.ndarray:
+    origin = np.asarray(image.GetOrigin(), float)
+    spacing = np.asarray(image.GetSpacing(), float)
+    direction = np.asarray(image.GetDirection(), float).reshape(3, 3)
+    return origin + (index * spacing) @ direction.T
+
+
+def _oriented_rings(region) -> list[np.ndarray]:
+    """Every ring of a region, outer boundaries anticlockwise and holes clockwise."""
+    rings = []
+    for part in getattr(region, "geoms", [region]):
+        part = orient(part, sign=1.0)
+        rings.append(np.asarray(part.exterior.coords))
+        rings.extend(np.asarray(hole.coords) for hole in part.interiors)
+    return rings
+
+
+def _edge_pieces(rings: list[np.ndarray]) -> tuple[np.ndarray, ...]:
+    """The rings' edges cut at every unit grid line: ``(xa, ya, xb, yb)`` per piece.
+
+    Each piece then lies within one cell ``[i, i+1] x [j, j+1]``.
+    """
+    x0 = np.concatenate([r[:-1, 0] for r in rings])
+    y0 = np.concatenate([r[:-1, 1] for r in rings])
+    x1 = np.concatenate([r[1:, 0] for r in rings])
+    y1 = np.concatenate([r[1:, 1] for r in rings])
+    n = x0.size
+
+    def cuts(a0: np.ndarray, a1: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        lo = np.floor(np.minimum(a0, a1)) + 1  # grid lines strictly inside the edge
+        hi = np.ceil(np.maximum(a0, a1)) - 1
+        count = np.maximum(hi - lo + 1, 0).astype(np.int64)
+        edge = np.repeat(np.arange(n), count)
+        line = lo[edge] + (np.arange(int(count.sum())) - np.repeat(np.cumsum(count) - count, count))
+        return edge, (line - a0[edge]) / (a1[edge] - a0[edge])
+
+    ex, tx = cuts(x0, x1)
+    ey, ty = cuts(y0, y1)
+    edge = np.concatenate([np.arange(n), np.arange(n), ex, ey])
+    t = np.concatenate([np.zeros(n), np.ones(n), tx, ty])
+    order = np.lexsort((t, edge))
+    edge, t = edge[order], t[order]
+    same = edge[1:] == edge[:-1]
+    e, ta, tb = edge[1:][same], t[:-1][same], t[1:][same]
+    dx, dy = x1[e] - x0[e], y1[e] - y0[e]
+    return x0[e] + ta * dx, y0[e] + ta * dy, x0[e] + tb * dx, y0[e] + tb * dy
+
+
+def polygon_cells(region, fx: int, fy: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The sub-cells a region covers: where to sample each (voxel units), and its share.
+
+    ``region`` is in continuous (column, row) index units. Sub-cells are
+    ``1/fx`` by ``1/fy`` of a voxel, aligned to the voxel edges. Each is
+    weighted by the exact area of the region inside it and sampled at the
+    centroid of that area, found without clipping by the signed-area
+    accumulation fonts are rasterised with. The outline is cut at every grid
+    line; a piece adds the signed area between itself and its cell's right
+    side, and its full height to every cell to its right in the same row, so a
+    running sum along each row gives every cell its covered area. The same sums
+    of first moments give the centroids. Outer boundaries run anticlockwise and
+    holes clockwise, so a hole subtracts. The work grows with the outline's
+    length, not the region's area.
+    """
+    minx, miny, maxx, maxy = region.bounds
+    ix0, iy0 = math.floor((minx + 0.5) * fx), math.floor((miny + 0.5) * fy)
+    nx = math.ceil((maxx + 0.5) * fx) - ix0
+    ny = math.ceil((maxy + 0.5) * fy) - iy0
+    scale, shift = np.array([fx, fy], float), np.array([ix0, iy0], float)
+    unit = shapely.transform(region, lambda c: (c + 0.5) * scale - shift)  # cell i: [i, i+1]
+    xa, ya, xb, yb = _edge_pieces(_oriented_rings(unit))
+    i = np.clip(np.floor(0.5 * (xa + xb)).astype(np.int64), 0, nx - 1)
+    j = np.clip(np.floor(0.5 * (ya + yb)).astype(np.int64), 0, ny - 1)
+    # Each piece relative to its own cell's corner, so every term is of order one
+    # and a sliver's centroid does not drown in cancellation.
+    xa, xb, ya, yb = xa - i, xb - i, ya - j, yb - j
+    dy = yb - ya
+    band_y = 0.5 * (yb * yb - ya * ya)  # first moment in y of the piece's horizontal band
+    # Within the piece's own cell: the part between the piece and the cell's right side.
+    own_area = dy * (1.0 - 0.5 * (xa + xb))
+    own_x = 0.5 * dy * (1.0 - (xa * xa + xa * xb + xb * xb) / 3.0)
+    own_y = band_y - dy * (2 * ya * xa + ya * xb + yb * xa + 2 * yb * xb) / 6.0
+    grids = np.zeros((5, ny, nx))
+    for k, values in enumerate((own_area, own_x, own_y, dy, band_y)):
+        np.add.at(grids[k], (j, i), values)
+    own_area, own_x, own_y, height, height_y = grids
+    # Every cell to the right in the row gets the piece's whole band.
+    height = np.cumsum(height, axis=1) - height
+    height_y = np.cumsum(height_y, axis=1) - height_y
+    area = -(own_area + height)
+    moment_x = -(own_x + 0.5 * height)
+    moment_y = -(own_y + height_y)
+    covered = area > SLIVER
+    share = area[covered]
+    row, column = np.nonzero(covered)
+    x = (column + moment_x[covered] / share + ix0) / fx - 0.5
+    y = (row + moment_y[covered] / share + iy0) / fy - 0.5
+    return x, y, np.minimum(share, 1.0)
+
+
+# ---- The DVH -------------------------------------------------------------
+
+
+@dataclass(eq=False)
+class DVHResult:
+    """A structure's dose statistics, with the histogram they were read from."""
+
+    metrics: dict[str, float]
+    histogram: DoseHistogram
+    source: str  # "contours" or "mask"
+    spacing_mm: float  # the target chosen; VOXEL_CENTRES for one sample per voxel
+    samples_per_voxel: tuple[int, int, int]  # along x, y, z
+    voxel_mm: tuple[float, float, float]
+    status: str  # "" unless something about the result needs saying
+
+    def audit(self) -> dict[str, Any]:
+        """What the sidecar records about how this DVH was taken."""
+        return {
+            "source": self.source,
+            "subsample_target_mm": None if math.isinf(self.spacing_mm) else self.spacing_mm,
+            "samples_per_voxel": list(self.samples_per_voxel),
+            "subsample_spacing_mm": [
+                round(v / k, 4) for v, k in zip(self.voxel_mm, self.samples_per_voxel)
+            ],
+            "samples": self.histogram.samples,
+            "volume_cc": self.histogram.total_cc,
+            "outside_dose_grid_cc": self.histogram.outside_cc,
+            "bin_gy": BIN_GY,
+        }
+
+
+def _result(
+    histogram: DoseHistogram,
+    config: DVHConfig,
+    source: str,
+    spacing_mm: float,
+    spacing: np.ndarray,
+) -> DVHResult:
+    if histogram.total_cc <= 0:
+        raise DVHError("the structure has no volume on the image")
+    metrics, notes = histogram.statistics(config)
+    if histogram.outside_cc > 0:
+        share = 100.0 * histogram.outside_cc / histogram.total_cc
+        notes.insert(
+            0, f"{share:.3g} % of the structure lies outside the dose grid, counted as 0 Gy"
+        )
+    return DVHResult(
+        metrics,
+        histogram,
+        source,
+        spacing_mm,
+        _factors(spacing, spacing_mm),
+        tuple(float(v) for v in spacing),
+        "; ".join(notes),
+    )
 
 
 def _find_roi_contour(rtstruct_ds, roi_number: int):
@@ -247,55 +468,95 @@ def _find_roi_contour(rtstruct_ds, roi_number: int):
     return None
 
 
-def _contour_plane_z(contour_item) -> float | None:
-    """Z coordinate (mm) of a CLOSED_PLANAR contour item (all points share z)."""
-    data = getattr(contour_item, "ContourData", None)
-    if data and len(data) >= 3:
-        return float(data[2])
-    return None
+def structure_dvh(
+    rtstruct_ds,
+    roi_number: int,
+    dose: DoseGrid,
+    reference: sitk.Image,
+    config: DVHConfig,
+    *,
+    z_extent_mm: tuple[float, float] | None = None,
+    spacing_mm: float | None = None,
+) -> DVHResult:
+    """One structure's dose statistics, integrated over its contours.
 
-
-def _contour_plane_count(rtstruct_ds, roi_number: int) -> int | None:
-    """Number of distinct z-planes the ROI is contoured on (``None`` if unknown)."""
-    try:
-        roi_contours = rtstruct_ds.ROIContourSequence
-    except AttributeError:
-        return None
-    for roi_contour in roi_contours:
-        if int(getattr(roi_contour, "ReferencedROINumber", -1)) != int(roi_number):
-            continue
-        zs: set[float] = set()
-        for item in getattr(roi_contour, "ContourSequence", []) or []:
-            data = getattr(item, "ContourData", None)
-            if data and len(data) >= 3:
-                # ContourData is a flat [x0,y0,z0, x1,y1,z1, …] list; all points
-                # in a CLOSED_PLANAR contour share one z. Round to fold float noise.
-                zs.add(round(float(data[2]), 2))
-        return len(zs)
-    return None
-
-
-def _dose_z_spacing(rtdose_ds) -> float | None:
-    """Z-spacing (mm) of the dose grid from its GridFrameOffsetVector."""
-    offsets = getattr(rtdose_ds, "GridFrameOffsetVector", None)
-    if offsets is None or len(offsets) < 2:
-        return None
-    spacing = abs(float(offsets[1]) - float(offsets[0]))
-    return spacing if spacing > 0 else None
-
-
-def _supersample_resolution(rtdose_ds, factor: int = 4) -> tuple[float, float] | None:
-    """In-plane ``(row, col)`` resolution (mm) for supersampling, or ``None``.
-
-    A fraction (``1/factor``) of the dose grid's in-plane spacing — fine enough
-    to place sample points inside a structure that is smaller than a dose voxel.
-    Returned as a tuple so dicompyler accepts non-square dose grids too.
+    ``reference`` supplies the CT geometry the contours are read on — the CT
+    itself or any mask made on it; its voxels are never read.
+    ``z_extent_mm`` keeps only the slices whose centre lies within
+    ``(z_lo, z_hi)``, the ground truth's extent, so a truncated comparison's
+    dose describes the same range as its geometry. ``spacing_mm`` overrides the
+    spacing rule; it is for validation, not for production.
     """
-    ps = getattr(rtdose_ds, "PixelSpacing", None)
-    if not ps or len(ps) < 2:
-        return None
-    row = float(ps[0]) / factor
-    col = float(ps[1]) / factor
-    if row <= 0 or col <= 0:
-        return None
-    return row, col
+    item = _find_roi_contour(rtstruct_ds, roi_number)
+    if item is None or not getattr(item, "ContourSequence", None):
+        raise DVHError("no contours are stored for this structure")
+    try:
+        reading = read_structure(reference, item)
+    except (MaskConversionError, ContourReadingError) as exc:
+        raise DVHError(f"the contours could not be read: {exc}") from exc
+    regions = {z: r for z, r in reading.regions.items() if not r.is_empty}
+    if z_extent_mm is not None:
+        lo, hi = z_extent_mm
+        regions = {
+            z: r
+            for z, r in regions.items()
+            if lo
+            <= reference.TransformContinuousIndexToPhysicalPoint((0.0, 0.0, float(z)))[2]
+            <= hi
+        }
+        if not regions:
+            raise DVHError("no contour lies within the ground truth's extent")
+    if not regions:
+        raise DVHError("the structure has no area on the image")
+    spacing = np.asarray(reference.GetSpacing(), float)
+    if spacing_mm is None:
+        spacing_mm = choose_spacing(sum(r.area for r in regions.values()), spacing)
+    fx, fy, fz = _factors(spacing, spacing_mm)
+    z_offsets = (np.arange(fz) + 0.5) / fz - 0.5
+    cell_cc = float(np.prod(spacing)) / (fx * fy * fz) / 1000.0
+    histogram = DoseHistogram()
+    for z_index, region in regions.items():
+        x, y, share = polygon_cells(region, fx, fy)
+        for start in range(0, x.size, CHUNK):
+            xs, ys = x[start : start + CHUNK], y[start : start + CHUNK]
+            weight = share[start : start + CHUNK] * cell_cc
+            for dz in z_offsets:
+                index = np.stack([xs, ys, np.full(xs.size, z_index + dz)], axis=1)
+                histogram.add(dose.sample(_index_to_world(reference, index)), weight)
+    return _result(histogram, config, "contours", spacing_mm, spacing)
+
+
+def mask_dvh(
+    mask: sitk.Image,
+    dose: DoseGrid,
+    config: DVHConfig,
+    *,
+    spacing_mm: float | None = None,
+) -> DVHResult:
+    """Dose statistics of a structure that exists only as a mask.
+
+    Each voxel is split into sub-samples by the same spacing rule the contours
+    use, every one standing for an equal share of its voxel.
+    """
+    voxels = sitk.GetArrayViewFromImage(mask) > 0
+    count = int(voxels.sum())
+    if not count:
+        raise DVHError("the mask is empty")
+    spacing = np.asarray(mask.GetSpacing(), float)
+    if spacing_mm is None:
+        spacing_mm = choose_spacing(count, spacing)
+    factors = _factors(spacing, spacing_mm)
+    axes = [(np.arange(k) + 0.5) / k - 0.5 for k in factors]
+    gx, gy, gz = np.meshgrid(*axes, indexing="ij")
+    offsets = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
+    weight = float(np.prod(spacing)) / 1000.0 / len(offsets)
+    per_chunk = max(1, CHUNK // len(offsets))
+    histogram = DoseHistogram()
+    for z in np.nonzero(voxels.any(axis=(1, 2)))[0]:
+        y, x = np.nonzero(voxels[z])
+        centres = np.stack([x, y, np.full(x.size, z)], axis=1).astype(np.float64)
+        for start in range(0, len(centres), per_chunk):
+            index = (centres[start : start + per_chunk, None, :] + offsets[None]).reshape(-1, 3)
+            dose_gy = dose.sample(_index_to_world(mask, index))
+            histogram.add(dose_gy, np.full(len(index), weight))
+    return _result(histogram, config, "mask", spacing_mm, spacing)

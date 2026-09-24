@@ -7,7 +7,7 @@ would produce three releases whose results cannot be compared with each other.
 Nothing here is released. This file records where each item stands so the scope
 of v3.0.0 is legible from the repository rather than from memory.
 
-**Checkpoint: 2026-09-24.** Branch `v3-dev` at `a63845a`; 1166 tests pass;
+**Checkpoint: 2026-09-24**, with #7 done: branch `v3-dev`; 1199 tests pass;
 `ruff check` and `ruff format --check` clean.
 
 ---
@@ -22,7 +22,7 @@ of v3.0.0 is legible from the repository rather than from memory.
 | 4 | Performance / parallelisation | **Not started** — needs re-profiling first |
 | 5 | Two-stream metric architecture | **Done**, all seven phases |
 | 6 | Canonical organ bucketing + statistics | **Done**, both halves |
-| 7 | Quantify DVH on mask vs on RTSS | **Measured** — method decision pending |
+| 7 | Quantify DVH on mask vs on RTSS | **Done** — DVH now integrated over the contours |
 | 8 | Validation report for the Stream B metrics | **Partly done** — synthetic half written |
 
 ---
@@ -138,8 +138,53 @@ and still needs the matching change.
 
 ### 7 — DVH on a mask versus DVH on RTSS
 
-**Measured (2026-09-24); the method decision is pending.**
-`scripts/validate_dvh_methods.py` scores five candidate DVH methods against
+**Done (2026-09-24).** ⚠️ **This moves every DVH number.** The decision:
+integrate the dose over the contours themselves (**polygon**). Among the
+methods compared it is the most accurate, and at equal spacing it runs at the
+same speed as the voxel alternative (below). The sub-sample spacing is the
+finest of 0.25, 0.5 and 1 mm that keeps a structure within **ten million
+samples** (user's choice of cap). A structure past the cap even at 1 mm is
+sampled once per voxel. That was added after the cohort check: on its 1.37 mm
+CT, "1 mm" still meant 27 samples a voxel, and a 30 L external took 220 M
+samples and 35 s. That keeps no structure much over a second.
+
+**Speed on a real patient** (one tender H&N patient, 496 structures from seven
+structure sets, idle machine): 189 s against v2's 986 s. By size, median per
+structure:
+
+| Size | v3 | v2 |
+|---|---|---|
+| under 1 cc | 0.01 s | 0.03 s |
+| 1–10 cc | 0.11 s | 0.14 s |
+| 10–100 cc | 0.48 s | 0.48 s |
+| 100–1,000 cc | 0.46 s | 1.44 s |
+| over 1,000 cc | 1.1 s | 15 s |
+
+On the benchmark's synthetic spheres v2 is faster up to about 33 cc (0.17 s
+against 0.44 s). Their dose grids are small, and v2's cost grows with the dose
+grid, because it tests every dose-grid point on each contour plane.
+
+What was implemented:
+
+- **`core/dvh.py` is rewritten.** It holds `structure_dvh`, `mask_dvh`,
+  `DoseGrid` (any orientation) and `DoseHistogram`.
+- **The worker's five DVH call sites use it.** A consensus (STAPLE, or Tab 2 as
+  ground truth) is sampled over its voxels by the same rule.
+- **Nothing is hidden.** A *Dose status* column says when part of a structure
+  lies outside the dose grid (counted at 0 Gy) or a D{X}cc exceeds the
+  structure, and the audit sidecar records each DVH's spacing and sample count.
+- **dicompyler-core leaves the runtime dependencies.** It moves to the
+  `validation` extra.
+- **Tests.** `tests/test_dvh.py` tests against answers known exactly; the
+  dicompyler equivalence tests are retired.
+- **The report measures the shipped code.** It scores the rule exactly as
+  shipped, as **autoseg**. v2's calls are frozen in the script and reproduce
+  v2's numbers exactly on all 100 Nelms rows.
+
+The measurements below were made before the decision; the report now
+includes the shipped rule itself.
+
+`scripts/validate_dvh_methods.py` scores the candidate DVH methods against
 analytic truth and writes `docs/DVH_METHOD_VALIDATION.md`. The benchmarks:
 
 - **Nelms et al. 2015** (Med Phys 42:4435), Tests 1–3, beside the paper's own
@@ -242,7 +287,8 @@ the README and overview say what it covers.
 - **`main` is 16 commits ahead of `origin/main`.** Nothing is at risk — every
   one of those commits is contained in `origin/v3-dev` — but `origin/main` does
   not yet show the rasteriser, linking or organ-grouping work.
-- **Three changes move numbers**: the rasteriser default, the half-open fill
+- **Four changes move numbers**: the DVH now integrated over the contours
+  (every dose statistic), the rasteriser default, the half-open fill
   under the shared contour reading (vendor A in particular), and the removal of
   mask-APL in phase 7. Results produced before and after v3.0.0 are not directly
   comparable, and the release notes have to say so plainly.

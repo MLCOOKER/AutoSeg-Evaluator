@@ -239,6 +239,38 @@ and the two combined by taking the <b>larger</b>.</p>
 reading the 3D fill uses. The 2D metrics are then measured along the outlines of
 the regions it produces.</p>
 
+<h2>Dose-volume statistics</h2>
+
+<p>The dose is integrated over the contours themselves, read by the same rules
+as both geometric streams (<i>Reading the contours</i> above). Each contour stands
+for a slab one CT slice thick, centred on its slice: the convention of treatment
+planning systems and of the analytic benchmarks this method is validated
+against.</p>
+<ol>
+<li>Each slab is divided into sub-cells aligned to the CT voxels. Their spacing
+is chosen per structure: the finest of 0.25, 0.5 and 1 mm that keeps the
+structure within ten million samples. Small organs are sampled at 0.25 mm; only
+the largest targets are sampled more coarsely, where it no longer matters, and a
+structure too large for that even at 1 mm, such as a body contour, is sampled
+once per voxel.</li>
+<li>A sub-cell counts for exactly the area of the region inside it, and the dose
+is interpolated trilinearly from the dose grid at the centroid of that area.</li>
+<li>The samples accumulate into a histogram of 1 mGy bins.</li>
+</ol>
+<p><b>D<sub>x%</sub></b> and <b>D<sub>x cc</sub></b> are the lowest dose the
+hottest x of the structure receives; <b>V<sub>x Gy</sub></b> is the volume
+receiving at least x Gy. Dmin, Dmean and Dmax are exact over the samples. A
+D<sub>x cc</sub> larger than the structure is left empty, and the <i>Dose
+status</i> column says why.</p>
+<p>A part of a structure lying outside the dose grid is counted at 0 Gy, and the
+<i>Dose status</i> column gives its share of the volume. A consensus ground truth
+has no contours, so its voxels are sampled instead, by the same spacing rule.</p>
+<p>Validated against the analytic datasets of Nelms et al., <i>Methods, software
+and datasets to verify DVH calculations against analytical values</i>, Medical
+Physics 42 (2015) 4435, and against analytic disc phantoms
+(<code>docs/DVH_METHOD_VALIDATION.md</code>). Versions before 3.0 used
+dicompyler-core, which that report scores alongside.</p>
+
 <h2>What is reported when a metric cannot be computed</h2>
 
 <p>An undefined metric is never filled in with a zero, because a zero reads as
@@ -259,9 +291,9 @@ why.</p>
 
 <p>Both streams record what produced their numbers — the rasteriser and voxel
 spacing for the 3D stream, the engine, its version and its settings for the 2D
-stream — in the optional audit sidecar written beside an export. A number
-that cannot be traced to the method and settings that produced it cannot be
-reproduced.</p>
+stream — in the optional audit sidecar written beside an export, as does the
+dose: its source, sub-sample spacing and sample count. A number that cannot be
+traced to the method and settings that produced it cannot be reproduced.</p>
 
 <p>The 2D definitions follow Boukerroui, Vasquez Osorio, Brunenberg and Gooding,
 <i>Analytic calculations and synthetic shapes for validation of quantitative

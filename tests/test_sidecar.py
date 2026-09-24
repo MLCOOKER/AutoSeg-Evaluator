@@ -64,6 +64,26 @@ def test_a_record_carries_both_streams_and_says_which_comparison_it_is(tmp_path)
     assert doc["comparisons"] == 1
 
 
+def test_a_dose_row_records_how_its_statistics_were_taken(tmp_path):
+    """A ground truth's own dose row carries no geometry, only the DVH record."""
+    dvh = {
+        "source": "contours",
+        "subsample_target_mm": 0.25,
+        "samples_per_voxel": [5, 5, 9],
+        "subsample_spacing_mm": [0.1954, 0.1954, 0.2222],
+        "samples": 1_234_567,
+        "volume_cc": 21.4,
+        "outside_dose_grid_cc": 0.0,
+        "bin_gy": 0.001,
+    }
+    target = tmp_path / "dose.audit.json"
+    sidecar.write(target, [_row(comparison_mode="gt_dose", audit={"dvh": dvh})])
+
+    doc = json.loads(target.read_text(encoding="utf-8"))
+    assert doc["records"][0]["dvh"] == dvh
+    assert "dvh" in doc["notes"]
+
+
 def test_both_directions_survive_where_the_table_keeps_one(tmp_path):
     """The asymmetry is usually the finding.
 
