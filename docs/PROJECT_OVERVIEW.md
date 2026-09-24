@@ -1021,12 +1021,20 @@ consensus used as ground truth, has no contours. Its voxels are sub-sampled by
 the same spacing rule and read the same way, so a comparison against a
 consensus uses one DVH method on both sides.
 
-**Reported, not hidden:** a part of a structure outside the dose grid is
-counted at 0 Gy, and its share of the volume goes in the `dvh_status` column
-(*Dose status*); a D{X}cc larger than the structure is left empty, with the
-reason in the same column. A failure goes in the row's error as `DVH: …` and
-leaves the geometric columns standing. The audit sidecar records each DVH's
-source, sub-sample spacing, sample count and volume outside the grid.
+**Dose grid coverage:** the statistics describe the part of a structure
+inside the dose grid. A part outside it has no calculated dose, so it is left
+out rather than given one, and every dose row carries `dose_coverage_pct`
+(*Dose grid coverage (%)*), the share of the structure's volume the statistics
+describe: 100 when the grid covers all of it. On the tender H&N cohort, 89 of
+993 structures were partly outside (0.3–1.5 %): spinal cords, oesophagi, lungs
+and bodies running below the dose grid. It is a diagnostic, so the Report tab
+leaves it out. A structure wholly outside the grid has no DVH, and says so.
+
+**Reported, not hidden:** a D{X}cc larger than the covered volume is left
+empty, with the reason in the `dvh_status` column (*Dose status*). A failure
+goes in the row's error as `DVH: …` and leaves the geometric columns standing.
+The audit sidecar records each DVH's source, sub-sample spacing, sample count
+and the volume inside and outside the grid.
 
 **Cranio-caudal truncation:** when the drawer's *Truncate* option is active,
 only the slices whose centre lies within the GT's extent

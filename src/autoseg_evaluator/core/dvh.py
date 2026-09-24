@@ -21,6 +21,10 @@ A structure born as a mask has no contours: the STAPLE consensus, and a Tab 2
 consensus used as ground truth. Its voxels are sampled instead, with the same
 spacing rule, histogram and statistics.
 
+The statistics describe the part of a structure inside the dose grid. A part
+outside it has no calculated dose, so it is left out rather than given one,
+and the result says what share of the structure the statistics cover.
+
 Validated against the analytic datasets of Nelms et al. 2015 (Med Phys
 42:4435) and against disc phantoms in ``docs/DVH_METHOD_VALIDATION.md``,
 produced by ``scripts/validate_dvh_methods.py``. Until v3 the DVH came from
@@ -197,13 +201,14 @@ class DoseHistogram:
     Memory stays at one array of bins however many samples a structure takes.
     Dmin, Dmax and Dmean are kept exactly; D{x} is read to the centre of its
     bin, within half a bin (0.5 mGy) of the sample it stands for. A sample
-    outside the dose grid is counted at 0 Gy — the grid holds all the dose the
-    plan calculated — and its volume is reported.
+    outside the dose grid has no dose to count: it is left out of the
+    histogram, and its volume kept in ``outside_cc`` so the coverage is known.
+    ``total_cc`` is the volume the statistics describe, the part inside.
     """
 
     def __init__(self) -> None:
         self.volume = np.zeros(1 << 16)
-        self.total_cc = 0.0
+        self.total_cc = 0.0  # inside the dose grid
         self.outside_cc = 0.0
         self.dose_volume = 0.0
         self.low = math.inf
@@ -211,12 +216,13 @@ class DoseHistogram:
         self.samples = 0
 
     def add(self, dose: np.ndarray, volume_cc: np.ndarray) -> None:
-        if not dose.size:
-            return
+        self.samples += int(dose.size)
         outside = ~np.isfinite(dose)
         if outside.any():
             self.outside_cc += float(volume_cc[outside].sum())
-            dose = np.where(outside, 0.0, dose)
+            dose, volume_cc = dose[~outside], volume_cc[~outside]
+        if not dose.size:
+            return
         index = np.maximum(np.floor(dose / BIN_GY), 0).astype(np.int64)
         top = int(index.max()) + 1
         if top > self.volume.size:
@@ -228,7 +234,12 @@ class DoseHistogram:
         self.dose_volume += float(np.dot(dose, volume_cc))
         self.low = min(self.low, float(dose.min()))
         self.high = max(self.high, float(dose.max()))
-        self.samples += int(dose.size)
+
+    @property
+    def coverage_pct(self) -> float:
+        """The share of the structure's volume inside the dose grid, in %."""
+        whole = self.total_cc + self.outside_cc
+        return 100.0 * self.total_cc / whole if whole > 0 else 0.0
 
     def _bins(self) -> tuple[np.ndarray, np.ndarray]:
         filled = np.nonzero(self.volume)[0]
@@ -265,7 +276,10 @@ class DoseHistogram:
         for v in config.d_at_volumes_cc:
             out[f"d{_fmt_num(v)}cc_gy"] = self.dose_at(float(v))
             if float(v) > self.total_cc:
-                notes.append(f"D{_fmt_num(v)}cc: the structure is only {self.total_cc:.3g} cc")
+                where = " inside the dose grid" if self.outside_cc > 0 else ""
+                notes.append(
+                    f"D{_fmt_num(v)}cc: the structure is only {self.total_cc:.3g} cc{where}"
+                )
         for d in config.v_at_doses_gy:
             out[f"v{_fmt_num(d)}gy_cc"] = float(self.volume_at(float(d)))
         return out, notes
@@ -428,10 +442,16 @@ class DVHResult:
                 round(v / k, 4) for v, k in zip(self.voxel_mm, self.samples_per_voxel)
             ],
             "samples": self.histogram.samples,
-            "volume_cc": self.histogram.total_cc,
-            "outside_dose_grid_cc": self.histogram.outside_cc,
+            "volume_in_dose_grid_cc": self.histogram.total_cc,
+            "volume_outside_dose_grid_cc": self.histogram.outside_cc,
+            "dose_grid_coverage_pct": self.coverage_pct,
             "bin_gy": BIN_GY,
         }
+
+    @property
+    def coverage_pct(self) -> float:
+        """The share of the structure the statistics describe: inside the dose grid."""
+        return self.histogram.coverage_pct
 
 
 def _result(
@@ -442,13 +462,10 @@ def _result(
     spacing: np.ndarray,
 ) -> DVHResult:
     if histogram.total_cc <= 0:
+        if histogram.outside_cc > 0:
+            raise DVHError("the structure lies wholly outside the dose grid")
         raise DVHError("the structure has no volume on the image")
     metrics, notes = histogram.statistics(config)
-    if histogram.outside_cc > 0:
-        share = 100.0 * histogram.outside_cc / histogram.total_cc
-        notes.insert(
-            0, f"{share:.3g} % of the structure lies outside the dose grid, counted as 0 Gy"
-        )
     return DVHResult(
         metrics,
         histogram,

@@ -956,11 +956,11 @@ class MetricsWorker(QObject):
     ) -> None:
         """Put one structure's dose statistics into ``row``.
 
-        ``compute`` takes the group's dose grid and returns the DVH. Anything
-        about the result worth reading (part of the structure outside the dose
-        grid, a D{x}cc larger than the structure) goes in its own column. A
-        failure goes in the row's error, prefixed ``DVH:``, and leaves the rest
-        of the row standing.
+        ``compute`` takes the group's dose grid and returns the DVH. The share
+        of the structure inside the dose grid, which the statistics describe,
+        goes in its own column on every row; a D{x}cc larger than that part goes
+        in the dose status. A failure goes in the row's error, prefixed
+        ``DVH:``, and leaves the rest of the row standing.
         """
         try:
             dose = self._load_dose_grid(group["patient_id"], group["gt_sop"])
@@ -971,6 +971,9 @@ class MetricsWorker(QObject):
             row["error"] = f"DVH: {exc}"
             return
         row["metrics"].update(result.metrics)
+        # On every dose row, so a structure the dose grid only partly covers
+        # cannot pass for one it covers: the statistics describe that part.
+        row["metrics"]["dose_coverage_pct"] = result.coverage_pct
         if result.status:
             row["metrics"]["dvh_status"] = result.status
         if self._audit:

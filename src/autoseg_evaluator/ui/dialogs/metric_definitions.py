@@ -262,8 +262,10 @@ hottest x of the structure receives; <b>V<sub>x Gy</sub></b> is the volume
 receiving at least x Gy. Dmin, Dmean and Dmax are exact over the samples. A
 D<sub>x cc</sub> larger than the structure is left empty, and the <i>Dose
 status</i> column says why.</p>
-<p>A part of a structure lying outside the dose grid is counted at 0 Gy, and the
-<i>Dose status</i> column gives its share of the volume. A consensus ground truth
+<p>The statistics describe the part of a structure inside the dose grid. A part
+lying outside it has no calculated dose, so it is left out rather than given
+one, and the <i>Dose grid coverage</i> column gives the share of the structure's
+volume the statistics describe: 100% when the grid covers all of it. A consensus ground truth
 has no contours, so its voxels are sampled instead, by the same spacing rule.</p>
 <p>Validated against the analytic datasets of Nelms et al., <i>Methods, software
 and datasets to verify DVH calculations against analytical values</i>, Medical

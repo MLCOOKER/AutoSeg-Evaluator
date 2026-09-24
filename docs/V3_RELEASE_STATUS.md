@@ -7,7 +7,7 @@ would produce three releases whose results cannot be compared with each other.
 Nothing here is released. This file records where each item stands so the scope
 of v3.0.0 is legible from the repository rather than from memory.
 
-**Checkpoint: 2026-09-24**, with #7 done: branch `v3-dev`; 1199 tests pass;
+**Checkpoint: 2026-09-24**, with #7 done: branch `v3-dev`; 1201 tests pass;
 `ruff check` and `ruff format --check` clean.
 
 ---
@@ -170,9 +170,13 @@ What was implemented:
   `DoseGrid` (any orientation) and `DoseHistogram`.
 - **The worker's five DVH call sites use it.** A consensus (STAPLE, or Tab 2 as
   ground truth) is sampled over its voxels by the same rule.
-- **Nothing is hidden.** A *Dose status* column says when part of a structure
-  lies outside the dose grid (counted at 0 Gy) or a D{X}cc exceeds the
-  structure, and the audit sidecar records each DVH's spacing and sample count.
+- **Statistics cover the part inside the dose grid** (user's ruling, over
+  counting the rest at 0 Gy). A *Dose grid coverage (%)* column on every dose
+  row gives the share described: 89 of 993 cohort structures were partly
+  outside, by 0.3–1.5 %. None of the cohort's 5,166 structures reach beyond
+  their CT, so the dose grid is the only coverage that falls short. A
+  *Dose status* column says when a D{X}cc exceeds the covered volume. The audit
+  sidecar records each DVH's spacing and sample count.
 - **dicompyler-core leaves the runtime dependencies.** It moves to the
   `validation` extra.
 - **Tests.** `tests/test_dvh.py` tests against answers known exactly; the

@@ -230,15 +230,19 @@ LOWER_IS_BETTER = frozenset(
     }
 )
 
-#: Columns that say what a 2D number was measured over — how many planes both
-#: structures reached, and how many only one did. They qualify a metric; they
-#: are not one, and comparing sources on them would test the wrong thing. Kept
-#: in the results table and export, left out of the report.
+#: Columns that say what a number was measured over — how many planes both
+#: structures reached, and how many only one did; how much of a structure the
+#: dose grid covers. They qualify a metric; they are not one, and comparing
+#: sources on them would test the wrong thing. Kept in the results table and
+#: export, left out of the report.
 DIAGNOSTIC_COLUMNS = frozenset(
     {
         "poly_planes_joint",
         "poly_planes_gt_only",
         "poly_planes_test_only",
+        # The dose's equivalent: how much of the structure the dose grid covers,
+        # which is the part every dose statistic in the row describes.
+        "dose_coverage_pct",
     }
 )
 

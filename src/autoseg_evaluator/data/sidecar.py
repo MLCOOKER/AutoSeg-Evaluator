@@ -119,9 +119,11 @@ def build(rows: Iterable[Mapping[str, Any]], *, settings: Mapping[str, Any] | No
                 "finest of 0.25, 0.5 and 1 mm keeping the structure within ten million "
                 "samples, or null when even 1 mm would not and each voxel was sampled "
                 "once; samples_per_voxel and subsample_spacing_mm (x, y, z) are what "
-                "that came to on the CT's voxels. outside_dose_grid_cc: volume beyond "
-                "the dose grid, counted at 0 Gy. D{x} is read from a histogram of "
-                "bin_gy bins."
+                "that came to on the CT's voxels. The statistics describe the part "
+                "of the structure inside the dose grid (volume_in_dose_grid_cc); the "
+                "part beyond it has no calculated dose and is left out "
+                "(volume_outside_dose_grid_cc, dose_grid_coverage_pct). D{x} is read "
+                "from a histogram of bin_gy bins."
             ),
         },
         "records": records,

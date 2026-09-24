@@ -72,8 +72,9 @@ def test_a_dose_row_records_how_its_statistics_were_taken(tmp_path):
         "samples_per_voxel": [5, 5, 9],
         "subsample_spacing_mm": [0.1954, 0.1954, 0.2222],
         "samples": 1_234_567,
-        "volume_cc": 21.4,
-        "outside_dose_grid_cc": 0.0,
+        "volume_in_dose_grid_cc": 21.4,
+        "volume_outside_dose_grid_cc": 0.0,
+        "dose_grid_coverage_pct": 100.0,
         "bin_gy": 0.001,
     }
     target = tmp_path / "dose.audit.json"

@@ -309,7 +309,7 @@ def test_the_2d_plane_counts_never_reach_the_report():
     from autoseg_evaluator.core.polygon_metrics import CONTEXT_COLUMNS
     from autoseg_evaluator.data.report import DIAGNOSTIC_COLUMNS
 
-    assert set(CONTEXT_COLUMNS) == set(DIAGNOSTIC_COLUMNS)
+    assert set(CONTEXT_COLUMNS) == set(DIAGNOSTIC_COLUMNS) - {"dose_coverage_pct"}
     model = build_report_model(
         [
             _row(
@@ -321,6 +321,14 @@ def test_the_2d_plane_counts_never_reach_the_report():
         ]
     )
     assert model.metrics() == ["poly_hd95_mm"]
+
+
+def test_dose_grid_coverage_never_reaches_the_report():
+    """It says what share of the structure the dose statistics describe."""
+    model = build_report_model(
+        [_row("P1", "Lung_L", "VendorA", {"dmean_gy": 12.3, "dose_coverage_pct": 98.6})]
+    )
+    assert model.metrics() == ["dmean_gy"]
 
 
 def test_favours_reads_the_direction_not_the_sign():

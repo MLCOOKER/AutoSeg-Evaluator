@@ -347,26 +347,40 @@ def test_dose_units():
         DoseGrid.from_dataset(_rtdose(_field, iop, offsets, origin, units="RELATIVE"))
 
 
-def test_the_part_outside_the_dose_grid_counts_as_zero_and_is_reported():
-    rtss, regions = _structure({z: [_circle(6.0)] for z in (-4, -2, 0, 2, 4)})
-    dose = _linear_grid((1.0, 0.0, 0.0), half=40.0)
-    covering_half = DoseGrid(
-        values=dose.values[:21],  # frames up to z = 0 only
+def _cut(dose: DoseGrid, frames: int) -> DoseGrid:
+    """The same dose, with only its first ``frames`` frames: a grid cut short."""
+    return DoseGrid(
+        values=dose.values[:frames],
         origin=dose.origin,
         row_direction=dose.row_direction,
         column_direction=dose.column_direction,
         normal=dose.normal,
         pixel_spacing=dose.pixel_spacing,
-        frame_offsets=dose.frame_offsets[:21],
+        frame_offsets=dose.frame_offsets[:frames],
     )
-    result = structure_dvh(rtss, 1, covering_half, _image(), CONFIG)
 
+
+def test_statistics_describe_the_part_inside_the_dose_grid():
+    """No dose was calculated beyond the grid, so none is invented there."""
+    rtss, regions = _structure({z: [_circle(6.0)] for z in (-4, -2, 0, 2, 4)})
+    dose = _cut(_linear_grid((1.0, 0.0, 0.0)), 21)  # frames up to z = 0 only
+    result = structure_dvh(rtss, 1, dose, _image(), CONFIG)
+
+    # Two whole slabs of five, and the lower 5 of the middle slab's 9 sub-slabs.
+    covered = (2 + 5 / 9) / 5
     _, area = _slab_centroid(regions)
-    assert result.histogram.total_cc == pytest.approx(area * 2.0 / 1000.0, rel=1e-9)
-    assert result.metrics["dmin_gy"] == 0.0
-    assert "outside the dose grid" in result.status
-    # Two whole slabs of five, and the upper 4 of the middle slab's 9 sub-slabs.
-    assert float(result.status.split(" %")[0]) == pytest.approx(100 * (2 + 4 / 9) / 5, abs=0.05)
+    assert result.coverage_pct == pytest.approx(100 * covered, rel=1e-9)
+    assert result.histogram.total_cc == pytest.approx(covered * area * 2.0 / 1000.0, rel=1e-9)
+    # The same discs, so the same dose along x: nothing pulled towards 0 Gy.
+    assert result.metrics["dmean_gy"] == pytest.approx(D0, abs=1e-6)
+    assert result.metrics["dmin_gy"] > D0 - 6.0
+    assert result.status == ""
+
+
+def test_a_structure_wholly_outside_the_dose_grid_has_no_dvh():
+    rtss, _ = _structure({z: [_circle(6.0)] for z in (4.0, 6.0)})
+    with pytest.raises(DVHError, match="wholly outside the dose grid"):
+        structure_dvh(rtss, 1, _cut(_linear_grid((1.0, 0.0, 0.0)), 21), _image(), CONFIG)
 
 
 # ---- What goes in, and what cannot --------------------------------------
@@ -446,7 +460,8 @@ def test_the_worker_puts_statistics_status_and_audit_in_the_row(monkeypatch):
         row, group, lambda d: structure_dvh(rtss, 1, d, _image(), worker._dvh_config)
     )
 
-    assert set(row["metrics"]) == {"dmean_gy", "dmax_gy"}
+    assert set(row["metrics"]) == {"dmean_gy", "dmax_gy", "dose_coverage_pct"}
+    assert row["metrics"]["dose_coverage_pct"] == 100.0
     assert row["metrics"]["dmean_gy"] == pytest.approx(D0 + 0.4, abs=1e-6)
     assert row["error"] == ""
     assert row["audit"]["dvh"]["source"] == "contours"

@@ -47,11 +47,14 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
   Every method but v2's is the application's own `core.dvh`, so the report
   measures the code that runs. It needs the new `validation` extra.
-- **A *Dose status* column.** It is blank unless something about a structure's
-  dose statistics needs saying: part of the structure lies outside the dose
-  grid (that part counts as 0 Gy, and the column gives its share of the
-  volume), or a requested D{X}cc is larger than the structure (the cell is left
-  empty rather than zero).
+- **A *Dose grid coverage (%)* column.** Dose statistics describe the part of
+  a structure inside the dose grid; the part outside has no calculated dose,
+  so it is left out rather than given one. The column gives the share of the
+  structure's volume the statistics describe on every dose row: 100 when the
+  grid covers all of it. It is left out of the Report tab, like the 2D plane
+  counts, because it qualifies a statistic rather than being one.
+- **A *Dose status* column.** It is blank unless a requested D{X}cc is larger
+  than the covered volume; that cell is left empty rather than zero.
 - **Precision and recall** as 3D mask metrics, behind one *Precision + recall*
   checkbox (on by default). Precision is the share of the test's volume inside
   the ground truth and falls with over-segmentation; recall is the share of the
