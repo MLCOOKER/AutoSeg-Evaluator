@@ -22,7 +22,7 @@ of v3.0.0 is legible from the repository rather than from memory.
 | 4 | Performance / parallelisation | **Not started** — needs re-profiling first |
 | 5 | Two-stream metric architecture | **Done**, all seven phases |
 | 6 | Canonical organ bucketing + statistics | **Done**, both halves |
-| 7 | Quantify DVH on mask vs on RTSS | **Not started** |
+| 7 | Quantify DVH on mask vs on RTSS | **Measured** — method decision pending |
 | 8 | Validation report for the Stream B metrics | **Partly done** — synthetic half written |
 
 ---
@@ -138,20 +138,69 @@ and still needs the matching change.
 
 ### 7 — DVH on a mask versus DVH on RTSS
 
-Not started. Both engines are live and they disagree by construction — grid,
-volume definition (contour integration versus voxel counting) and
-interpolation all differ:
+**Measured (2026-09-24); the method decision is pending.**
+`scripts/validate_dvh_methods.py` scores five candidate DVH methods against
+analytic truth and writes `docs/DVH_METHOD_VALIDATION.md`. The benchmarks:
 
-- `core/dvh.py:73` `compute_dvh_metrics` — dicompyler, rasterises contours onto
-  the dose grid.
-- `workers/metrics_worker.py:730` `_dvh_for_consensus_mask` — resamples dose
-  onto the mask grid and samples voxel doses.
+- **Nelms et al. 2015** (Med Phys 42:4435), Tests 1–3, beside the paper's own
+  Pinnacle3 and PlanIQ results.
+- **576 disc phantoms** with closed-form DVHs.
+- **Large structures up to 6,220 cc**, for timing.
 
-An earlier all-mask prototype diverged by up to ~50 % on V{X}Gy, which is why
-the mask path was rejected for RTSS in v2.4.2. Worth re-measuring now the
-rasteriser has changed and the masks are smaller. This is measurement only, no
-new behaviour, and it converts an acknowledged limitation in the manuscript
-Discussion into a quantified one.
+**The manuscript will cite this report; regenerate it whenever a DVH method
+changes.** The Nelms data live outside the repository (see the report).
+
+Parameters more than 3 % off the analytic value, without Dmin and Dmax:
+
+| Method | Nelms Test 1 | Nelms Test 2 |
+|---|---|---|
+| dicompyler (production today) | 119/260 | 140/195 |
+| mask: the 3D metrics' voxels, dose at centres | 8/260 | 56/195 |
+| mask-ss: same voxels, dose sampled ≤ 0.25 mm apart | 0/260 | 10/195 |
+| polygon: shared reading, exact sub-cell areas | 0/260 | 10/195 |
+| PlanIQ (paper) | 5 | 18 |
+| Pinnacle3 (paper) | 32 | 53 |
+
+Three defects in today's DVH path, all in dicompyler-core 0.5.6:
+
+- **D*x* lookup returns 0 Gy.** It picks the bin *nearest* the target volume
+  and takes the first bin on a tie. D99 was 0 Gy in 49 of the 100 Nelms cases.
+  Any D99 or D95 of 0 Gy in earlier results is this.
+- **Sampling only at dose-grid points** in each contour plane. With the lookup
+  corrected it is still 103/195 on Test 2.
+- **In-plane supersampling misplaces the dose.** Each value lands 0–1 dose pixel
+  from where it belongs, half a pixel on average. Production uses this as the
+  retry for structures too small to contain a dose point.
+
+**mask-ss against polygon.**
+
+- **On Nelms they tie.** What both still miss are shapes that change between
+  contour planes, the same cases PlanIQ misses.
+- **On the discs polygon is more accurate.** Its volume is exact, where the
+  voxels err by up to 16 % at R = 2.5 mm. Its worst dose error is 0.11 against
+  0.64 mm-equivalent.
+- **Speed is the same.** Both are dominated by dose look-ups, which scale with
+  volume ÷ spacing³, and are within a few percent of each other from run to
+  run. At 0.5 mm, polygon against mask-ss:
+
+  | Structure | polygon | mask-ss |
+  |---|---|---|
+  | 268 cc | 0.68 s | 0.71 s |
+  | 6,220 cc | 18.7 s | 18.4 s |
+
+  At 1 mm, a 6,220 cc cylinder takes about 1 s with at most 0.15 mm-equivalent
+  error. This parity needs polygon's signed-area accumulation; clipping each
+  sub-cell with shapely was 20× slower.
+
+**Two corrections to what was recorded here before.**
+
+- **Volume.** The two engines were said to differ in "contour integration versus
+  voxel counting". That was wrong: dicompyler counts dose-grid points too. They
+  differ in grid, loop rules, edge rule and dose sampling.
+- **The v2.4.2 rejection.** The mask path was rejected in v2.4.2 because an
+  all-mask prototype differed from dicompyler by up to ~50 % on V{X}Gy. That
+  was measured against dicompyler, not against truth. Against truth,
+  dicompyler is the outlier.
 
 ### 8 — Validation report for the Stream B metrics
 

@@ -36,6 +36,20 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   two candidates.
 
 ### Added
+- **DVH method validation** (`scripts/validate_dvh_methods.py`,
+  `docs/DVH_METHOD_VALIDATION.md`). It scores the current dicompyler-core path
+  and four alternatives against analytic truth:
+  - the Nelms et al. 2015 datasets, Tests 1–3, beside the paper's Pinnacle3 and
+    PlanIQ results;
+  - 576 disc phantoms with closed-form DVHs;
+  - structures up to 6,220 cc, for timing.
+
+  It found three defects in the current path:
+  - D*x* reported as 0 Gy, on D99 in 49 of the 100 Nelms cases;
+  - dose sampled only at dose-grid points;
+  - supersampled dose misplaced by half a dose pixel on average.
+
+  Measurement only; the DVH method itself is unchanged.
 - **Precision and recall** as 3D mask metrics, behind one *Precision + recall*
   checkbox (on by default). Precision is the share of the test's volume inside
   the ground truth and falls with over-segmentation; recall is the share of the
