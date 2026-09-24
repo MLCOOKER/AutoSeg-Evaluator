@@ -124,6 +124,16 @@ to the other mask's surface with a Euclidean distance transform.</p>
 Biased toward larger structures — a fixed boundary error costs a small organ far
 more Dice than a large one.</p>
 
+<h3>Precision and recall</h3>
+<p><b>Precision</b> is the share of the test's volume that lies inside the
+ground truth, and falls when the test over-segments. <b>Recall</b> is the share
+of the ground truth's volume the test covers, and falls when the test
+under-segments. Both run from 0 to 1. Dice cannot tell those two failures
+apart — a contour drawn too large and one drawn too small can score the same
+Dice — and these two can. Dice is their harmonic mean, which is why F1 is not
+reported: on masks it is Dice. Each is left empty when its denominator is: an
+empty test has no precision, and an empty ground truth no recall.</p>
+
 <h3>3D Hausdorff (100%) and (95%)</h3>
 <p>Distances are measured from each surface element of one mask to the nearest
 point of the other, in both directions. Each direction's value is taken

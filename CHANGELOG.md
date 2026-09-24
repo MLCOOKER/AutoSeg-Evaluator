@@ -36,6 +36,14 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   two candidates.
 
 ### Added
+- **Precision and recall** as 3D mask metrics, behind one *Precision + recall*
+  checkbox (on by default). Precision is the share of the test's volume inside
+  the ground truth and falls with over-segmentation; recall is the share of the
+  ground truth the test covers and falls with under-segmentation. Dice cannot
+  tell those two failures apart. F1 is not added: on binary masks it is Dice. An
+  empty test has no precision and an empty ground truth no recall, so those
+  cells are empty rather than zero. The audit record gains `overlap_voxels`, so
+  Dice, precision and recall can be recomputed from it.
 - **Canonical organ grouping (`core/organ_groups.py`, `data/organ_index.py`).**
   Collapses the spellings of one organ into one group so statistics can pool
   them, without ever pooling two organs. Grouping is on a structured key —

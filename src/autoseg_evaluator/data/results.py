@@ -50,12 +50,13 @@ META_COLUMNS: list[tuple[str, str]] = [
 CANONICAL_METRIC_COLUMNS: list[str] = [
     # Volumetric overlap
     "dice",
+    "precision",
+    "recall",
     "surface_dice",
     # Surface distances
     "hausdorff100",
     "hausdorff95",
     "mean_surface_distance",
-    # Added Path Length
     # 2D contour metrics, measured on the RTSTRUCT polygons rather than on a
     # rasterised mask. Kept together and after the mask block, because the two
     # streams answer the same question by different means and a reader has to be
@@ -110,12 +111,13 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
 _METRIC_LABELS: dict[str, str] = {
     # Volumetric overlap
     "dice": "Dice",
+    "precision": "Precision",
+    "recall": "Recall",
     "surface_dice": "Surface Dice",
     # Surface distances
     "hausdorff100": "3D Hausdorff 100% (mm)",
     "hausdorff95": "3D Hausdorff 95% (mm)",
     "mean_surface_distance": "Mean Surface Distance (mm)",
-    # Added Path Length
     # 2D contour metrics. Every one says "2D" because the mask stream reports
     # metrics with the same names, and in a table there is no group heading
     # between them.

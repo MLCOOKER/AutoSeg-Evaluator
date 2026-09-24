@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 import SimpleITK as sitk
 
 from autoseg_evaluator.core.dvh import DVHConfig
@@ -13,7 +14,9 @@ from autoseg_evaluator.core.metrics import (
     compute_geometric_metrics,
     dice,
     hausdorff,
+    mask_audit_detail,
     mean_surface_distance,
+    precision_recall,
     surface_dice,
     volume_and_com_metrics,
     volume_cc,
@@ -61,6 +64,62 @@ def test_surface_dice_identical_is_one():
     m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
     arr = sitk.GetArrayFromImage(m)
     assert surface_dice(arr, arr, (1.0, 1.0, 1.0), tolerance_mm=0.0) == 1.0
+
+
+# ---- Precision and recall ------------------------------------------------
+
+
+def _arr(*box):
+    return sitk.GetArrayFromImage(_cube_sitk((30, 30, 30), *box))
+
+
+def test_over_segmentation_costs_precision_and_not_recall():
+    """A test that contains the ground truth and 20 % more besides."""
+    gt = _arr(5, 15, 5, 15, 5, 15)  # 1000 voxels
+    test = _arr(5, 17, 5, 15, 5, 15)  # 1200 voxels, all of gt inside
+    precision, recall = precision_recall(gt, test)
+    assert precision == pytest.approx(1000 / 1200)
+    assert recall == 1.0
+
+
+def test_under_segmentation_costs_recall_and_not_precision():
+    gt = _arr(5, 15, 5, 15, 5, 15)  # 1000 voxels
+    test = _arr(5, 13, 5, 15, 5, 15)  # 800 voxels, all inside gt
+    precision, recall = precision_recall(gt, test)
+    assert precision == 1.0
+    assert recall == pytest.approx(0.8)
+
+
+def test_dice_is_their_harmonic_mean():
+    """Why F1 is not reported: on binary masks it is Dice."""
+    gt = _arr(5, 15, 5, 15, 5, 15)
+    test = _arr(7, 19, 4, 13, 5, 16)
+    precision, recall = precision_recall(gt, test)
+    f1 = 2 * precision * recall / (precision + recall)
+    assert f1 == pytest.approx(dice(gt, test))
+
+
+def test_a_share_of_nothing_is_not_a_number():
+    """An empty test has no precision and an empty ground truth no recall.
+
+    Zero would read as a complete failure; it is an undefined share instead.
+    """
+    gt = _arr(5, 15, 5, 15, 5, 15)
+    empty = np.zeros_like(gt)
+    precision, recall = precision_recall(gt, empty)
+    assert math.isnan(precision)
+    assert recall == 0.0
+    precision, recall = precision_recall(empty, gt)
+    assert precision == 0.0
+    assert math.isnan(recall)
+
+
+def test_the_audit_record_can_recompute_the_overlap_metrics():
+    gt = _cube_sitk((30, 30, 30), 5, 15, 5, 15, 5, 15)
+    test = _cube_sitk((30, 30, 30), 7, 17, 5, 15, 5, 15)
+    detail = mask_audit_detail(gt, test)
+    assert detail["overlap_voxels"] == 800
+    assert detail["overlap_voxels"] / detail["test_voxels"] == pytest.approx(0.8)
 
 
 # ---- Volume + centre-of-mass ---------------------------------------------
@@ -164,6 +223,7 @@ def test_compute_geometric_metrics_identical_masks_score_perfect():
     config = {
         "geometric": {
             "dice": True,
+            "precision_recall": True,
             "hausdorff100": True,
             "hausdorff95": True,
             "mean_surface_distance": True,
@@ -173,10 +233,21 @@ def test_compute_geometric_metrics_identical_masks_score_perfect():
     }
     out = compute_geometric_metrics(m, m, config)
     assert out["dice"] == 1.0
+    assert out["precision"] == 1.0
+    assert out["recall"] == 1.0
     assert out["hausdorff100"] == 0.0
     assert out["hausdorff95"] == 0.0
     assert out["mean_surface_distance"] == 0.0
     assert out["surface_dice"] == 1.0
+
+
+def test_precision_and_recall_come_as_a_pair_behind_one_switch():
+    """One alone misleads: recall rewards over-drawing, precision under-drawing."""
+    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    off = compute_geometric_metrics(m, m, {"geometric": {"dice": True}})
+    on = compute_geometric_metrics(m, m, {"geometric": {"precision_recall": True}})
+    assert "precision" not in off and "recall" not in off
+    assert set(on) == {"precision", "recall"}
 
 
 # ---- DVH config ----------------------------------------------------------

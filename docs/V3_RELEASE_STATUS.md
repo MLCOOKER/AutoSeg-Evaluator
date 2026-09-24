@@ -16,7 +16,7 @@ of v3.0.0 is legible from the repository rather than from memory.
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Precision / recall metrics | **Not started** |
+| 1 | Precision / recall metrics | **Done** |
 | 2 | Validate dcmrtstruct2nii against PlatiPy | **Done** |
 | 3 | Robust DICOM ingestion and grouping, without RTPLAN | **Done** |
 | 4 | Performance / parallelisation | **Not started** — needs re-profiling first |
@@ -88,8 +88,14 @@ external audit, with worked examples regenerated from the shipped code by
 
 ### 1 — Precision / recall
 
-Not started. No `precision` or `recall` in `core/metrics.py`. Cheap, and it is
-the only Stream A delta in #5, so it can land on its own.
+**Done (2026-09-24).** `precision_recall()` in `core/metrics.py`, behind one
+*Precision + recall* checkbox in the 3D group (on by default), two results
+columns in the overlap band, and a definitions entry. An empty test has no
+precision and an empty ground truth no recall, so those cells are empty, not
+zero. The audit record gains `overlap_voxels`. The Report tab already knew
+their names, direction and 0–1 axis. Not added to Tab 2's inter-observer table:
+between two observers, neither is the reference, so precision and recall would
+depend on which one happened to be listed first.
 
 **F1 is deliberately omitted** — it is identical to Dice on binary masks.
 

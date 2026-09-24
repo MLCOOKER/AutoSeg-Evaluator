@@ -455,9 +455,10 @@ saved in the session (schema v4) and re-emitted into Results on load.
 **Two geometry groups side by side**, because they are two methods, not one
 list: a reader compares them where they sit together.
 
-- **3D mask metrics (rasterised)** — Dice, Surface Dice, 3D Hausdorff 100% and
-  95%, Mean Surface Distance, Volume, COM offset; all on by default. **Surface
-  Dice τ** spinbox, default 3 mm (Nikolov 2018).
+- **3D mask metrics (rasterised)** — Dice, precision + recall (one checkbox,
+  two columns), Surface Dice, 3D Hausdorff 100% and 95%, Mean Surface Distance,
+  Volume, COM offset; all on by default. **Surface Dice τ** spinbox, default
+  3 mm (Nikolov 2018).
 - **2D contour metrics (native RTSS polygons)** — APL, NAPL, 2D Hausdorff 100%
   and 95%, 2D mean and median contour distance; all off by default, so an
   existing install does not start producing a second set of columns because it
@@ -865,6 +866,7 @@ high-level aggregator; it dispatches to:
 | Metric key | Function | Definition | Reference |
 |---|---|---|---|
 | `dice` | `compute_dice_coefficient` | 2·\|A∩B\| / (\|A\| + \|B\|) | Dice 1945 |
+| `precision` / `recall` | `precision_recall` (local) | \|A∩B\| / \|B\| and \|A∩B\| / \|A\| for GT A, test B; NaN when the denominator is empty. Precision falls with over-segmentation, recall with under-segmentation; Dice is their harmonic mean, so F1 is not reported | — |
 | `hausdorff100` | `compute_robust_hausdorff(sd, 100)` | Max symmetric surface distance (mm) | google-deepmind/surface-distance |
 | `hausdorff95` | `compute_robust_hausdorff(sd, 95)` | 95th-percentile surface distance (mm) | Aydin 2021 |
 | `mean_surface_distance` | `compute_average_surface_distance(sd)` | Mean of both directional means (mm); NaN if either is NaN | v1 convention (preserved) |

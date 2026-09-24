@@ -36,6 +36,7 @@ _DEFAULTS: dict[str, Any] = {
     },
     "compute_geometric": {
         "dice": True,
+        "precision_recall": True,
         "hausdorff100": True,
         "hausdorff95": True,
         "mean_surface_distance": True,

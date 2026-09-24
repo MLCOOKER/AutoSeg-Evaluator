@@ -38,6 +38,33 @@ def dice(gt_arr: np.ndarray, test_arr: np.ndarray) -> float:
     return compute_dice_coefficient(gt_arr, test_arr)
 
 
+def precision_recall(gt_arr: np.ndarray, test_arr: np.ndarray) -> tuple[float, float]:
+    """``(precision, recall)`` of a test mask against the ground truth.
+
+    Precision is the share of the test's volume that lies inside the ground
+    truth; it falls when the test over-segments. Recall is the share of the
+    ground truth's volume the test covers; it falls when the test
+    under-segments. Dice cannot tell those two failures apart — a contour
+    drawn 20 % too large and one drawn 20 % too small can score the same —
+    and these two can.
+
+    Dice is their harmonic mean, which is why F1 is not reported: on binary
+    masks it *is* Dice.
+
+    Each is NaN when its denominator is empty — precision for an empty test,
+    recall for an empty ground truth — because a share of nothing is not a
+    number, and zero would read as a real, complete failure.
+    """
+    gt = np.asarray(gt_arr).astype(bool)
+    test = np.asarray(test_arr).astype(bool)
+    overlap = float(np.count_nonzero(gt & test))
+    test_voxels = float(np.count_nonzero(test))
+    gt_voxels = float(np.count_nonzero(gt))
+    precision = overlap / test_voxels if test_voxels else math.nan
+    recall = overlap / gt_voxels if gt_voxels else math.nan
+    return precision, recall
+
+
 def hausdorff(
     gt_arr: np.ndarray, test_arr: np.ndarray, spacing_mm, percent: float = 100.0
 ) -> float:
@@ -163,6 +190,9 @@ def mask_audit_detail(
         "voxel_volume_mm3": voxel_mm3,
         "gt_voxels": int(gt_arr.sum()),
         "test_voxels": int(test_arr.sum()),
+        # With the two counts above, enough to recompute Dice, precision and
+        # recall from the record alone.
+        "overlap_voxels": int((gt_arr & test_arr).sum()),
         "gt_slices_touched": int((gt_arr.sum(axis=(1, 2)) > 0).sum()),
         "test_slices_touched": int((test_arr.sum(axis=(1, 2)) > 0).sum()),
         "measure": "surface area of each surface element, mm^2",
@@ -201,9 +231,9 @@ def compute_geometric_metrics(
 
     ``config`` has the same shape as :meth:`ComputeTab.config`:
 
-    * ``geometric``: ``{dice: bool, hausdorff100: bool, hausdorff95: bool,
-      mean_surface_distance: bool, surface_dice: bool, volume: bool,
-      com_offset: bool}``
+    * ``geometric``: ``{dice: bool, precision_recall: bool, hausdorff100: bool,
+      hausdorff95: bool, mean_surface_distance: bool, surface_dice: bool,
+      volume: bool, com_offset: bool}``
     * ``tolerances``: ``{surface_dice_tau_mm: float}``
 
     Returns a flat ``{metric_name: float}`` dict. Surface-distance derived
@@ -232,6 +262,8 @@ def compute_geometric_metrics(
 
     if geom.get("dice"):
         out["dice"] = dice(gt_arr, test_arr)
+    if geom.get("precision_recall"):
+        out["precision"], out["recall"] = precision_recall(gt_arr, test_arr)
 
     needs_sd = (
         geom.get("hausdorff100")

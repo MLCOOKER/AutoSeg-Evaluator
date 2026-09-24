@@ -23,9 +23,10 @@ command-line or coding expertise.
 ## Features
 
 - **Two ways of measuring geometry, side by side**:
-  - *3D mask metrics* — Dice, 3D Hausdorff 100% / 95%, Mean Surface Distance,
-    Surface Dice (configurable tolerance), centre-of-mass offset, signed volume
-    difference and volume ratio, computed on binary masks with Google DeepMind's
+  - *3D mask metrics* — Dice, precision and recall, 3D Hausdorff 100% / 95%,
+    Mean Surface Distance, Surface Dice (configurable tolerance), centre-of-mass
+    offset, signed volume difference and volume ratio, computed on binary masks;
+    the surface metrics with Google DeepMind's
     [`surface-distance`](https://github.com/google-deepmind/surface-distance).
   - *2D contour metrics* — Added Path Length and normalised APL (both
     directions), 2D Hausdorff 100% / 95%, mean and median contour distance,

@@ -104,7 +104,7 @@ class _BandedHeaderView(QHeaderView):
 
 
 def _band_for_metric_key(key: str) -> str:
-    if key in ("dice", "surface_dice"):
+    if key in ("dice", "precision", "recall", "surface_dice"):
         return "overlap"
     if key in ("hausdorff100", "hausdorff95", "mean_surface_distance"):
         return "surface"

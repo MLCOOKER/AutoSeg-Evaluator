@@ -2,8 +2,8 @@
 
 Provides:
 
-* a 3D mask-metric checkbox group (Dice, HD100/95, MSD, Surface Dice, volume,
-  centre-of-mass) plus the Surface Dice τ spinbox,
+* a 3D mask-metric checkbox group (Dice, precision + recall, HD100/95, MSD,
+  Surface Dice, volume, centre-of-mass) plus the Surface Dice τ spinbox,
 * a 2D contour-metric group measuring the RTSTRUCT polygons directly — APL,
   NAPL, 2D Hausdorff, mean and median distance — with its own APL τ, a
   separate method rather than a second list of names, so the two sit side by
@@ -80,6 +80,15 @@ _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
         "Dice",
         "Volumetric overlap: 2 · |A ∩ B| / (|A| + |B|). 0–1; 1 = identical. "
         "Biased toward larger structures (Rusanov 2025; Dice 1945).",
+    ),
+    (
+        "precision_recall",
+        "Precision + recall",
+        "Precision: the share of the test's volume inside the ground truth — "
+        "falls when the test over-segments. Recall: the share of the ground "
+        "truth's volume the test covers — falls when it under-segments. 0–1 "
+        "each. Dice cannot tell those two failures apart; these can. Dice is "
+        "their harmonic mean, so F1 is not reported separately.",
     ),
     (
         "hausdorff100",
@@ -592,6 +601,7 @@ class ComputeTab(QWidget):
         # Geometric metric flags
         defaults_geom = {
             "dice": True,
+            "precision_recall": True,
             "hausdorff100": True,
             "hausdorff95": True,
             "mean_surface_distance": True,

@@ -81,6 +81,8 @@ def test_compute_tab_defaults_load_from_settings(qapp):
     cfg = tab.config()
     assert cfg["geometric"]["dice"] is True
     assert cfg["geometric"]["hausdorff100"] is False
+    # Not in these settings, so it takes its default: on, like the rest of 3D.
+    assert cfg["geometric"]["precision_recall"] is True
     assert cfg["tolerances"]["surface_dice_tau_mm"] == pytest.approx(5.0)
     assert "apl_mean" not in cfg["geometric"]
     assert "apl_tolerance_mm" not in cfg["tolerances"]
