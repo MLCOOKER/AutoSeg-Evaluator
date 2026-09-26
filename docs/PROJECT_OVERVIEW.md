@@ -431,7 +431,10 @@ The rating **stack** is built from the Tab 3 drawer snapshot by
 
 **Per-grader configuration** (chosen in a dialog when the grader is added, then
 fixed): *blinded* (one contour at a time, source hidden) vs *transparent* (every
-source for the organ shown with labels + per-source visibility toggles);
+source for the organ shown with labels + per-source visibility toggles, and the
+contour being graded named in the status line — *Rating: VendorA — Parotid_L*,
+or *ground truth* — and in bold in the list, so a score cannot be given to the
+wrong outline unnoticed);
 *include GT*; and *randomize* (group-aware — all sources of an organ stay
 consecutive). Each grader gets their own order, scores and cursor.
 

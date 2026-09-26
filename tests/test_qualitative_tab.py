@@ -334,3 +334,74 @@ def test_reset_forgets_every_grader_and_score(qapp):
     assert tab._current_raters() == []
     assert not tab.has_scores()
     assert tab.session_state()["per_rater"] == {}
+
+
+# ---- Which contour is being graded ---------------------------------------------
+
+
+def _started(qapp, monkeypatch, mode, include_gt=False):
+    tab = QualitativeTab()
+    tab.set_drawers_provider(_drawers)
+    _add_rater(tab, "Alice", mode=mode, include_gt=include_gt)
+    # No CT in these tests: the status line is what is under test.
+    monkeypatch.setattr(tab, "_render_item", lambda item: None)
+    tab._on_start()
+    return tab
+
+
+def test_transparent_mode_names_the_contour_being_graded(qapp, monkeypatch):
+    """Every outline is labelled already; the status line says which one the
+    score is for, so it cannot be given to the wrong vendor unnoticed."""
+    tab = _started(qapp, monkeypatch, "transparent")
+    text = tab._status_label.text()
+    assert "Rating: VendorA — Brainstem" in text
+    assert "Patient P1 · Brainstem" in text
+    tab._apply_score(4)
+    assert "Rating: VendorB — Brainstem" in tab._status_label.text()
+
+
+def test_transparent_mode_names_the_ground_truth_as_such(qapp, monkeypatch):
+    tab = _started(qapp, monkeypatch, "transparent", include_gt=True)
+    assert "Rating: ground truth — Brainstem" in tab._status_label.text()
+
+
+def test_blinded_mode_names_no_source(qapp, monkeypatch):
+    tab = _started(qapp, monkeypatch, "blinded")
+    assert tab._status_label.text() == "Patient P1 · Brainstem"
+
+
+def test_a_source_name_is_shown_as_text_not_markup(qapp, monkeypatch):
+    drawers = _drawers()
+    drawers[0]["patients"][0]["tests"][0]["source_label"] = "A<b>&B"
+    tab = QualitativeTab()
+    tab.set_drawers_provider(lambda: drawers)
+    _add_rater(tab, "Alice", mode="transparent")
+    monkeypatch.setattr(tab, "_render_item", lambda item: None)
+    tab._on_start()
+    assert "A&lt;b&gt;&amp;B" in tab._status_label.text()
+
+
+def test_the_graded_contour_is_bold_in_the_side_panel(qapp):
+    import numpy as np
+
+    from autoseg_evaluator.ui.widgets.multiplanar_viewer import Overlay
+
+    tab = QualitativeTab()
+    mask = np.zeros((2, 4, 4), dtype=bool)
+    tab._rebuild_source_panel(
+        [
+            Overlay(label="VendorA — Brainstem", color="#1f77b4", mask=mask, active=False),
+            Overlay(label="VendorB — Brainstem", color="#ff7f0e", mask=mask, active=True),
+        ]
+    )
+    boxes = [
+        tab._source_panel_lay.itemAt(i).widget()
+        for i in range(tab._source_panel_lay.count())
+        if tab._source_panel_lay.itemAt(i).widget() is not None
+    ]
+    assert [b.text() for b in boxes] == [
+        "VendorA — Brainstem",
+        "VendorB — Brainstem  (rating)",
+    ]
+    assert "font-weight: bold" not in boxes[0].styleSheet()
+    assert "font-weight: bold" in boxes[1].styleSheet()

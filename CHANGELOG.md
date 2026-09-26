@@ -86,6 +86,11 @@ Each has a regression test that reproduces the audit's case
   two candidates.
 
 ### Added
+- **Transparent Likert mode names the contour being graded** — *Rating: VendorA
+  — Parotid_L*, or *ground truth* — in the status line, and in bold in the list
+  of sources. Every outline was already labelled in that mode; with several in
+  similar colours, a score could be given to the wrong one without anyone ever
+  finding out. Blinded mode is unchanged.
 - **Several tolerances in one run.** Surface Dice τ and APL τ accept a list,
   such as "1, 2, 3". Each tolerance fills its own column, named with it
   (`Surface Dice @ 1.00 mm`), and is its own metric in the report. Surface

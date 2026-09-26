@@ -22,6 +22,7 @@ the same data layer as the metrics worker.
 
 from __future__ import annotations
 
+import html
 import random
 from collections.abc import Callable
 from typing import Any
@@ -370,7 +371,8 @@ class QualitativeTab(QWidget):
             "<ul>"
             "<li><i>Blinded</i> — one contour at a time, source hidden.</li>"
             "<li><i>Transparent</i> — every source for the organ shown on the CT with "
-            "labels and per-source visibility toggles.</li>"
+            "labels and per-source visibility toggles. The contour being graded is "
+            "named below the viewer and in bold in the list.</li>"
             "<li><i>Include GT</i> — also rate the manual / ground-truth contour.</li>"
             "<li><i>Randomize</i> — random presentation order (kept organ-by-organ).</li>"
             "</ul></li>"
@@ -642,10 +644,21 @@ class QualitativeTab(QWidget):
             self._status_label.setText(f"Could not load contour: {exc}")
             return
         prior = self._rater_scores.get(self._active_rater or "", {}).get(item.item_id)
-        self._status_label.setText(
-            f"Patient {item.patient_id} · {item.organ_name}"
-            + (f" · previous score {prior}" if prior is not None else "")
+        status = f"Patient {item.patient_id} · {item.organ_name}" + (
+            f" · previous score {prior}" if prior is not None else ""
         )
+        if self._active_mode() == TRANSPARENT:
+            # Every outline on screen is already labelled with its source, so
+            # naming the one being graded reveals nothing new. It removes doubt
+            # about which outline the score is for: with several sources in
+            # similar colours, a score given to the wrong one could never be
+            # found afterwards. Blinded mode shows one contour and names none.
+            self._status_label.setText(
+                f"<b>Rating: {html.escape(_contour_label(item))}</b>"
+                f" &nbsp;·&nbsp; {html.escape(status)}"
+            )
+        else:
+            self._status_label.setText(status)
         if animate in ("left", "right"):
             self._swipe(animate)
 
@@ -673,10 +686,9 @@ class QualitativeTab(QWidget):
                 if it.is_gt
                 else color_for_index(self._source_color.get(it.source_label, 0))
             )
-            label = "ground truth" if it.is_gt else it.source_label
             overlays.append(
                 Overlay(
-                    label=f"{label} — {it.roi_name}",
+                    label=_contour_label(it),
                     color=color,
                     mask=mask,
                     active=it.item_id == item.item_id,
@@ -694,7 +706,11 @@ class QualitativeTab(QWidget):
         for idx, ov in enumerate(overlays):
             cb = QCheckBox(ov.label + ("  (rating)" if ov.active else ""))
             cb.setChecked(True)
-            cb.setStyleSheet(f"color: {ov.color};")
+            # The contour being graded stands out from the others in the list.
+            # Set in the widget's own style sheet, which the theme cannot
+            # override.
+            weight = " font-weight: bold;" if ov.active else ""
+            cb.setStyleSheet(f"color: {ov.color};{weight}")
             cb.toggled.connect(lambda checked, i=idx: self._viewer.set_overlay_visible(i, checked))
             self._source_panel_lay.addWidget(cb)
         self._source_panel_lay.addStretch(1)
@@ -983,6 +999,16 @@ class QualitativeTab(QWidget):
                         "scored_at": times.get(item_id, ""),
                     }
                 )
+
+
+def _contour_label(item: QualitativeItem) -> str:
+    """``VendorA — Parotid_L``, or ``ground truth — Parotid_L`` for the GT.
+
+    One wording for the viewer's legend, the side panel and the transparent
+    mode's status line, so the name a grader reads is the name they see drawn.
+    """
+    source = "ground truth" if item.is_gt else item.source_label
+    return f"{source} — {item.roi_name}"
 
 
 def _split_item_id(item_id: str) -> tuple[str, str, str, int]:
