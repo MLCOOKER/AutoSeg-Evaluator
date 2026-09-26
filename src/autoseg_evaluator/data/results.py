@@ -339,6 +339,22 @@ class ResultsManager:
         # assignment in the review dialog re-labels existing results instead of
         # requiring the whole cohort to be recomputed.
         self._organ_index: dict[str, Any] = {}
+        self._revision = 0
+
+    @property
+    def revision(self) -> int:
+        """Changes whenever rows already read could read differently.
+
+        Adding a computed row leaves it alone, because every row read before
+        is still there, first and unchanged. That lets a view append the new
+        rows instead of rebuilding — unless Likert scores exist, since a new
+        row can then take over a score-only row (see :meth:`has_scores`).
+        """
+        return self._revision
+
+    def has_scores(self) -> bool:
+        """Whether any Likert score is stored."""
+        return bool(self._qualitative)
 
     def set_organ_index(self, index: Any | None) -> None:
         """Supply canonical organ assignments, keyed by raw ROI name.
@@ -348,6 +364,7 @@ class ResultsManager:
         leaves the organ columns blank — results remain valid, they just are
         not grouped.
         """
+        self._revision += 1
         if index is None:
             self._organ_index = {}
             return
@@ -431,6 +448,7 @@ class ResultsManager:
 
         ``rtstruct_sop_uid`` is part of the contour's identity; see the key.
         """
+        self._revision += 1
         key = (
             str(patient_id),
             str(drawer),
@@ -536,10 +554,12 @@ class ResultsManager:
         not to a run: they were given in the Qualitative tab, often over several
         sessions, and the next computation's rows pick them up again.
         """
+        self._revision += 1
         self._rows.clear()
 
     def clear(self) -> None:
         """Discard the rows and the scores — for loading a different cohort."""
+        self._revision += 1
         self._rows.clear()
         self._qualitative.clear()
         # The organ index belongs to the loaded cohort, not to a batch of
@@ -680,6 +700,7 @@ class ResultsManager:
 
         The Likert scores are left alone; the Qualitative tab restores them.
         """
+        self._revision += 1
         self._rows.clear()
         for row in (data or {}).get("rows", []) or []:
             if isinstance(row, dict):

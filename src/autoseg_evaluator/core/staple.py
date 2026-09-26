@@ -16,13 +16,16 @@ For each ``compute_staple`` call we:
 2. Run STAPLE on the cropped stack and read back per-rater
    sensitivity / specificity and the probabilistic truth.
 3. Threshold the probability map at 0.5 → binary consensus mask.
-4. Pad both the probability map and the binary consensus back to the
-   original image extent so downstream metric code can compare them with
-   the rater masks unchanged.
+4. Pad the binary consensus back to the original image extent so downstream
+   metric code can compare it with the rater masks unchanged.
 
 The returned :class:`StapleResult` also carries scalar uncertainty
 summaries (uncertain-band volume, mean entropy) that the worker dumps into
-the consensus summary row.
+the consensus summary row. They are read from the cropped images: everything
+outside the box is zero in every one of them, so it adds nothing to a count or
+to a mean over voxels above a threshold. Padding the probability map back to
+the whole CT first cost a float32 volume and a float64 copy of it per call,
+several hundred megabytes on a large CT, for no difference in any value.
 """
 
 from __future__ import annotations
@@ -118,7 +121,8 @@ class StapleResult:
     """
 
     consensus_mask: sitk.Image  # uint8 binary, P ≥ 0.5
-    probability_map: sitk.Image  # float32 in [0, 1]
+    probability_cropped: sitk.Image  # float32 in [0, 1], over probability_bbox only
+    probability_bbox: tuple[int, int, int, int, int, int]  # (x0, y0, z0, x1, y1, z1)
     sensitivities: list[float]
     specificities: list[float]
     elapsed_iterations: int
@@ -136,6 +140,21 @@ class StapleResult:
     def converged(self) -> bool:
         """``True`` when STAPLE stopped before hitting the iteration cap."""
         return self.elapsed_iterations < self.max_iterations
+
+    @property
+    def probability_map(self) -> sitk.Image:
+        """The probability map over the whole image (float32), built on request.
+
+        Zero outside the box STAPLE ran in. Nothing in the computation needs
+        it at this size, so it is not built unless asked for.
+        """
+        return _pad_back(
+            self.probability_cropped,
+            self.consensus_mask,
+            self.probability_bbox,
+            default=0.0,
+            pixel_type=sitk.sitkFloat32,
+        )
 
 
 # ---- Main entry point ----------------------------------------------------
@@ -194,24 +213,29 @@ def compute_staple(
     specificities = [float(s) for s in f.GetSpecificity()]
     elapsed = int(f.GetElapsedIterations())
 
-    # Build the binary consensus (cropped), then pad both back to the
-    # original image extent so downstream code can compare against masks
-    # that were never cropped.
+    # Build the binary consensus (cropped), then pad it back to the original
+    # image extent so downstream code can compare against masks that were
+    # never cropped.
     bin_cropped = sitk.BinaryThreshold(prob_cropped, lowerThreshold=0.5, upperThreshold=1.0)
     bin_cropped = sitk.Cast(bin_cropped, sitk.sitkUInt8)
-    probability_map = _pad_back(
-        prob_cropped, reference, bbox, default=0.0, pixel_type=sitk.sitkFloat32
-    )
     consensus_mask = _pad_back(bin_cropped, reference, bbox, default=0, pixel_type=sitk.sitkUInt8)
+    # The probabilities are kept at float32, the precision the full map always
+    # had, and rounded the same way, so the summaries below read the same values.
+    probability_cropped = sitk.GetImageFromArray(
+        sitk.GetArrayFromImage(prob_cropped).astype(np.float32)
+    )
+    probability_cropped.CopyInformation(prob_cropped)
 
-    # Scalar uncertainty summaries
-    consensus_volume_cc = _volume_cc(consensus_mask)
-    uncertain_band_cc, mean_entropy = _uncertainty_metrics(probability_map)
-    rater_disagreement_cc, rater_volume_range_cc = _rater_disagreement(valid)
+    # Scalar uncertainty summaries, over the box: outside it every image here
+    # is zero, which no count or above-threshold mean includes.
+    consensus_volume_cc = _volume_cc(bin_cropped)
+    uncertain_band_cc, mean_entropy = _uncertainty_metrics(probability_cropped)
+    rater_disagreement_cc, rater_volume_range_cc = _rater_disagreement(cropped)
 
     return StapleResult(
         consensus_mask=consensus_mask,
-        probability_map=probability_map,
+        probability_cropped=probability_cropped,
+        probability_bbox=bbox,
         sensitivities=sensitivities,
         specificities=specificities,
         elapsed_iterations=elapsed,

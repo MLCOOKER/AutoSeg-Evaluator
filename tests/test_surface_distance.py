@@ -152,3 +152,70 @@ def test_hausdorff_95_smaller_than_hausdorff_100():
     hd100 = compute_robust_hausdorff(sd, 100)
     hd95 = compute_robust_hausdorff(sd, 95)
     assert hd95 <= hd100
+
+
+# ---- Speed changes that must not move a number ---------------------------
+
+
+def _tuple_sort(distances, areas):
+    """The sort the DeepMind port shipped with, kept here as the oracle."""
+    ordered = np.array(sorted(zip(distances, areas)))
+    return ordered[:, 0], ordered[:, 1]
+
+
+def test_surfel_sort_gives_the_tuple_sort_order_exactly():
+    """Distance first, then area among tied distances — ties are the norm.
+
+    Distances on a voxel lattice take few distinct values, so most surfels tie
+    on distance, and the percentile Hausdorff distances read a position in this
+    order. Infinite distances occur when one surface is empty.
+    """
+    from autoseg_evaluator.core.surface_distance import _sort_distances_surfels
+
+    rng = np.random.default_rng(7)
+    for trial in range(200):
+        n = int(rng.integers(1, 4000))
+        distances = rng.choice(np.round(rng.random(40) * 10, 3), n)
+        if trial % 5 == 0:
+            distances[rng.random(n) < 0.2] = np.inf
+        areas = rng.choice(rng.random(6), n)
+        got_d, got_a = _sort_distances_surfels(distances, areas)
+        want_d, want_a = _tuple_sort(distances, areas)
+        assert np.array_equal(got_d, want_d)
+        assert np.array_equal(got_a, want_a)
+
+
+def test_surface_metrics_unchanged_by_the_sort_on_real_shapes():
+    """End to end on shapes with many ties, against the tuple-sorted distances."""
+    import autoseg_evaluator.core.surface_distance as sd_module
+
+    gt = np.zeros((24, 40, 40), dtype=np.uint8)
+    pred = np.zeros_like(gt)
+    zz, yy, xx = np.mgrid[:24, :40, :40]
+    gt[((xx - 20) / 12.0) ** 2 + ((yy - 20) / 9.0) ** 2 + ((zz - 12) / 8.0) ** 2 <= 1] = 1
+    pred[((xx - 22) / 11.0) ** 2 + ((yy - 19) / 10.0) ** 2 + ((zz - 11) / 7.0) ** 2 <= 1] = 1
+    spacing = (3.0, 0.98, 0.98)
+
+    new = compute_surface_distances(gt, pred, spacing)
+    original = sd_module._sort_distances_surfels
+    try:
+        sd_module._sort_distances_surfels = _tuple_sort
+        old = compute_surface_distances(gt, pred, spacing)
+    finally:
+        sd_module._sort_distances_surfels = original
+    for key in old:
+        assert np.array_equal(new[key], old[key]), key
+    for percent in (95, 100):
+        assert compute_robust_hausdorff(new, percent) == compute_robust_hausdorff(old, percent)
+
+
+def test_the_surface_area_table_is_built_once_per_spacing_and_unchanged():
+    from autoseg_evaluator.core.surface_distance import _surface_area_table
+
+    spacing = (3.0, 0.9765625, 0.9765625)
+    cached = _surface_area_table(spacing)
+    assert np.array_equal(cached, create_table_neighbour_code_to_surface_area(spacing))
+    # NumPy floats and Python floats name the same spacing, and share a table.
+    assert _surface_area_table(tuple(float(v) for v in np.array(spacing))) is cached
+    # Shared across calls, so nothing may write into it.
+    assert not cached.flags.writeable

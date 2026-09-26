@@ -131,13 +131,41 @@ def volume_and_com_metrics(gt_mask: sitk.Image, test_mask: sitk.Image) -> dict[s
     Returns a flat dict ready for merging into the per-row metrics output. Any
     value that cannot be defined (e.g. ratio when GT is empty) is set to NaN.
     """
-    v_gt = volume_cc(gt_mask)
-    v_test = volume_cc(test_mask)
-    v_diff = v_test - v_gt
-    v_ratio = (v_test / v_gt) if v_gt > 0 else math.nan
+    return {
+        **_volume_metrics(volume_cc(gt_mask), volume_cc(test_mask)),
+        **_offset_metrics(centroid_physical(gt_mask), centroid_physical(test_mask)),
+    }
 
-    c_gt = centroid_physical(gt_mask)
-    c_test = centroid_physical(test_mask)
+
+def _volume_metrics(v_gt: float, v_test: float) -> dict[str, float]:
+    return {
+        "volume_gt_cc": v_gt,
+        "volume_test_cc": v_test,
+        "volume_diff_cc": v_test - v_gt,
+        "volume_ratio": (v_test / v_gt) if v_gt > 0 else math.nan,
+    }
+
+
+def _cropped_centroid(
+    image: sitk.Image, arr: np.ndarray, corner_zyx: tuple[int, int, int]
+) -> tuple[float, float, float] | None:
+    """:func:`centroid_physical` of a mask given as a crop of its voxels.
+
+    ``corner_zyx`` is the index of the crop's first voxel in ``image``. It is
+    added to the integer indices before they are averaged, so the centroid
+    comes out bit for bit as the uncropped one: the same indices, in the same
+    order, in the same sum.
+    """
+    if int(arr.sum()) == 0:
+        return None
+    zs, ys, xs = np.nonzero(arr)
+    z0, y0, x0 = corner_zyx
+    index = (float((xs + x0).mean()), float((ys + y0).mean()), float((zs + z0).mean()))
+    return tuple(image.TransformContinuousIndexToPhysicalPoint(index))
+
+
+def _offset_metrics(c_gt, c_test) -> dict[str, float]:
+    """Offset of the test's centroid from the ground truth's, in mm."""
     if c_gt is None or c_test is None:
         dx = dy = dz = math.nan
         offset = math.nan
@@ -146,17 +174,56 @@ def volume_and_com_metrics(gt_mask: sitk.Image, test_mask: sitk.Image) -> dict[s
         dy = c_test[1] - c_gt[1]
         dz = c_test[2] - c_gt[2]
         offset = float(math.sqrt(dx * dx + dy * dy + dz * dz))
-
     return {
-        "volume_gt_cc": v_gt,
-        "volume_test_cc": v_test,
-        "volume_diff_cc": v_diff,
-        "volume_ratio": v_ratio,
         "com_offset_mm": offset,
         "com_dx_mm": float(dx) if not math.isnan(dx) else math.nan,
         "com_dy_mm": float(dy) if not math.isnan(dy) else math.nan,
         "com_dz_mm": float(dz) if not math.isnan(dz) else math.nan,
     }
+
+
+# ---- The pair's shared region ----------------------------------------------
+
+
+def _voxels(mask: sitk.Image) -> np.ndarray:
+    """A mask's voxels as ``(z, y, x)`` uint8, without a copy when they already are.
+
+    A read-only view of the image's own buffer, so it is only valid while the
+    image is alive; every caller holds the image for the length of the call.
+    """
+    view = sitk.GetArrayViewFromImage(mask)
+    return view if view.dtype == np.uint8 else view.astype(np.uint8)
+
+
+def _extent(arr: np.ndarray) -> tuple[int, int, int, int, int, int] | None:
+    """``(z0, z1, y0, y1, x0, x1)``, half-open, holding every foreground voxel.
+
+    One pass over the volume finds the occupied slices; the other two axes are
+    then searched within those slices only.
+    """
+    zs = np.flatnonzero(arr.max(axis=(1, 2)))
+    if zs.size == 0:
+        return None
+    z0, z1 = int(zs[0]), int(zs[-1]) + 1
+    slab = arr[z0:z1]
+    ys = np.flatnonzero(slab.max(axis=(0, 2)))
+    y0, y1 = int(ys[0]), int(ys[-1]) + 1
+    xs = np.flatnonzero(slab[:, y0:y1].max(axis=(0, 1)))
+    x0, x1 = int(xs[0]), int(xs[-1]) + 1
+    return z0, z1, y0, y1, x0, x1
+
+
+def _union_extent(a, b) -> tuple[int, int, int, int, int, int] | None:
+    if a is None or b is None:
+        return a if b is None else b
+    return (
+        min(a[0], b[0]),
+        max(a[1], b[1]),
+        min(a[2], b[2]),
+        max(a[3], b[3]),
+        min(a[4], b[4]),
+        max(a[5], b[5]),
+    )
 
 
 # ---- Aggregator ----------------------------------------------------------
@@ -248,8 +315,22 @@ def compute_geometric_metrics(
     # distances are computed once, so every further tolerance is a threshold.
     sd_taus = normalise_tolerances(tols.get("surface_dice_tau_mm"))
 
-    gt_arr = sitk.GetArrayFromImage(gt_mask).astype(np.uint8)
-    test_arr = sitk.GetArrayFromImage(test_mask).astype(np.uint8)
+    # Both masks, cropped to the smallest box holding both structures. Every
+    # metric here is decided inside it: outside, both masks are empty, which
+    # adds nothing to a count, a centroid or a surface, and the surface-distance
+    # code already cropped to this same box itself. The whole CT used to be
+    # copied four times per pair and scanned by each metric in turn; now each
+    # mask is read in place, and scanned once to find the box.
+    gt_full = _voxels(gt_mask)
+    test_full = _voxels(test_mask)
+    box = _union_extent(_extent(gt_full), _extent(test_full))
+    if box is None:  # both empty: there is nothing to crop to
+        gt_arr, test_arr, corner = gt_full, test_full, (0, 0, 0)
+    else:
+        z0, z1, y0, y1, x0, x1 = box
+        gt_arr = gt_full[z0:z1, y0:y1, x0:x1]
+        test_arr = test_full[z0:z1, y0:y1, x0:x1]
+        corner = (z0, y0, x0)
 
     # SimpleITK reports spacing as (x, y, z) but the numpy array shape is
     # (z, y, x). The surface-distance algorithm (and the underlying
@@ -293,16 +374,21 @@ def compute_geometric_metrics(
             for tau in sd_taus:
                 out[tolerance_key("surface_dice", tau)] = compute_surface_dice_at_tolerance(sd, tau)
 
-    # Volume + centre-of-mass are computed together (single mask traversal each
-    # under the hood), but exposed via two independent checkboxes so users can
-    # opt into volume-only or COM-only outputs.
-    if geom.get("volume") or geom.get("com_offset"):
-        vc = volume_and_com_metrics(gt_mask, test_mask)
-        if geom.get("volume"):
-            for k in ("volume_gt_cc", "volume_test_cc", "volume_diff_cc", "volume_ratio"):
-                out[k] = vc[k]
-        if geom.get("com_offset"):
-            for k in ("com_offset_mm", "com_dx_mm", "com_dy_mm", "com_dz_mm"):
-                out[k] = vc[k]
+    # Two independent checkboxes; each is computed only when ticked. A centroid
+    # lists the index of every foreground voxel, which volume alone never needs.
+    if geom.get("volume"):
+        out.update(
+            _volume_metrics(
+                float(int(gt_arr.sum()) * _voxel_volume_cc(gt_mask)),
+                float(int(test_arr.sum()) * _voxel_volume_cc(test_mask)),
+            )
+        )
+    if geom.get("com_offset"):
+        out.update(
+            _offset_metrics(
+                _cropped_centroid(gt_mask, gt_arr, corner),
+                _cropped_centroid(test_mask, test_arr, corner),
+            )
+        )
 
     return out

@@ -392,17 +392,6 @@ def test_results_tab_clear_button_empties_manager(qapp, monkeypatch):
     assert tab._table.rowCount() == 0
 
 
-def test_results_tab_append_row_refreshes(qapp):
-    """When MainWindow forwards a worker row, the table updates immediately."""
-    rm = ResultsManager()
-    tab = ResultsTab()
-    tab.set_results_manager(rm)
-    assert tab._table.rowCount() == 0
-    rm.add_row(_row(metrics={"dice": 0.9}))
-    tab.append_row({})  # triggers refresh
-    assert tab._table.rowCount() == 1
-
-
 def test_results_tab_export_button_writes_file(qapp, tmp_path, monkeypatch):
     rm = ResultsManager()
     rm.add_row(_row(metrics={"dice": 0.9}))

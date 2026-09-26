@@ -56,6 +56,46 @@ Each has a regression test that reproduces the audit's case
 - **The consensus UID changed between runs** (`hash()` is salted per process);
   it is now a digest.
 
+### Changed — speed, from an external review, September 2026
+- **Results and Report no longer rebuild after every row.** Every result row
+  and every Likert score rebuilt both tabs in full, seen or not, so the work
+  grew with the square of the rows: about half an hour of the window's time
+  over a 1,000-row computation, and seconds on each Likert click. A hidden tab
+  now catches up when it is shown. A visible Results tab appends the new rows
+  about once a second, and rebuilds only when rows it already shows could
+  change (a new column, a score, an organ label, a cleared or restored table).
+  What the tabs show is unchanged; only when it is drawn. Simulated with 1,000
+  rows: under a second of the window's time for the whole run, then 0.9 s to
+  open Results and 2.4 s to open Report.
+- **STAPLE summaries are read from the cropped images.** The probability map
+  was padded to the whole CT and scanned there for the uncertainty summaries,
+  as were the rater masks for the disagreement volume. Outside STAPLE's box
+  every one of them is zero, so the values are identical; each call no longer
+  spends about half a second and 400 MB on it (512 × 512 × 150 CT, five
+  raters). The whole-image probability map is still available, built on
+  request, and nothing in a computation requests it.
+- **Surface distances are sorted with NumPy.** The same order as the DeepMind
+  port's tuple sort (distance, then surfel area among ties, which the
+  percentile Hausdorff distances depend on), without a Python tuple per surfel;
+  and the surface-area table is built once per voxel spacing rather than once
+  per pair. About a fifth off each surface-distance calculation.
+- **Masks are released after their last use.** Each mask is a full-CT volume
+  (37.5 MiB on a 512 × 512 × 150 CT), and every mask of a patient stayed cached
+  until the patient was finished: 30 organs against 8 contour sets held about
+  9 GB at once. The worker now counts, before the run, how many drawers use
+  each mask and drops it after the last, so at most one drawer's masks are held,
+  plus any a later drawer shares. A shared mask is still rasterised once, and
+  no result changes.
+- **The mask metrics work on the pair's shared region.** Each pair copied the
+  whole CT four times and every metric scanned it in turn, and volume computed
+  both centroids even when centre-of-mass was not ticked. The masks are now read
+  in place, cropped once to the smallest box holding both structures, and every
+  metric is taken there; the centroid only when asked for. Outside the box both
+  masks are empty, so every value is bit-for-bit identical (a centroid adds the
+  crop's corner to the integer indices before averaging). On a 512 × 512 × 150
+  CT: a parotid-sized pair from 504 to 14 ms with every geometric metric, a
+  liver-sized pair from 813 to 347 ms, volume alone from about 350 ms to 5 ms.
+
 ### Fixed
 - **2D metrics were unavailable for structure sets with dangling references.**
   A structure set naming a Frame of Reference it never declares, or image slices

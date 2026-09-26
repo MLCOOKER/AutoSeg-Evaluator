@@ -13,6 +13,7 @@ tested with synthetic numpy arrays.
 
 from __future__ import annotations
 
+import functools
 import math
 
 import numpy as np
@@ -311,6 +312,19 @@ def create_table_neighbour_code_to_surface_area(spacing_mm) -> np.ndarray:
     return out
 
 
+@functools.lru_cache(maxsize=16)
+def _surface_area_table(spacing_mm: tuple[float, float, float]) -> np.ndarray:
+    """The surface-area table for one spacing, built once per run, not per pair.
+
+    Every pair in a cohort drawn on one CT shares its spacing, and the table
+    takes a few milliseconds of Python loops to build. Read-only, as it is
+    shared.
+    """
+    table = create_table_neighbour_code_to_surface_area(spacing_mm)
+    table.setflags(write=False)
+    return table
+
+
 def create_table_neighbour_code_to_contour_length(spacing_mm) -> np.ndarray:
     """16-element 2D lookup mapping 4-bit codes to contour-segment lengths."""
     arr = np.zeros(16)
@@ -372,10 +386,12 @@ def _crop_to_bounding_box(
 
 
 def _sort_distances_surfels(distances: np.ndarray, surfel_areas: np.ndarray):
-    # Default tuple-lex sort matches the google-deepmind implementation exactly
-    # — tied distances are then sorted by surfel area.
-    sorted_surfels = np.array(sorted(zip(distances, surfel_areas)))
-    return sorted_surfels[:, 0], sorted_surfels[:, 1]
+    # By distance, then by surfel area among tied distances: the order of the
+    # google-deepmind implementation's tuple sort, which the percentile
+    # Hausdorff distances depend on. lexsort sorts by its last key first, and
+    # gives the same order without building a Python tuple per surfel.
+    order = np.lexsort((surfel_areas, distances))
+    return distances[order], surfel_areas[order]
 
 
 def compute_surface_distances(mask_gt: np.ndarray, mask_pred: np.ndarray, spacing_mm) -> dict:
@@ -392,7 +408,7 @@ def compute_surface_distances(mask_gt: np.ndarray, mask_pred: np.ndarray, spacin
         kernel = ENCODE_NEIGHBOURHOOD_2D_KERNEL
         full_true_neighbours = 0b1111
     elif num_dims == 3:
-        arr_surface_area = create_table_neighbour_code_to_surface_area(spacing_mm)
+        arr_surface_area = _surface_area_table(tuple(float(s) for s in spacing_mm))
         kernel = ENCODE_NEIGHBOURHOOD_3D_KERNEL
         full_true_neighbours = 0b11111111
     else:

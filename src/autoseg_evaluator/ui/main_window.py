@@ -277,8 +277,10 @@ class MainWindow(QMainWindow):
             # being recorded; the results then show it blank rather than now.
             scored_at=payload.get("scored_at"),
         )
-        self._results_tab.refresh()
-        self._report_tab.refresh()
+        # Scores arrive one per click, and all at once when a session is
+        # restored; the tabs are behind the Qualitative tab meanwhile.
+        self._results_tab.request_refresh()
+        self._report_tab.request_refresh()
 
     def _on_assessment_lock_changed(self, locked: bool) -> None:
         """Lock the other tabs during a (blinded) assessment to prevent leakage.
@@ -486,8 +488,10 @@ class MainWindow(QMainWindow):
 
     def _on_metric_result(self, row: dict) -> None:
         self._results.add_row(row)
-        self._results_tab.refresh()
-        self._report_tab.refresh()
+        # Batched: rebuilding both tabs for every row cost the window time
+        # growing with the square of the number of rows.
+        self._results_tab.request_refresh()
+        self._report_tab.request_refresh()
 
     def _on_metrics_finished(self, errors: int) -> None:
         cancelled = bool(self._metrics_worker and self._metrics_worker._cancelled)

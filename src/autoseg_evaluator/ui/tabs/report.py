@@ -92,6 +92,7 @@ from autoseg_evaluator.data.report import (
     interval_text,
     metric_direction,
 )
+from autoseg_evaluator.ui.deferred_refresh import DeferredRefresh
 from autoseg_evaluator.ui.widgets.stat_plots import (
     DistributionCanvas,
     ForestCanvas,
@@ -377,6 +378,7 @@ class ReportTab(QWidget):
         self._family: dict = {}
         self._build_ui()
         self._render_empty()
+        self._deferred = DeferredRefresh(self, self.refresh)
 
     # ---- Wiring -----------------------------------------------------------
 
@@ -389,8 +391,22 @@ class ReportTab(QWidget):
         self._acquisition = collect_acquisition(library)
         self._fill_acquisition()
 
+    def request_refresh(self) -> None:
+        """Bring the report up to date: soon if visible, else when next shown.
+
+        For changes that come in streams — result rows, Likert scores. No metric
+        is recomputed by a refresh, but every statistic and figure on the page
+        is, which takes seconds on a large cohort; nobody reads a hidden page.
+        """
+        self._deferred.request()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._deferred.shown()
+
     def refresh(self) -> None:
-        """Rebuild from the current results. Cheap — no metric is recomputed."""
+        """Rebuild from the current results, now. No metric is recomputed."""
+        self._deferred.settled()
         rows = self._results.rows() if self._results is not None else []
         self._all = build_report_model(rows)
         self._model = self._all

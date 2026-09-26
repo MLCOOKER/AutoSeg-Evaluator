@@ -213,3 +213,59 @@ def test_staple_bbox_crop_keeps_small_structures_visible():
     assert result.bbox_fg_ratio <= 0.50
     # And it should have used SOME padding (not zero) since the cube is small.
     assert result.bbox_padding_used >= 2
+
+
+# ---- Summaries read from the cropped images -------------------------------------
+
+
+def _blob(shape_zyx, centre, radii, spacing=(0.98, 0.98, 3.0)) -> sitk.Image:
+    zz, yy, xx = np.mgrid[: shape_zyx[0], : shape_zyx[1], : shape_zyx[2]]
+    inside = sum(((g - c) / r) ** 2 for g, c, r in zip((zz, yy, xx), centre, radii)) <= 1
+    img = sitk.GetImageFromArray(inside.astype(np.uint8))
+    img.SetSpacing(spacing)
+    return img
+
+
+@pytest.mark.parametrize(
+    "centres",
+    [
+        # Well inside the image.
+        [(15, 40, 40), (16, 42, 38), (14, 39, 43), (15, 44, 41)],
+        # Against the image edge, so the padded box is clipped by the image.
+        [(3, 5, 60), (2, 7, 62), (4, 4, 58)],
+    ],
+)
+def test_staple_summaries_equal_those_of_the_whole_volume(centres):
+    """Cropping changes no summary: outside the box every image is zero."""
+    from autoseg_evaluator.core.staple import _rater_disagreement, _uncertainty_metrics, _volume_cc
+
+    masks = [
+        _blob((30, 80, 70), c, (6 + i, 12 - i, 10 + (i % 2) * 3)) for i, c in enumerate(centres)
+    ]
+    result = compute_staple(masks)
+    assert result is not None
+    assert result.mean_entropy > 0  # the raters disagree, so there is something to measure
+
+    full_map = result.probability_map
+    assert (result.uncertain_band_cc, result.mean_entropy) == _uncertainty_metrics(full_map)
+    assert result.consensus_volume_cc == _volume_cc(result.consensus_mask)
+    assert (result.rater_disagreement_cc, result.rater_volume_range_cc) == _rater_disagreement(
+        masks
+    )
+
+
+def test_the_whole_probability_map_is_the_cropped_one_in_place():
+    masks = [
+        _blob((30, 80, 70), (15, 40, 40), (6, 12, 10)),
+        _blob((30, 80, 70), (16, 41, 42), (7, 11, 11)),
+    ]
+    result = compute_staple(masks)
+    full = sitk.GetArrayFromImage(result.probability_map)
+    x0, y0, z0, x1, y1, z1 = result.probability_bbox
+    inside = full[z0 : z1 + 1, y0 : y1 + 1, x0 : x1 + 1]
+    assert full.dtype == np.float32
+    assert np.array_equal(inside, sitk.GetArrayFromImage(result.probability_cropped))
+    outside = full.copy()
+    outside[z0 : z1 + 1, y0 : y1 + 1, x0 : x1 + 1] = 0
+    assert np.count_nonzero(outside) == 0
+    assert result.probability_map.GetOrigin() == masks[0].GetOrigin()

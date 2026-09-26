@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import gc
 import traceback
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -129,6 +130,11 @@ class MetricsWorker(QObject):
         # set that followed.
         self._ct_cache: dict[tuple[str, str], Any] = {}
         self._mask_cache: dict[tuple[str, str, int], Any] = {}
+        # How many groups still to be computed use each mask. A mask is a
+        # full-CT volume; one leaves the cache after its last use, where it used
+        # to stay until its patient finished — every organ against every
+        # contour set at once, many gigabytes on a head and neck case.
+        self._mask_uses: Counter[tuple[str, str, int]] = Counter()
         # Polygon stream. Grids are per image series and structures are per ROI,
         # so both outlive the pair that first needed them: one ROI compared
         # against five sources is parsed and prepared once, not five times.
@@ -200,6 +206,7 @@ class MetricsWorker(QObject):
         last_group_idx_for_patient: dict[str, int] = {}
         for i, g in enumerate(groups):
             last_group_idx_for_patient[g["patient_id"]] = i
+        self._mask_uses = Counter(key for g in groups for key in self._group_mask_keys(g))
 
         for i, group in enumerate(groups):
             if self._cancelled:
@@ -227,9 +234,13 @@ class MetricsWorker(QObject):
             self.progress.emit(units_done, total, state)
 
             is_last_for_patient = i == last_group_idx_for_patient[group["patient_id"]]
-            for row in self._compute_group(
-                group, state, units_done, total, drop_ct_after_masks=is_last_for_patient
-            ):
+            try:
+                rows = self._compute_group(
+                    group, state, units_done, total, drop_ct_after_masks=is_last_for_patient
+                )
+            finally:
+                self._release_group_masks(group)
+            for row in rows:
                 if row.get("error"):
                     errors += 1
                 # When the row was produced: shown in the Results table and
@@ -301,8 +312,9 @@ class MetricsWorker(QObject):
                 )
         # Sort patient-major so we finish every drawer for a patient before
         # moving on. Lets ``_do_run`` evict that patient's caches in one
-        # block and keeps peak RAM bounded by a single patient's worth of
-        # CT + masks instead of the entire cohort's worth.
+        # block and keeps peak RAM bounded by a single patient's CT and
+        # datasets instead of the entire cohort's; masks go sooner, after
+        # their last group (``_release_group_masks``).
         groups.sort(key=lambda g: (g["patient_id"], g["organ_name"]))
         return groups
 
@@ -315,6 +327,27 @@ class MetricsWorker(QObject):
         Floored at 1 so every group makes the bar move.
         """
         return max(1, len(group["tests"]))
+
+    @staticmethod
+    def _group_mask_keys(group: dict[str, Any]) -> set[tuple[str, str, int]]:
+        """The ``_mask_cache`` keys of every mask one group uses: its GT and tests."""
+        patient = group["patient_id"]
+        keys = {(patient, group["gt_sop"], int(group["gt_roi_number"]))}
+        keys.update((patient, t["rtstruct_sop_uid"], int(t["roi_number"])) for t in group["tests"])
+        return keys
+
+    def _release_group_masks(self, group: dict[str, Any]) -> None:
+        """Drop each of a finished group's masks that no later group uses.
+
+        A mask shared by two drawers — one ground truth for two organ drawers,
+        say — stays until the second is done. Were a count ever short, the
+        next group would rasterise the mask again: slower, never different.
+        """
+        for key in self._group_mask_keys(group):
+            self._mask_uses[key] -= 1
+            if self._mask_uses[key] <= 0:
+                del self._mask_uses[key]
+                self._mask_cache.pop(key, None)
 
     # ---- Per-group computation -------------------------------------------
 

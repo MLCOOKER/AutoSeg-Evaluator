@@ -339,3 +339,145 @@ def test_dvh_config_output_keys_order():
         "v20gy_cc",
         "v30gy_cc",
     ]
+
+
+# ---- One shared crop per pair: the same numbers, less work ------------------------
+
+
+def _reference_geometric_metrics(gt_mask, test_mask, config):
+    """The aggregator as it was before the shared crop, kept as the oracle.
+
+    Whole-CT copies, each metric scanning them in turn, and volume and centroid
+    through :func:`volume_and_com_metrics`.
+    """
+    from autoseg_evaluator.core.surface_distance import (
+        compute_average_surface_distance,
+        compute_robust_hausdorff,
+        compute_surface_dice_at_tolerance,
+        compute_surface_distances,
+    )
+    from autoseg_evaluator.core.tolerance_keys import normalise_tolerances, tolerance_key
+
+    geom = config["geometric"]
+    taus = normalise_tolerances(config["tolerances"]["surface_dice_tau_mm"])
+    gt_arr = sitk.GetArrayFromImage(gt_mask).astype(np.uint8)
+    test_arr = sitk.GetArrayFromImage(test_mask).astype(np.uint8)
+    sx, sy, sz = gt_mask.GetSpacing()
+    out = {"dice": dice(gt_arr, test_arr)}
+    out["precision"], out["recall"] = precision_recall(gt_arr, test_arr)
+    sd = compute_surface_distances(gt_arr, test_arr, (sz, sy, sx))
+    out["hausdorff100"] = compute_robust_hausdorff(sd, 100)
+    out["hausdorff95"] = compute_robust_hausdorff(sd, 95)
+    a, b = compute_average_surface_distance(sd)
+    out["mean_surface_distance"] = (
+        math.nan if math.isnan(a) or math.isnan(b) else float(0.5 * (a + b))
+    )
+    for tau in taus:
+        out[tolerance_key("surface_dice", tau)] = compute_surface_dice_at_tolerance(sd, tau)
+    vc = volume_and_com_metrics(gt_mask, test_mask)
+    if geom.get("volume"):
+        out.update({k: v for k, v in vc.items() if k.startswith("volume_")})
+    if geom.get("com_offset"):
+        out.update({k: v for k, v in vc.items() if k.startswith("com_")})
+    return out
+
+
+ALL_GEOMETRIC = {
+    "geometric": {
+        "dice": True,
+        "precision_recall": True,
+        "hausdorff100": True,
+        "hausdorff95": True,
+        "mean_surface_distance": True,
+        "surface_dice": True,
+        "volume": True,
+        "com_offset": True,
+    },
+    "tolerances": {"surface_dice_tau_mm": [1.0, 2.0, 3.0]},
+}
+
+
+def _placed(arr, spacing=(0.98, 0.98, 3.0), rotated=False):
+    img = sitk.GetImageFromArray(arr.astype(np.uint8))
+    img.SetSpacing(spacing)
+    img.SetOrigin((-250.0, -180.5, 1033.0))
+    if rotated:  # a non-axial acquisition, so the centroid's direction matters
+        c, s = math.cos(0.3), math.sin(0.3)
+        img.SetDirection((c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0))
+    return img
+
+
+def _blobs(rng, shape, count):
+    zz, yy, xx = np.ogrid[: shape[0], : shape[1], : shape[2]]
+    arr = np.zeros(shape, bool)
+    for _ in range(count):
+        c = [rng.uniform(0, n) for n in shape]
+        r = [rng.uniform(1.5, n / 3) for n in shape]
+        arr |= ((zz - c[0]) / r[0]) ** 2 + ((yy - c[1]) / r[1]) ** 2 + (
+            (xx - c[2]) / r[2]
+        ) ** 2 <= 1
+    return arr
+
+
+def _same(a: dict, b: dict) -> bool:
+    if list(a) != list(b):
+        return False
+    return all(
+        (isinstance(x, float) and isinstance(y, float) and math.isnan(x) and math.isnan(y))
+        or x == y
+        for x, y in zip(a.values(), b.values())
+    )
+
+
+def test_the_shared_crop_gives_every_metric_exactly_as_before():
+    """Bit for bit, over varied shapes: blobs that touch the image edge, split
+    into pieces, miss each other entirely, and anisotropic, rotated images."""
+    rng = np.random.default_rng(11)
+    shape = (18, 40, 36)
+    for trial in range(60):
+        gt = _placed(_blobs(rng, shape, 1 + trial % 3), rotated=trial % 2 == 1)
+        test = _placed(_blobs(rng, shape, 1 + (trial + 1) % 3), rotated=trial % 2 == 1)
+        new = compute_geometric_metrics(gt, test, ALL_GEOMETRIC)
+        old = _reference_geometric_metrics(gt, test, ALL_GEOMETRIC)
+        assert _same(new, old), (trial, new, old)
+
+
+@pytest.mark.parametrize("empty", ["gt", "test", "both"])
+def test_the_shared_crop_handles_empty_masks_as_before(empty):
+    shape = (10, 20, 20)
+    full = np.zeros(shape, bool)
+    full[3:7, 5:12, 6:15] = True
+    none = np.zeros(shape, bool)
+    gt = _placed(none if empty in ("gt", "both") else full)
+    test = _placed(none if empty in ("test", "both") else full)
+    new = compute_geometric_metrics(gt, test, ALL_GEOMETRIC)
+    old = _reference_geometric_metrics(gt, test, ALL_GEOMETRIC)
+    assert _same(new, old), (new, old)
+
+
+def test_volume_alone_computes_no_centroid(monkeypatch):
+    """A centroid lists every foreground voxel's index; volume needs a count."""
+    import autoseg_evaluator.core.metrics as metrics_module
+
+    def refuse(*_args):
+        raise AssertionError("a centroid was computed for volume alone")
+
+    monkeypatch.setattr(metrics_module, "_cropped_centroid", refuse)
+    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    out = compute_geometric_metrics(
+        m, m, {"geometric": {"volume": True}, "tolerances": {"surface_dice_tau_mm": 3.0}}
+    )
+    assert out["volume_gt_cc"] == pytest.approx(1.0)
+    assert "com_offset_mm" not in out
+
+
+def test_masks_are_read_in_place_not_copied(monkeypatch):
+    """The whole CT is no longer copied per pair."""
+    import autoseg_evaluator.core.metrics as metrics_module
+
+    def refuse(*_args):
+        raise AssertionError("a mask was copied")
+
+    monkeypatch.setattr(metrics_module.sitk, "GetArrayFromImage", refuse)
+    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    assert compute_geometric_metrics(m, m, ALL_GEOMETRIC)["dice"] == 1.0

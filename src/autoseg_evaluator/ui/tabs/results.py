@@ -6,9 +6,12 @@ and RTSS, truncated, name-similarity, error), followed by every metric
 key that appears in any row. Rows that carry an error message are
 highlighted so they're easy to spot.
 
-The table is rebuilt on every new row by default — for typical cohorts
-(<2000 rows) this is plenty fast and keeps the column set consistent
-when new metrics (e.g. DVH points) appear mid-run.
+While a computation runs, new rows are appended to the table in batches, and
+only while the tab is visible; a hidden tab catches up when it is shown. The
+table is rebuilt in full only when the rows already shown could have changed:
+a new column, a Likert score, an organ label, a cleared or restored table.
+Rebuilding after every row used to cost time growing with the square of the
+number of rows.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from autoseg_evaluator.data.results import (
     ResultsManager,
     metric_display_label,
 )
+from autoseg_evaluator.ui.deferred_refresh import DeferredRefresh
 
 _ERROR_BG = QColor("#FFE0E0")
 
@@ -157,7 +161,12 @@ class ResultsTab(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._results_mgr: ResultsManager | None = None
+        # What the table shows, so that rows added since can be appended.
+        self._shown_revision = -1
+        self._shown_columns: list[str] = []
+        self._shown_count = 0
         self._build_ui()
+        self._deferred = DeferredRefresh(self, self._catch_up)
 
     # ---- Public API -------------------------------------------------------
 
@@ -165,19 +174,30 @@ class ResultsTab(QWidget):
         self._results_mgr = manager
         self.refresh()
 
-    def append_row(self, row: dict[str, Any]) -> None:
-        """Called for each row emitted by the metrics worker — refreshes the view."""
-        # Row is already appended to the ResultsManager by MainWindow; just refresh.
-        self.refresh()
+    def request_refresh(self) -> None:
+        """Bring the table up to date: within a second if visible, else when shown.
+
+        For changes that come in streams — result rows, Likert scores. Each
+        request costs nothing; the refreshes they add up to are batched.
+        """
+        self._deferred.request()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._deferred.shown()
 
     def refresh(self) -> None:
-        """Rebuild the table from the current ResultsManager state."""
+        """Rebuild the table from the current ResultsManager state, now."""
+        self._deferred.settled()
         if self._results_mgr is None:
             self._table.setRowCount(0)
             self._table.setColumnCount(0)
             self._row_count_label.setText("0 rows")
             self._export_btn.setEnabled(False)
             self._clear_btn.setEnabled(False)
+            self._shown_revision = -1
+            self._shown_columns = []
+            self._shown_count = 0
             return
 
         rows = self._results_mgr.rows()
@@ -210,21 +230,64 @@ class ResultsTab(QWidget):
                 item.setToolTip(label)
 
         for r, row in enumerate(rows):
-            is_error = bool(row.get("error"))
-            # Meta cells
-            for c, key in enumerate(meta_keys):
-                value = row.get(key, "")
-                self._table.setItem(r, c, _make_item(value, error_bg=is_error))
-            # Metric cells
-            m = row.get("metrics") or {}
-            for c_off, key in enumerate(metric_cols):
-                value = m.get(key, "")
-                self._table.setItem(r, len(meta_keys) + c_off, _make_item(value, error_bg=is_error))
+            self._fill_row(r, row, meta_keys, metric_cols)
 
         self._autosize_columns()
         if was_sorted:
             self._table.setSortingEnabled(True)
 
+        self._shown_revision = self._results_mgr.revision
+        self._shown_columns = metric_cols
+        self._shown_count = len(rows)
+        self._update_toolbar(rows)
+
+    def _catch_up(self) -> None:
+        """Append the rows added since the table was drawn, or rebuild if need be.
+
+        Appending is right only when every row already shown is unchanged and
+        still in its place: nothing but new computed rows since, no new column,
+        and no Likert scores, since a new row can take over a score-only row.
+        """
+        mgr = self._results_mgr
+        if mgr is None or mgr.revision != self._shown_revision or mgr.has_scores():
+            self.refresh()
+            return
+        metric_cols = mgr.metric_columns()
+        if metric_cols != self._shown_columns or mgr.computed_row_count() < self._shown_count:
+            self.refresh()
+            return
+        rows = mgr.rows()
+        new_rows = rows[self._shown_count :]
+        if new_rows:
+            meta_keys = [k for k, _ in META_COLUMNS]
+            # Unsorted while filling, as in a rebuild; re-enabling sorts the
+            # new rows into place under whatever column the user sorted by.
+            was_sorted = self._table.isSortingEnabled()
+            self._table.setSortingEnabled(False)
+            start = self._table.rowCount()
+            self._table.setRowCount(start + len(new_rows))
+            for offset, row in enumerate(new_rows):
+                self._fill_row(start + offset, row, meta_keys, metric_cols)
+            if was_sorted:
+                self._table.setSortingEnabled(True)
+        self._shown_count = len(rows)
+        self._update_toolbar(rows)
+
+    def _fill_row(
+        self, r: int, row: dict[str, Any], meta_keys: list[str], metric_cols: list[str]
+    ) -> None:
+        is_error = bool(row.get("error"))
+        # Meta cells
+        for c, key in enumerate(meta_keys):
+            value = row.get(key, "")
+            self._table.setItem(r, c, _make_item(value, error_bg=is_error))
+        # Metric cells
+        m = row.get("metrics") or {}
+        for c_off, key in enumerate(metric_cols):
+            value = m.get(key, "")
+            self._table.setItem(r, len(meta_keys) + c_off, _make_item(value, error_bg=is_error))
+
+    def _update_toolbar(self, rows: list[dict[str, Any]]) -> None:
         n = len(rows)
         n_err = sum(1 for r in rows if r.get("error"))
         suffix = f"  ({n_err} with errors)" if n_err else ""
