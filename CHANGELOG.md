@@ -95,6 +95,18 @@ Each has a regression test that reproduces the audit's case
   crop's corner to the integer indices before averaging). On a 512 × 512 × 150
   CT: a parotid-sized pair from 504 to 14 ms with every geometric metric, a
   liver-sized pair from 813 to 347 ms, volume alone from about 350 ms to 5 ms.
+- **The audit record comes from the metrics' own pass.** With the audit
+  sidecar on, each pair's record computed the surface distances a second time,
+  over another copy of the whole CT. It now reads them, and its voxel counts,
+  from the metrics' cropped masks and distances; the record is identical. With
+  the audit on, a parotid-sized pair from 221 to 13 ms, a liver-sized pair from
+  840 to 338 ms.
+- **A contour's DVH is integrated once per drawer.** With both the ground-truth
+  comparison and the drawer's STAPLE consensus on, every contour's dose
+  statistics were integrated twice with identical inputs, once for each row.
+  Within a drawer the dose and CT are the ground truth's, so the structure set,
+  ROI and truncation extent decide the result; it is now kept for the drawer
+  and reused, a failure with its wording. `core/dvh.py` is unchanged.
 
 ### Fixed
 - **2D metrics were unavailable for structure sets with dangling references.**

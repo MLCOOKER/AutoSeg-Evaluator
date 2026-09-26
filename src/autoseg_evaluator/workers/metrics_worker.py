@@ -40,7 +40,10 @@ from autoseg_evaluator.core.masks import (
     read_rtstruct,
     truncate_to_gt_z_extent,
 )
-from autoseg_evaluator.core.metrics import compute_geometric_metrics, mask_audit_detail
+from autoseg_evaluator.core.metrics import (
+    compute_geometric_metrics,
+    geometric_metrics_with_audit,
+)
 from autoseg_evaluator.core.polygon_metrics import (
     MISSING_PLANE_POLICY,
     STATUS_NO_CONTOURS,
@@ -135,6 +138,9 @@ class MetricsWorker(QObject):
         # to stay until its patient finished — every organ against every
         # contour set at once, many gigabytes on a head and neck case.
         self._mask_uses: Counter[tuple[str, str, int]] = Counter()
+        # One group's contour DVHs, or why each failed, keyed as
+        # :meth:`_dose_into_row` describes. Emptied after every group.
+        self._dvh_cache: dict[tuple[str, int, Any], DVHResult | DVHError] = {}
         # Polygon stream. Grids are per image series and structures are per ROI,
         # so both outlive the pair that first needed them: one ROI compared
         # against five sources is parsed and prepared once, not five times.
@@ -240,6 +246,7 @@ class MetricsWorker(QObject):
                 )
             finally:
                 self._release_group_masks(group)
+                self._dvh_cache.clear()
             for row in rows:
                 if row.get("error"):
                     errors += 1
@@ -576,7 +583,15 @@ class MetricsWorker(QObject):
         row["truncated_slices"] = int(record["extent_info"]["slices_removed"])
         row["truncated_extent_mm"] = float(record["extent_info"]["extent_removed_mm"])
         try:
-            row["metrics"].update(compute_geometric_metrics(gt_mask, record["mask"], self._config))
+            # With the audit on, its record comes from the same pass, reusing
+            # the surface distances rather than computing them a second time.
+            if self._audit:
+                geometric, mask_detail = geometric_metrics_with_audit(
+                    gt_mask, record["mask"], self._config
+                )
+            else:
+                geometric = compute_geometric_metrics(gt_mask, record["mask"], self._config)
+            row["metrics"].update(geometric)
             # When the GT is a multi-observer STAPLE consensus, also report each
             # test's sensitivity / specificity against that consensus (treating
             # the consensus as truth) — alongside the geometric metrics.
@@ -599,6 +614,7 @@ class MetricsWorker(QObject):
                         self._dvh_config,
                         z_extent_mm=z_extent_mm,
                     ),
+                    contour=(test["rtstruct_sop_uid"], int(test["roi_number"]), z_extent_mm),
                 )
             # The polygon stream, measured on the stored contours rather than
             # on the rasterised masks above. It is a separate measurement of the
@@ -613,7 +629,6 @@ class MetricsWorker(QObject):
                     row.setdefault("audit", {})["polygon"] = self._pending_polygon_audit
             if self._audit:
                 # Kept off row["metrics"], so it never becomes a column.
-                mask_detail = mask_audit_detail(gt_mask, record["mask"])
                 reading = {
                     side: list(notes)
                     for side, notes in (
@@ -839,6 +854,7 @@ class MetricsWorker(QObject):
                 lambda dose: structure_dvh(
                     gt_rtss, group["gt_roi_number"], dose, gt_mask, self._dvh_config
                 ),
+                contour=(group["gt_sop"], int(group["gt_roi_number"]), None),
             )
         return row
 
@@ -990,6 +1006,11 @@ class MetricsWorker(QObject):
                             self._dvh_config,
                             z_extent_mm=z,
                         ),
+                        contour=(
+                            rater["rtstruct_sop_uid"],
+                            int(rater["roi_number"]),
+                            rater_z_extent,
+                        ),
                     )
             except Exception as exc:  # noqa: BLE001
                 row["error"] = f"{type(exc).__name__}: {exc}"
@@ -1010,6 +1031,8 @@ class MetricsWorker(QObject):
         row: dict[str, Any],
         group: dict[str, Any],
         compute: Callable[[DoseGrid], DVHResult],
+        *,
+        contour: tuple[str, int, tuple[float, float] | None] | None = None,
     ) -> None:
         """Put one structure's dose statistics into ``row``.
 
@@ -1018,12 +1041,29 @@ class MetricsWorker(QObject):
         goes in its own column on every row; a D{x}cc larger than that part goes
         in the dose status. A failure goes in the row's error, prefixed
         ``DVH:``, and leaves the rest of the row standing.
+
+        ``contour`` — ``(structure set UID, ROI number, truncation extent)`` —
+        names a DVH integrated over stored contours, so that the group computes
+        it once. Within a group the dose and the CT are the ground truth's, so
+        those three are everything the result depends on; a contour compared
+        both against the ground truth and against the drawer's STAPLE consensus
+        used to be integrated twice. Its failure is kept too, so both rows say
+        the same thing. A DVH of a mask has no contour to name and is not kept.
         """
         try:
             dose = self._load_dose_grid(group["patient_id"], group["gt_sop"])
             if dose is None:
                 return
-            result = compute(dose)
+            result = self._dvh_cache.get(contour) if contour is not None else None
+            if result is None:
+                try:
+                    result = compute(dose)
+                except DVHError as exc:
+                    result = exc
+                if contour is not None:
+                    self._dvh_cache[contour] = result
+            if isinstance(result, DVHError):
+                raise result
         except DVHError as exc:
             row["error"] = f"DVH: {exc}"
             return

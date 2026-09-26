@@ -246,31 +246,51 @@ def mask_audit_detail(
     mask-derived number in the run and a result that does not say which one
     produced it cannot be reproduced.
     """
-    gt_arr = sitk.GetArrayFromImage(gt_mask).astype(bool)
-    test_arr = sitk.GetArrayFromImage(test_mask).astype(bool)
-    spacing_xyz = tuple(float(v) for v in gt_mask.GetSpacing())
-    spacing_for_array = (spacing_xyz[2], spacing_xyz[1], spacing_xyz[0])
-    voxel_mm3 = float(np.prod(spacing_xyz))
+    return _measure(gt_mask, test_mask, {}, audit=True)[1]
 
+
+def geometric_metrics_with_audit(
+    gt_mask: sitk.Image,
+    test_mask: sitk.Image,
+    config: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """:func:`compute_geometric_metrics` and :func:`mask_audit_detail` in one pass.
+
+    The audit record reads its two directions from the surface distances the
+    metrics computed, and its counts from the same cropped masks. Asking for
+    them separately computed the distance transforms twice per pair, and copied
+    the whole CT again: roughly half as much time again as the metrics.
+    """
+    return _measure(gt_mask, test_mask, config, audit=True)
+
+
+def _audit_detail(
+    gt_mask: sitk.Image, gt_arr: np.ndarray, test_arr: np.ndarray, sd: dict | None
+) -> dict[str, Any]:
+    """The audit record from a pair's (possibly cropped) masks and distances.
+
+    ``sd`` is ``None`` when a mask is empty. Counts are of nonzero voxels, as
+    over boolean masks, and slices are those with any.
+    """
+    spacing_xyz = tuple(float(v) for v in gt_mask.GetSpacing())
     detail: dict[str, Any] = {
         "rasteriser_backend": str(default_rasteriser_name()),
         "voxel_spacing_mm": list(spacing_xyz),
-        "voxel_volume_mm3": voxel_mm3,
-        "gt_voxels": int(gt_arr.sum()),
-        "test_voxels": int(test_arr.sum()),
+        "voxel_volume_mm3": float(np.prod(spacing_xyz)),
+        "gt_voxels": int(np.count_nonzero(gt_arr)),
+        "test_voxels": int(np.count_nonzero(test_arr)),
         # With the two counts above, enough to recompute Dice, precision and
         # recall from the record alone.
-        "overlap_voxels": int((gt_arr & test_arr).sum()),
-        "gt_slices_touched": int((gt_arr.sum(axis=(1, 2)) > 0).sum()),
-        "test_slices_touched": int((test_arr.sum(axis=(1, 2)) > 0).sum()),
+        "overlap_voxels": int(np.count_nonzero(np.logical_and(gt_arr, test_arr))),
+        "gt_slices_touched": int(np.count_nonzero(gt_arr.any(axis=(1, 2)))),
+        "test_slices_touched": int(np.count_nonzero(test_arr.any(axis=(1, 2)))),
         "measure": "surface area of each surface element, mm^2",
         "quantisation": "distances are quantised to the voxel lattice above",
     }
-    if not gt_arr.any() or not test_arr.any():
+    if sd is None:
         detail["note"] = "one mask is empty; no surface distances to report"
         return detail
 
-    sd = compute_surface_distances(gt_arr, test_arr, spacing_for_array)
     for label, distances, areas in (
         ("gt_to_test", sd["distances_gt_to_pred"], sd["surfel_areas_gt"]),
         ("test_to_gt", sd["distances_pred_to_gt"], sd["surfel_areas_pred"]),
@@ -309,6 +329,17 @@ def compute_geometric_metrics(
     the cost twice. Surface Dice is keyed by its tolerance —
     ``surface_dice@3mm`` — one entry per tolerance requested.
     """
+    return _measure(gt_mask, test_mask, config, audit=False)[0]
+
+
+def _measure(
+    gt_mask: sitk.Image,
+    test_mask: sitk.Image,
+    config: dict[str, Any],
+    *,
+    audit: bool,
+) -> tuple[dict[str, float], dict[str, Any] | None]:
+    """The metrics ``config`` asks for, and the audit record if ``audit``."""
     geom = dict(config.get("geometric", {}) or {})
     tols = dict(config.get("tolerances", {}) or {})
     # One Surface Dice per tolerance, each under its own key. The surface
@@ -356,8 +387,12 @@ def compute_geometric_metrics(
         or geom.get("mean_surface_distance")
         or geom.get("surface_dice")
     )
-    if needs_sd:
+    # The audit reports distances only between two surfaces that both exist.
+    both_drawn = audit and bool(gt_arr.any()) and bool(test_arr.any())
+    sd = None
+    if needs_sd or both_drawn:
         sd = compute_surface_distances(gt_arr, test_arr, spacing_for_array)
+    if needs_sd:
         if geom.get("hausdorff100"):
             out["hausdorff100"] = compute_robust_hausdorff(sd, 100)
         if geom.get("hausdorff95"):
@@ -391,4 +426,6 @@ def compute_geometric_metrics(
             )
         )
 
-    return out
+    if not audit:
+        return out, None
+    return out, _audit_detail(gt_mask, gt_arr, test_arr, sd if both_drawn else None)

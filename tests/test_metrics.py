@@ -481,3 +481,98 @@ def test_masks_are_read_in_place_not_copied(monkeypatch):
     monkeypatch.setattr(metrics_module.sitk, "GetArrayFromImage", refuse)
     m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
     assert compute_geometric_metrics(m, m, ALL_GEOMETRIC)["dice"] == 1.0
+
+
+# ---- The audit record from the metrics' own pass -------------------------------------
+
+
+def _reference_mask_audit_detail(gt_mask, test_mask):
+    """The audit record as it was computed on its own, kept as the oracle."""
+    from autoseg_evaluator.core.masks import default_rasteriser_name
+    from autoseg_evaluator.core.surface_distance import compute_surface_distances
+
+    gt_arr = sitk.GetArrayFromImage(gt_mask).astype(bool)
+    test_arr = sitk.GetArrayFromImage(test_mask).astype(bool)
+    spacing_xyz = tuple(float(v) for v in gt_mask.GetSpacing())
+    detail = {
+        "rasteriser_backend": str(default_rasteriser_name()),
+        "voxel_spacing_mm": list(spacing_xyz),
+        "voxel_volume_mm3": float(np.prod(spacing_xyz)),
+        "gt_voxels": int(gt_arr.sum()),
+        "test_voxels": int(test_arr.sum()),
+        "overlap_voxels": int((gt_arr & test_arr).sum()),
+        "gt_slices_touched": int((gt_arr.sum(axis=(1, 2)) > 0).sum()),
+        "test_slices_touched": int((test_arr.sum(axis=(1, 2)) > 0).sum()),
+        "measure": "surface area of each surface element, mm^2",
+        "quantisation": "distances are quantised to the voxel lattice above",
+    }
+    if not gt_arr.any() or not test_arr.any():
+        detail["note"] = "one mask is empty; no surface distances to report"
+        return detail
+    sd = compute_surface_distances(gt_arr, test_arr, spacing_xyz[::-1])
+    for label, distances, areas in (
+        ("gt_to_test", sd["distances_gt_to_pred"], sd["surfel_areas_gt"]),
+        ("test_to_gt", sd["distances_pred_to_gt"], sd["surfel_areas_pred"]),
+    ):
+        if len(distances) == 0 or float(np.sum(areas)) == 0.0:
+            detail[label] = {"surfels": 0}
+            continue
+        cumulative = np.cumsum(areas) / np.sum(areas)
+        index = min(int(np.searchsorted(cumulative, 0.95)), len(distances) - 1)
+        detail[label] = {
+            "max_mm": float(distances.max()),
+            "hd95_mm": float(distances[index]),
+            "mean_mm": float(np.sum(distances * areas) / np.sum(areas)),
+            "surfels": int(len(distances)),
+            "surface_area_mm2": float(np.sum(areas)),
+        }
+    return detail
+
+
+def _audit_pairs():
+    rng = np.random.default_rng(23)
+    shape = (16, 36, 32)
+    for trial in range(30):
+        yield (
+            _placed(_blobs(rng, shape, 1 + trial % 3), rotated=trial % 2 == 1),
+            _placed(_blobs(rng, shape, 1 + (trial + 1) % 3), rotated=trial % 2 == 1),
+        )
+    full = np.zeros((10, 20, 20), bool)
+    full[3:7, 5:12, 6:15] = True
+    none = np.zeros_like(full)
+    for gt, test in ((none, full), (full, none), (none, none)):
+        yield _placed(gt), _placed(test)
+
+
+def test_the_audit_record_is_exactly_as_when_computed_on_its_own():
+    from autoseg_evaluator.core.metrics import geometric_metrics_with_audit
+
+    for gt, test in _audit_pairs():
+        want = _reference_mask_audit_detail(gt, test)
+        assert mask_audit_detail(gt, test) == want
+        metrics, detail = geometric_metrics_with_audit(gt, test, ALL_GEOMETRIC)
+        assert list(detail) == list(want)
+        assert detail == want
+        assert _same(metrics, compute_geometric_metrics(gt, test, ALL_GEOMETRIC))
+
+
+@pytest.mark.parametrize("surface_metrics", [True, False])
+def test_metrics_and_audit_share_one_surface_distance_pass(monkeypatch, surface_metrics):
+    """The audit used to compute the distance transforms a second time."""
+    import autoseg_evaluator.core.metrics as metrics_module
+    from autoseg_evaluator.core.metrics import geometric_metrics_with_audit
+
+    calls = []
+    real = metrics_module.compute_surface_distances
+
+    def counted(*args):
+        calls.append(1)
+        return real(*args)
+
+    monkeypatch.setattr(metrics_module, "compute_surface_distances", counted)
+    config = ALL_GEOMETRIC if surface_metrics else {"geometric": {"dice": True}}
+    a = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    b = _cube_sitk((20, 20, 20), 6, 16, 5, 15, 5, 15)
+    _metrics, detail = geometric_metrics_with_audit(a, b, config)
+    assert len(calls) == 1
+    assert detail["gt_to_test"]["max_mm"] == 1.0
