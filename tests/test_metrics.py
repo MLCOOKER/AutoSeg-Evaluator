@@ -198,7 +198,8 @@ def test_compute_geometric_metrics_respects_config_flags():
     }
     out = compute_geometric_metrics(m, m, config)
     assert "dice" in out
-    assert "surface_dice" in out
+    # Keyed by the tolerance it was computed at.
+    assert "surface_dice@3mm" in out
     assert "hausdorff100" not in out
 
 
@@ -238,7 +239,28 @@ def test_compute_geometric_metrics_identical_masks_score_perfect():
     assert out["hausdorff100"] == 0.0
     assert out["hausdorff95"] == 0.0
     assert out["mean_surface_distance"] == 0.0
-    assert out["surface_dice"] == 1.0
+    assert out["surface_dice@0mm"] == 1.0
+
+
+def test_surface_dice_at_several_tolerances_is_one_column_each():
+    """A list of tolerances gives one keyed value per tolerance, from one pass."""
+    gt = _cube_sitk((30, 30, 30), 5, 15, 5, 15, 5, 15)
+    test = _cube_sitk((30, 30, 30), 7, 17, 5, 15, 5, 15)
+    config = {
+        "geometric": {"surface_dice": True},
+        "tolerances": {"surface_dice_tau_mm": [3.0, 0.5, 1.0]},
+    }
+    out = compute_geometric_metrics(gt, test, config)
+    assert set(out) == {"surface_dice@0.5mm", "surface_dice@1mm", "surface_dice@3mm"}
+    for tau in (0.5, 1.0, 3.0):
+        alone = compute_geometric_metrics(
+            gt,
+            test,
+            {"geometric": {"surface_dice": True}, "tolerances": {"surface_dice_tau_mm": tau}},
+        )
+        assert out[f"surface_dice@{tau:g}mm"] == alone[f"surface_dice@{tau:g}mm"]
+    # A larger tolerance forgives more of the 2-voxel shift.
+    assert out["surface_dice@0.5mm"] < out["surface_dice@3mm"]
 
 
 def test_precision_and_recall_come_as_a_pair_behind_one_switch():

@@ -7,8 +7,9 @@ would produce three releases whose results cannot be compared with each other.
 Nothing here is released. This file records where each item stands so the scope
 of v3.0.0 is legible from the repository rather than from memory.
 
-**Checkpoint: 2026-09-24**, with #7 done: branch `v3-dev`; 1201 tests pass;
-`ruff check` and `ruff format --check` clean.
+**Checkpoint: 2026-09-26**, with #7 done and the external audit's findings
+fixed: branch `v3-dev`; 1265 tests pass; `ruff check` and `ruff format --check`
+clean.
 
 ---
 
@@ -24,6 +25,36 @@ of v3.0.0 is legible from the repository rather than from memory.
 | 6 | Canonical organ bucketing + statistics | **Done**, both halves |
 | 7 | Quantify DVH on mask vs on RTSS | **Done** — DVH now integrated over the contours |
 | 8 | Validation report for the Stream B metrics | **Partly done** — synthetic half written |
+
+---
+
+## External audit (September 2026)
+
+An external reviewer audited the code and workflow of `v3-dev` from the source
+and in-memory reproductions, without clinical data. All ten findings and the
+three smaller defects were confirmed and are fixed, each with a regression test
+reproducing the audit's case; the CHANGELOG lists them. Scanned against the
+tender cohort (90 patient folders, nine sites), no folder holds two image series
+and no patient has a second planning image, so none of the cross-series or
+cross-course findings can have affected results computed on it.
+
+Decisions taken with the fixes, which change how the application is used:
+
+- **One computation per results table.** Computing again replaces the table
+  after confirmation; rows are never updated or merged. Likert scores are kept.
+- **Several tolerances in one run**, each its own column and its own metric in
+  the report, with the tolerance in the metric's key.
+- **The results table is saved with the session** (schema 7), so scoring can
+  span several sessions without computing again. Rows carry *Computed at*,
+  scores *Scored at*.
+- **An infinite value is *metric invalid*** in the report — an empty contour's
+  Hausdorff distance — rather than a worst rank. Its Dice, recall and Surface
+  Dice of 0 still count.
+- **A different folder clears the previous cohort's work** after confirmation,
+  with the option to save the session first.
+- **One planning image per comparison**, decided by the resolved series rather
+  than the Frame of Reference, so a vendor's wrong Frame of Reference
+  (Prostate4) still matches.
 
 ---
 

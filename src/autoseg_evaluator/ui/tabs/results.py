@@ -33,8 +33,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from autoseg_evaluator.core.tolerance_keys import base_metric
 from autoseg_evaluator.data import sidecar
-from autoseg_evaluator.data.results import META_COLUMNS, ResultsManager, metric_display_label
+from autoseg_evaluator.data.results import (
+    META_COLUMNS,
+    SCORED_AT_PREFIX,
+    ResultsManager,
+    metric_display_label,
+)
 
 _ERROR_BG = QColor("#FFE0E0")
 
@@ -104,6 +110,7 @@ class _BandedHeaderView(QHeaderView):
 
 
 def _band_for_metric_key(key: str) -> str:
+    key = base_metric(key)
     if key in ("dice", "precision", "recall", "surface_dice"):
         return "overlap"
     if key in ("hausdorff100", "hausdorff95", "mean_surface_distance"):
@@ -124,8 +131,13 @@ def _band_for_metric_key(key: str) -> str:
         "n_raters",
     ):
         return "staple"
-    # Qualitative Likert score + assessed / blinded flag columns share a band.
-    if key.startswith("likert_") or key in ("qualitative_assessed", "qualitative_blinded"):
+    # Qualitative Likert score, when it was given, and the assessed / blinded
+    # flag columns share a band.
+    if (
+        key.startswith("likert_")
+        or key.startswith(SCORED_AT_PREFIX)
+        or key in ("qualitative_assessed", "qualitative_blinded")
+    ):
         return "qualitative"
     # DVH built-ins or dynamic ``d{X}_gy`` / ``v{X}gy_cc``
     if key in ("dose_coverage_pct", "dvh_status", "dmin_gy", "dmean_gy", "dmax_gy"):
@@ -172,10 +184,8 @@ class ResultsTab(QWidget):
         metric_cols = self._results_mgr.metric_columns()
         meta_keys = [k for k, _ in META_COLUMNS]
         meta_labels = [label for _, label in META_COLUMNS]
-        sd_tau, poly_tau = self._results_mgr.tolerances()
-        headers = meta_labels + [
-            metric_display_label(k, sd_tau_mm=sd_tau, poly_tau_mm=poly_tau) for k in metric_cols
-        ]
+        # Each tolerance-dependent column names its own tolerance, from its key.
+        headers = meta_labels + [metric_display_label(k) for k in metric_cols]
 
         # Re-build with sorting disabled to keep insertion order stable
         was_sorted = self._table.isSortingEnabled()
@@ -220,7 +230,9 @@ class ResultsTab(QWidget):
         suffix = f"  ({n_err} with errors)" if n_err else ""
         self._row_count_label.setText(f"{n} row{'s' if n != 1 else ''}{suffix}")
         self._export_btn.setEnabled(n > 0)
-        self._clear_btn.setEnabled(n > 0)
+        # Clear discards computed rows only; score-only rows belong to the
+        # Qualitative tab, so there is nothing for Clear to do without results.
+        self._clear_btn.setEnabled(self._results_mgr.computed_row_count() > 0)
 
     # ---- UI construction --------------------------------------------------
 
@@ -270,18 +282,23 @@ class ResultsTab(QWidget):
     # ---- Slots ------------------------------------------------------------
 
     def _on_clear_clicked(self) -> None:
-        if self._results_mgr is None or len(self._results_mgr) == 0:
+        if self._results_mgr is None:
+            return
+        count = self._results_mgr.computed_row_count()
+        if count == 0:
             return
         reply = QMessageBox.question(
             self,
             "Clear results",
-            f"Discard all {len(self._results_mgr)} stored result row(s)? This cannot be undone.",
+            f"Discard all {count} computed result row(s)? This cannot be undone.\n\n"
+            "Likert scores are kept: they belong to the contours and are managed in "
+            "the Qualitative tab, and the next computation's rows show them again.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self._results_mgr.clear()
+        self._results_mgr.clear_computed()
         self.refresh()
         self.cleared.emit()
 
@@ -300,8 +317,16 @@ class ResultsTab(QWidget):
             self._table.setColumnWidth(c, min(240, w + 6))
 
     def _on_export_clicked(self) -> None:
+        self.export_with_dialog()
+
+    def export_with_dialog(self) -> bool:
+        """Ask where, export, and report. Returns whether a file was written.
+
+        Also used before a new computation replaces the table, so the user can
+        keep the results being replaced.
+        """
         if self._results_mgr is None or len(self._results_mgr) == 0:
-            return
+            return False
         path_str, _ = QFileDialog.getSaveFileName(
             self,
             "Export results to CSV",
@@ -309,7 +334,7 @@ class ResultsTab(QWidget):
             "CSV files (*.csv);;All files (*)",
         )
         if not path_str:
-            return
+            return False
         path = Path(path_str)
         if path.suffix.lower() != ".csv":
             path = path.with_suffix(".csv")
@@ -319,19 +344,19 @@ class ResultsTab(QWidget):
             # the detail, and is silently absent when it did not. Prompting here
             # would ask about something already decided — and a run that did not
             # collect it cannot produce one now.
-            sd_tau, poly_tau = self._results_mgr.tolerances()
             audit_path = sidecar.write(
                 sidecar.path_for(path),
                 self._results_mgr.rows(),
-                settings={"surface_dice_tau_mm": sd_tau, "polygon_tolerance_mm": poly_tau},
+                settings={"tolerances": self._results_mgr.tolerances_in_use()},
             )
         except OSError as exc:
             QMessageBox.critical(self, "Export CSV", f"Could not write file:\n{exc}")
-            return
+            return False
         message = f"Exported {n} row(s) to {path}."
         if audit_path is not None:
             message += f"\n\nAudit detail written to {audit_path.name}."
         QMessageBox.information(self, "Export CSV", message)
+        return True
 
 
 class _ResultsTable(QTableWidget):

@@ -52,5 +52,6 @@ def test_defaults_fill_what_the_file_does_not_say(tmp_path, monkeypatch):
     loaded = settings_module.load_settings()
 
     assert loaded["theme"] == "dark_teal.xml"
-    assert loaded["tolerances"]["surface_dice_tau_mm"] == 3.0
+    # A list: every tolerance given is computed in one run.
+    assert loaded["tolerances"]["surface_dice_tau_mm"] == [3.0]
     assert "apl_tolerance_mm" not in loaded["tolerances"]

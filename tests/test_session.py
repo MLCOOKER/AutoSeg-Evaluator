@@ -148,7 +148,7 @@ def test_session_dict_round_trips_qualitative_block(tmp_path):
     payload = build_session_dict(
         folder="/x", drawers_state=[], replacement_rules=[], template={}, qualitative=qualitative
     )
-    assert payload["schema_version"] == 6
+    assert payload["schema_version"] == 7
     path = tmp_path / "q.session.json"
     save_session(path, payload)
     assert load_session_file(path)["qualitative"] == qualitative
@@ -295,7 +295,7 @@ def test_session_dict_round_trips_link_overrides(tmp_path):
         template={},
         link_overrides=overrides,
     )
-    assert payload["schema_version"] == 6
+    assert payload["schema_version"] == 7
     assert payload["link_overrides"] == overrides
 
     path = tmp_path / "s.session.json"
@@ -345,7 +345,7 @@ def test_session_dict_round_trips_organ_assignments(tmp_path):
         template={},
         organ_assignments=assignments,
     )
-    assert payload["schema_version"] == 6
+    assert payload["schema_version"] == 7
     assert payload["organ_assignments"] == assignments
 
     path = tmp_path / "s.session.json"

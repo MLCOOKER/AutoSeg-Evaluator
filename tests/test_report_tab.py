@@ -1678,11 +1678,11 @@ def test_a_tolerance_metric_states_its_tolerance(qapp):
     for patient in range(8):
         for source, value in ((REFERENCE, 0.90), (CHALLENGER, 0.84)):
             row = _row_for(f"P{patient}", "Parotid (L)", source, 0.8)
-            row["metrics"] = {"surface_dice": value + patient * 0.002}
+            # The tolerance travels in the key, as the worker writes it.
+            row["metrics"] = {"surface_dice@3mm": value + patient * 0.002}
             rows.append(row)
     widget = ReportTab()
     manager = ResultsManager()
-    manager.set_tolerances(3.0, None)
     manager.add_rows(rows)
     widget.set_results_manager(manager)
     widget.refresh()

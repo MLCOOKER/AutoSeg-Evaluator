@@ -123,9 +123,17 @@ def _check_pair(case: dict[str, Any], values: dict[str, float], planes: tuple[in
     # our columns. They differ by hundreds of millimetres, so a swap here is
     # loud rather than subtle.
     reference_apl = case["apl"][f"{TOLERANCES_MM[1]}"]
+    # The APL columns carry the tolerance they were measured at.
+    from autoseg_evaluator.core.tolerance_keys import tolerance_key
+
+    tau = TOLERANCES_MM[1]
     for side, apl_column, napl_column in (
-        ("a", "poly_apl_mm", "poly_napl"),
-        ("b", "poly_apl_reverse_mm", "poly_napl_reverse"),
+        ("a", tolerance_key("poly_apl_mm", tau), tolerance_key("poly_napl", tau)),
+        (
+            "b",
+            tolerance_key("poly_apl_reverse_mm", tau),
+            tolerance_key("poly_napl_reverse", tau),
+        ),
     ):
         error = abs(values[apl_column] - reference_apl[side]["apl_mm"])
         worst["apl_mm"] = max(worst["apl_mm"], error)

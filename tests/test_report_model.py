@@ -448,6 +448,52 @@ def test_the_exclusion_covers_either_side_of_a_comparison():
     assert result.n_pairs == 1  # only P2 survives
 
 
+def test_sources_on_different_courses_are_not_paired():
+    """External audit: pairing joined on the patient and dropped the course.
+
+    Vendor A was assessed on course one and Vendor B on course two. Each has one
+    case for P1, so neither is ambiguous alone, but the pair would compare two
+    different contouring tasks.
+    """
+    rows = [
+        _linked_row("P1", "Parotid (L)", "VendorA", 0.80, "course-1"),
+        _linked_row("P1", "Parotid (L)", "VendorB", 0.74, "course-2"),
+        _linked_row("P2", "Parotid (L)", "VendorA", 0.81, "course-1"),
+        _linked_row("P2", "Parotid (L)", "VendorB", 0.75, "course-1"),
+    ]
+    model = build_report_model(rows)
+    assert model.paired_values("Parotid (L)", "dice", "VendorA", "VendorB") == [("P2", 0.81, 0.75)]
+    assert model.excluded_patients("Parotid (L)", "dice", "VendorA", "VendorB") == {"P1"}
+    assert model.compare("Parotid (L)", "dice", "VendorA", "VendorB").n_pairs == 1
+
+
+def test_an_infinite_value_is_a_metric_invalid_case():
+    """External audit: an empty contour's Hausdorff distance hung the report.
+
+    Infinity reached the confidence-interval search, which could never step past
+    it. It is now held as metric invalid, like NaN, so the case still shows in
+    the coverage table and the comparison runs on the finite pairs.
+    """
+    inf = float("inf")
+    rows = [
+        _row(f"P{i}", "Parotid (L)", "VendorA", {"hausdorff100": v})
+        for i, v in enumerate([inf, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+    ] + [
+        _row(f"P{i}", "Parotid (L)", "VendorB", {"hausdorff100": v})
+        for i, v in enumerate([3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5])
+    ]
+    model = build_report_model(rows)
+    cell = model.coverage("Parotid (L)", "hausdorff100", "VendorA")
+    assert cell.metric_invalid == 1
+    assert cell.produced == 7
+    # Both directions: an infinity on either side once hung or corrupted it.
+    forward = model.compare("Parotid (L)", "hausdorff100", "VendorA", "VendorB")
+    backward = model.compare("Parotid (L)", "hausdorff100", "VendorB", "VendorA")
+    assert forward.n_pairs == backward.n_pairs == 7
+    assert forward.ci_available and backward.ci_available
+    assert model.describe_cell("Parotid (L)", "VendorA", "hausdorff100").n == 7
+
+
 def test_an_absent_linkage_keeps_the_previous_behaviour():
     """Rows from sessions predating the stamp are one case per patient."""
     rows = [

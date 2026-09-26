@@ -44,6 +44,7 @@ _IDENTITY_KEYS = (
     "test_rtstruct_sop_uid",
     "test_organ",
     "test_roi_number",
+    "computed_at",
 )
 
 

@@ -304,12 +304,56 @@ def resolve_dose(library, patient_id: str, rtstruct_sop_uid: str) -> Resolution:
 # ---- Convenience wrappers -------------------------------------------------
 
 
-def reference_image_folder(library, patient_id: str, rtstruct_sop_uid: str) -> str | None:
-    """Folder holding the resolved image series, or ``None`` if unresolved."""
+def reference_image_series(library, patient_id: str, rtstruct_sop_uid: str):
+    """The resolved image series itself, or ``None`` if unresolved.
+
+    Prefer this to :func:`reference_image_folder` whenever the image is going to
+    be read: a folder can hold several series, and only the series says which
+    files are the one resolved.
+    """
     res = resolve_image_series(library, patient_id, rtstruct_sop_uid)
     if not res.is_resolved or not res.target.files:
         return None
-    return os.path.dirname(res.target.files[0])
+    return res.target
+
+
+def reference_image_folder(library, patient_id: str, rtstruct_sop_uid: str) -> str | None:
+    """Folder holding the resolved image series, or ``None`` if unresolved."""
+    series = reference_image_series(library, patient_id, rtstruct_sop_uid)
+    return os.path.dirname(series.files[0]) if series is not None else None
+
+
+def consensus_constituents(
+    library, patient_id: str, entry, roi_number: int
+) -> list[tuple[str, int]]:
+    """``(SOP UID, ROI number)`` of a synthetic consensus ROI's raters.
+
+    Only raters drawn on the consensus's own planning image: STAPLE fuses masks
+    voxel by voxel on one CT. The builder already leaves the others out; this
+    also covers consensus entries restored from sessions saved before it did.
+    """
+    constituents = list((getattr(entry, "constituent_groups", {}) or {}).get(roi_number) or [])
+    own = planning_series_uid(library, patient_id, entry.sop_instance_uid)
+    if own is None:
+        return constituents
+    kept = []
+    for sop, roi in constituents:
+        series = planning_series_uid(library, patient_id, sop)
+        if series is None or series == own:
+            kept.append((sop, int(roi)))
+    return kept
+
+
+def planning_series_uid(library, patient_id: str, rtstruct_sop_uid: str) -> str | None:
+    """SeriesInstanceUID of the image a structure set was drawn on, if resolved.
+
+    The treatment-context test used across the app: two structure sets belong to
+    one case when they resolve to the same planning series. Frame of Reference is
+    not used, because vendors get it wrong — one vendor in this project's own
+    cohort wrote a different FrameOfReferenceUID for the same CT.
+    """
+    series = reference_image_series(library, patient_id, rtstruct_sop_uid)
+    return series_uid_of(series) if series is not None else None
 
 
 # ---- Linkage components ---------------------------------------------------
@@ -540,9 +584,12 @@ __all__ = [
     "candidate_label",
     "candidate_uid",
     "collect_link_issues",
+    "consensus_constituents",
     "link_candidates",
     "override_key",
+    "planning_series_uid",
     "reference_image_folder",
+    "reference_image_series",
     "resolve_dose",
     "resolve_image_series",
     "series_uid_of",

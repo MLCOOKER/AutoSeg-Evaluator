@@ -30,6 +30,7 @@ from autoseg_evaluator.core.surface_distance import (
     compute_surface_dice_at_tolerance,
     compute_surface_distances,
 )
+from autoseg_evaluator.core.tolerance_keys import normalise_tolerances, tolerance_key
 
 # ---- Individual metric wrappers ------------------------------------------
 
@@ -234,15 +235,18 @@ def compute_geometric_metrics(
     * ``geometric``: ``{dice: bool, precision_recall: bool, hausdorff100: bool,
       hausdorff95: bool, mean_surface_distance: bool, surface_dice: bool,
       volume: bool, com_offset: bool}``
-    * ``tolerances``: ``{surface_dice_tau_mm: float}``
+    * ``tolerances``: ``{surface_dice_tau_mm: float | list[float]}``
 
     Returns a flat ``{metric_name: float}`` dict. Surface-distance derived
     metrics share a single ``compute_surface_distances`` call so we don't pay
-    the cost twice.
+    the cost twice. Surface Dice is keyed by its tolerance —
+    ``surface_dice@3mm`` — one entry per tolerance requested.
     """
     geom = dict(config.get("geometric", {}) or {})
     tols = dict(config.get("tolerances", {}) or {})
-    sd_tau = float(tols.get("surface_dice_tau_mm", 3.0))
+    # One Surface Dice per tolerance, each under its own key. The surface
+    # distances are computed once, so every further tolerance is a threshold.
+    sd_taus = normalise_tolerances(tols.get("surface_dice_tau_mm"))
 
     gt_arr = sitk.GetArrayFromImage(gt_mask).astype(np.uint8)
     test_arr = sitk.GetArrayFromImage(test_mask).astype(np.uint8)
@@ -286,7 +290,8 @@ def compute_geometric_metrics(
             else:
                 out["mean_surface_distance"] = float(0.5 * (a + b))
         if geom.get("surface_dice"):
-            out["surface_dice"] = compute_surface_dice_at_tolerance(sd, sd_tau)
+            for tau in sd_taus:
+                out[tolerance_key("surface_dice", tau)] = compute_surface_dice_at_tolerance(sd, tau)
 
     # Volume + centre-of-mass are computed together (single mask traversal each
     # under the hood), but exposed via two independent checkboxes so users can

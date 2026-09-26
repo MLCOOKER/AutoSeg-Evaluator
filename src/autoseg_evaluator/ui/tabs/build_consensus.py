@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import csv
 import gc
+import hashlib
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -75,13 +76,14 @@ from PySide6.QtWidgets import (
 
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
-    find_reference_image_folder,
-    read_dicom_image,
+    load_reference_image,
     read_rtstruct,
 )
 from autoseg_evaluator.core.matching import ReplacementRule, similarity
 from autoseg_evaluator.core.metrics import compute_geometric_metrics
 from autoseg_evaluator.core.staple import MULTI_OBSERVER_LABEL
+from autoseg_evaluator.core.tolerance_keys import normalise_tolerances, tolerance_key
+from autoseg_evaluator.data.linkage import reference_image_series
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
     OrganEntry,
@@ -349,6 +351,7 @@ class BuildConsensusTab(QWidget):
                     "observer_labels": observer_labels,
                     "for_uid": for_uid,
                     "synthetic_sop_uid": syn.sop_instance_uid,
+                    "series_uids": sorted(getattr(syn, "referenced_series_uids", set()) or ()),
                     "organs": organs_payload,
                 }
             )
@@ -398,6 +401,14 @@ class BuildConsensusTab(QWidget):
                 constituent_groups[roi_number] = constituents
             if not organs:
                 continue
+            # The planning image the consensus was built on. Sessions saved
+            # before it was recorded take it from a constituent's own link.
+            series_uids = {str(uid) for uid in group.get("series_uids", []) or [] if uid}
+            if not series_uids:
+                first_sop = next(iter(constituent_groups.values()))[0][0]
+                series = reference_image_series(self._library, patient_id, first_sop)
+                if series is not None:
+                    series_uids = {series.series_instance_uid}
             entry = RTSTRUCTEntry(
                 sop_instance_uid=synthetic_sop,
                 file_path="",
@@ -409,6 +420,7 @@ class BuildConsensusTab(QWidget):
                 organs=organs,
                 is_synthetic_consensus=True,
                 constituent_groups=constituent_groups,
+                referenced_series_uids=series_uids,
             )
             if self._library.register_synthetic_consensus(patient_id, for_uid, entry):
                 restored += 1
@@ -1207,9 +1219,11 @@ class BuildConsensusTab(QWidget):
             if not buckets:
                 skipped.append(f"{pid}: no matched organs")
                 continue
-            entry = self._build_synthetic_entry(pid, buckets)
+            dropped: list[str] = []
+            entry = self._build_synthetic_entry(pid, buckets, dropped)
+            skipped.extend(dropped)
             if entry is None:
-                skipped.append(f"{pid}: no organ with 2+ raters (or no shared FrameOfReferenceUID)")
+                skipped.append(f"{pid}: no organ with 2+ raters on one planning image")
                 continue
             ok = self._library.register_synthetic_consensus(
                 pid, entry.frame_of_reference_uid, entry
@@ -1236,30 +1250,69 @@ class BuildConsensusTab(QWidget):
         self,
         patient_id: str,
         buckets: dict[str, list[tuple[str, int, str]]],
+        dropped: list[str] | None = None,
     ) -> RTSTRUCTEntry | None:
-        """Assemble the synthetic RTSTRUCTEntry representing this patient's consensus."""
+        """Assemble the synthetic RTSTRUCTEntry representing this patient's consensus.
+
+        Every rater must have contoured the same planning image: STAPLE fuses
+        masks voxel by voxel on one CT. The image with the most structure sets
+        is used, and raters on any other image are left out, each named in
+        ``dropped`` when given. An external audit found the previous version
+        chose a majority Frame of Reference but then fused every rater anyway.
+        """
         if self._library is None:
             return None
-        # Only organs with 2+ raters are valid STAPLE inputs. After manual
-        # edits a bucket can drop below 2 — exclude those here.
-        buckets = {organ: raters for organ, raters in buckets.items() if len(raters) >= 2}
-        if not buckets:
-            return None
-        # All constituent RTSSes must share a FrameOfReferenceUID for STAPLE to
-        # work. The observers could in principle span contexts — pick the FoR
-        # with the most contributors here.
-        for_uid_counts: dict[str, int] = defaultdict(int)
-        constituent_uids = {sop for raters in buckets.values() for (sop, _, _) in raters}
         patient = self._library.patients.get(patient_id)
         if patient is None:
             return None
-        for ctx in patient.contexts:
-            for r in ctx.rtstructs:
-                if r.sop_instance_uid in constituent_uids:
-                    for_uid_counts[ctx.frame_of_reference_uid] += 1
-        if not for_uid_counts:
+        # One planning image per structure set. The resolved series decides,
+        # not the Frame of Reference, which vendors are known to get wrong for
+        # the same CT; a structure set whose image cannot be resolved falls back
+        # to its Frame of Reference.
+        entries = {r.sop_instance_uid: (ctx, r) for ctx in patient.contexts for r in ctx.rtstructs}
+        constituent_uids = {sop for raters in buckets.values() for (sop, _, _) in raters}
+        image_of: dict[str, str] = {}
+        series_of: dict[str, Any] = {}
+        for sop in constituent_uids:
+            found = entries.get(sop)
+            if found is None:
+                continue
+            series = reference_image_series(self._library, patient_id, sop)
+            if series is not None:
+                image_of[sop] = f"series:{series.series_instance_uid}"
+                series_of[image_of[sop]] = series
+            else:
+                image_of[sop] = f"for:{found[0].frame_of_reference_uid}"
+        if not image_of:
             return None
-        chosen_for = max(for_uid_counts.items(), key=lambda kv: kv[1])[0]
+        counts: dict[str, int] = defaultdict(int)
+        for image in image_of.values():
+            counts[image] += 1
+        # Most structure sets first; ties broken by key so the choice is stable.
+        chosen_image = min(counts, key=lambda key: (-counts[key], key))
+        kept: dict[str, list[tuple[str, int, str]]] = {}
+        for organ, raters in buckets.items():
+            on_image = [rater for rater in raters if image_of.get(rater[0]) == chosen_image]
+            if dropped is not None:
+                for sop, _roi, name in raters:
+                    if image_of.get(sop) != chosen_image:
+                        label = entries[sop][1].source_label if sop in entries else sop
+                        dropped.append(
+                            f"{patient_id}: {label} / {name} left out of '{organ}' — "
+                            "drawn on a different planning image"
+                        )
+            kept[organ] = on_image
+        # Only organs with 2+ raters are valid STAPLE inputs. After manual
+        # edits, or once other images' raters are left out, a bucket can drop
+        # below 2 — exclude those here.
+        buckets = {organ: raters for organ, raters in kept.items() if len(raters) >= 2}
+        if not buckets:
+            return None
+        chosen_series = series_of.get(chosen_image)
+        if chosen_series is not None:
+            chosen_for = chosen_series.frame_of_reference_uid
+        else:
+            chosen_for = chosen_image.split(":", 1)[1]
         # Build OrganEntry list — one synthetic ROI per bucket, with a new
         # roi_number starting from 1. The organ NAME is the bucket title (its
         # representative), so the name shown in Tab 3 matches the Tab 2 bucket
@@ -1283,6 +1336,11 @@ class BuildConsensusTab(QWidget):
             organs=organs,
             is_synthetic_consensus=True,
             constituent_groups=constituent_groups,
+            # Names its image outright, so the consensus resolves to the image
+            # its raters were drawn on rather than by Frame of Reference.
+            referenced_series_uids=(
+                {chosen_series.series_instance_uid} if chosen_series is not None else set()
+            ),
         )
 
     def _mint_synthetic_uid(self, patient_id: str) -> str:
@@ -1294,9 +1352,14 @@ class BuildConsensusTab(QWidget):
         so re-running Generate replaces the existing entry in place via
         ``MetadataLibrary.register_synthetic_consensus`` rather than minting
         a sibling that leaves a stale orphan behind.
+
+        A digest rather than :func:`hash`, which Python salts per process: the
+        same patient would otherwise get a new UID in every run of the app, and
+        regenerating after a session restore would leave the restored entry
+        behind as an orphan.
         """
-        token = f"{patient_id}|consensus"
-        return f"AUTOSEG.SYNTHETIC.{abs(hash(token)) % (10**18)}"
+        token = f"{patient_id}|consensus".encode()
+        return f"AUTOSEG.SYNTHETIC.{int(hashlib.sha256(token).hexdigest(), 16) % (10**18)}"
 
     # ---- Inter-manual metrics --------------------------------------------
 
@@ -1337,9 +1400,11 @@ class BuildConsensusTab(QWidget):
         # Settings dialog — defaults from Tab 4's tolerances + all geom on.
         settings_dlg = _InterObserverSettingsDialog(
             n_groups=len(selected_pids),
-            default_sd_tau_mm=float(
-                (self._settings.get("tolerances") or {}).get("surface_dice_tau_mm", 3.0)
-            ),
+            # The Compute tab may hold several tolerances; this table measures
+            # at one, so it starts from the first.
+            default_sd_tau_mm=normalise_tolerances(
+                (self._settings.get("tolerances") or {}).get("surface_dice_tau_mm")
+            )[0],
             parent=self,
         )
         if settings_dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1494,19 +1559,18 @@ class BuildConsensusTab(QWidget):
         """
         if self._library is None:
             return []
-        # Locate the patient's reference image folder via any constituent's RTSS.
+        # Locate the patient's reference image via any constituent's RTSS.
         any_sop = next(
             (sop for ms in buckets.values() for (sop, _r, _n) in ms),
             None,
         )
         if any_sop is None:
             return []
-        folder = find_reference_image_folder(self._library, patient_id, any_sop)
-        if folder is None:
-            return []
         try:
-            ct = read_dicom_image(folder)
+            ct = load_reference_image(self._library, patient_id, any_sop)
         except Exception:  # noqa: BLE001
+            return []
+        if ct is None:
             return []
 
         # Cache rasterised masks per (sop, roi) to avoid double work when
@@ -1799,8 +1863,13 @@ def _inter_manual_columns(sd_tau_mm: float | None) -> tuple[tuple[str, str], ...
     for key in _INTER_MANUAL_COLUMN_KEYS:
         if key in static_overrides:
             label = static_overrides[key]
+        elif key == "surface_dice":
+            # Computed values carry their tolerance in the key, so the column
+            # reads the key for the tolerance this table was measured at.
+            key = tolerance_key(key, 3.0 if sd_tau_mm is None else sd_tau_mm)
+            label = metric_display_label(key)
         else:
-            label = metric_display_label(key, sd_tau_mm=sd_tau_mm)
+            label = metric_display_label(key)
         out.append((key, label))
     return tuple(out)
 

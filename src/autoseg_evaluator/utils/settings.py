@@ -23,8 +23,10 @@ _DEFAULTS: dict[str, Any] = {
     },
     "active_tab": 0,
     "theme": "light_blue.xml",
+    # Tolerances are lists: every value is computed in one run, each in its
+    # own column. A single number, as older settings files hold, still reads.
     "tolerances": {
-        "surface_dice_tau_mm": 3.0,
+        "surface_dice_tau_mm": [3.0],
         "similarity_threshold": 0.6,
     },
     "dvh": {
@@ -55,7 +57,7 @@ _DEFAULTS: dict[str, Any] = {
             "mean": False,
             "median": False,
         },
-        "tolerance_mm": 3.0,
+        "tolerance_mm": [3.0],
     },
     # Keep the full detail behind every number for a .audit.json beside an
     # export. Off by default: it is only useful if someone intends to audit

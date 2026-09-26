@@ -166,7 +166,7 @@ autoseg-evaluator/
 │   │   ├── results.py               # ResultsManager + canonical column order
 │   │   ├── report.py                # Report model: cases, pairing, directions
 │   │   ├── sidecar.py               # .audit.json beside an export
-│   │   ├── session.py               # Session JSON schema (v6)
+│   │   ├── session.py               # Session JSON schema (v7)
 │   │   └── synonyms.py              # TG-263 dict loader / flattener
 │   ├── workers/
 │   │   ├── scan_worker.py           # Background folder scan
@@ -445,9 +445,15 @@ per-patient cache; the card swipes (`QPropertyAnimation`) on each rating.
 While grading, **the other tabs are locked** (`assessmentLockChanged` →
 `QTabWidget.setTabEnabled(False)`) to prevent blinded-data leakage; an **Unlock**
 button leaves and keeps progress. Scores are emitted via `qualitativeScored` and
-stored in the Results tab as `likert_<grader>` + `qualitative_assessed` /
-`qualitative_blinded` columns. Graders, their fixed configs and all scores are
-saved in the session (schema v4) and re-emitted into Results on load.
+stored in the Results tab as `likert_<grader>`, `scored_at_<grader>` (when the
+score was given) + `qualitative_assessed` / `qualitative_blinded` columns. A
+score is keyed by patient, drawer, source, **structure set** and ROI number.
+Graders, their fixed configs and all scores, each with its time, are saved in the
+session and re-emitted into Results on load. A score whose contour is no longer
+among the drawers on restore — a drawer renamed or removed, drawers that did not
+restore — is kept, saved again, listed as a row of its own, and rejoins its
+grader once the contour is back; a consensus ground truth is shown by building
+its mask from its raters, as Compute does.
 
 ### Tab 5 — Compute
 
@@ -458,12 +464,14 @@ list: a reader compares them where they sit together.
 
 - **3D mask metrics (rasterised)** — Dice, precision + recall (one checkbox,
   two columns), Surface Dice, 3D Hausdorff 100% and 95%, Mean Surface Distance,
-  Volume, COM offset; all on by default. **Surface Dice τ** spinbox, default
-  3 mm (Nikolov 2018).
+  Volume, COM offset; all on by default. **Surface Dice τ (mm)**, default
+  3 mm (Nikolov 2018), takes a list — "1, 2, 3" — and each tolerance fills its
+  own column; the surface distances are computed once.
 - **2D contour metrics (native RTSS polygons)** — APL, NAPL, 2D Hausdorff 100%
   and 95%, 2D mean and median contour distance; all off by default, so an
   existing install does not start producing a second set of columns because it
-  was upgraded. **APL τ** spinbox, default 3 mm. A note states which 2D engine
+  was upgraded. **APL τ (mm)**, default 3 mm, also takes a list; both 2D
+  engines measure every tolerance in one call. A note states which 2D engine
   will run (compiled, or the portable reference engine where no library is
   packaged). All six come from one engine call, so a narrower selection buys a
   narrower table, not a shorter run.
@@ -500,7 +508,14 @@ recovered from a finished table).
 
 **Compute / Cancel** at the bottom. Spinbox scroll-wheel events are
 ignored (`_NoScrollSpinBox` subclass) so scrolling the tab doesn't
-silently mutate parameter values.
+silently mutate parameter values. **Compute All is disabled while a run is
+in progress**; Cancel stops it after the current structure.
+
+**One computation per results table.** When Results already holds computed
+rows, Compute All asks first — *Export, then replace*, *Replace* or *Cancel* —
+and replaces the table. Rows are never updated or merged, so every row in a
+table comes from one run with one set of settings. Likert scores are not part of
+a computation and are kept.
 
 **Live progress panel** (`ui/widgets/progress_panel.py`): the metrics
 worker drives it with structured updates. Progress is measured in
@@ -540,10 +555,16 @@ against the contour and **overlaid onto its existing metric row** at read
 time (so each contour stays one row), positioned immediately before the
 first dose column.
 
-**Tolerance values in headers:** Surface Dice and the 2D APL columns read
-e.g. `Surface Dice @ 3.00 mm`, `2D APL (mm) @ 3.00 mm`, each with its own
-stream's tolerance, so CSVs computed at different tolerances can't silently
-merge.
+**Tolerance in every tolerance-dependent column:** the tolerance is part of
+the metric key — `surface_dice@3mm`, `poly_apl_mm@1.5mm` — so each tolerance
+is its own column, headed e.g. `Surface Dice @ 3.00 mm`, and its own metric in
+the report. A column can only ever show the values computed at its tolerance
+([`core/tolerance_keys.py`](../src/autoseg_evaluator/core/tolerance_keys.py);
+every lookup by metric name goes through `base_metric`).
+
+**Computed at** (a metadata column): when each row was produced, local time with
+its UTC offset. **Clear** discards the computed rows only; Likert scores belong
+to the Qualitative tab.
 
 **DVH Δ-vs-GT columns (v2.4.1):** when DVH is enabled, each test row's
 DVH metric also gets a `… Δ vs GT` column (test − GT) — e.g. `D2cc (Gy)
@@ -608,16 +629,19 @@ MetadataLibrary
 - `synthetic_consensus_entries()` → list of `(pid, for_uid, entry)`
 
 **ResultsManager** ([`data/results.py`](../src/autoseg_evaluator/data/results.py)):
-- Append-only row list (`rows()` returns a deep copy).
+- The rows of **one computation** (`rows()` returns a copy with Likert scores
+  overlaid). `clear_computed()` discards them and keeps the scores — what
+  replacing a computation does; `clear()` discards both, for a new cohort.
 - `metric_columns()` returns the canonical column order
-  (`CANONICAL_METRIC_COLUMNS`) PLUS any dynamic columns (user `D{X}_gy`,
-  `V{X}gy_cc`) appended via `_dynamic_metric_sort_key`.
-- `metric_display_label(key, *, sd_tau_mm=None, poly_tau_mm=None)` —
-  static `_METRIC_LABELS` dict + dynamic DVH naming + τ-decorated
-  Surface Dice and 2D APL / NAPL labels, each with its own stream's τ.
-- `set_tolerances(sd_tau_mm, poly_tau_mm=None)` / `tolerances()` — stamped at
-  compute start by `MainWindow._on_compute_requested`; consulted by the table
-  refresh, CSV export, audit record and Report tab.
+  (`CANONICAL_METRIC_COLUMNS`), with each tolerance-dependent metric expanded
+  in place to one column per tolerance present, PLUS any dynamic columns (user
+  `D{X}_gy`, `V{X}gy_cc`) appended via `_dynamic_metric_sort_key`.
+- `metric_display_label(key)` — static `_METRIC_LABELS` dict + dynamic DVH
+  naming + the tolerance read from the key (`Surface Dice @ 3.00 mm`).
+- `tolerances_in_use()` — every tolerance the columns carry, by stream, for
+  the audit record.
+- `session_state()` / `apply_session_state()` — the computed rows for the
+  session file (NumPy values made plain; ±∞ kept).
 - `export_csv(path)` — meta columns + display-label headers + formatted
   cells (`_format_cell` — 6-sig-fig floats, NaN → empty, bools as
   `True`/`False`).
@@ -1283,7 +1307,7 @@ design is in [`V3_REPORT_TAB_SPEC.md`](V3_REPORT_TAB_SPEC.md).
 
 **File:** [`src/autoseg_evaluator/data/session.py`](../src/autoseg_evaluator/data/session.py)
 
-**Schema version: 6.** Past versions still load (missing fields default
+**Schema version: 7.** Past versions still load (missing fields default
 to empty); future versions are refused with a clear error. **v4** adds the
 `qualitative` block (graders, their fixed per-grader configs, and each
 grader's order / scores / cursor) so an in-progress qualitative run resumes
@@ -1295,6 +1319,15 @@ They are applied by Tab 1 as soon as the rescan completes, and an override
 naming data that is no longer present is ignored rather than fatal. **v6** adds
 `organ_assignments`, mapping a raw ROI name to the organ it was grouped under,
 so a cohort whose names had to be sorted out by hand is not sorted out again.
+**v7** adds `results`, the computed results table, so qualitative scoring can
+continue over several sessions without computing the metrics again; each row
+keeps its `computed_at`, and each Likert score in `qualitative` its
+`scored_at`. The consensus entries also record the planning series they were
+built on (`series_uids`).
+
+Opening a session, or loading a different folder, replaces the work in progress
+— results, scores, organ labels, the session path — after the user confirms,
+with the option to save first. A rescan of the same folder keeps everything.
 
 Metric selections and tolerances are application settings (`settings.json`),
 not session data. Settings for removed features — mask APL's `apl_mean`,
@@ -1304,7 +1337,7 @@ not session data. Settings for removed features — mask APL's `apl_mean`,
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "saved_at": "2026-05-25T14:30:00+00:00",
   "folder": "C:/path/to/cohort",
   "replacement_rules": [{"find": "...", "replace": "..."}],
@@ -1428,7 +1461,10 @@ on the next `setValue` tick.
 | File | Tests | What it pins |
 |---|---|---|
 | `test_surface_distance.py` | ~30 | Bit-for-bit parity with `google-deepmind/surface-distance` on synthetic + SAMPLE-DATA fixtures |
-| `test_metrics.py` | ~19 | 3D metric aggregator; a configuration still asking for the removed mask APL gets none |
+| `test_metrics.py` | ~20 | 3D metric aggregator; Surface Dice keyed by its tolerance, one value per tolerance; a configuration still asking for the removed mask APL gets none |
+| `test_audit_fixes.py` | 11 | The external audit's findings on real DICOM: two series in one folder, a second course refused by matching, the worker and the consensus builder, the viewer's dose and consensus ground truth, Undo, the consensus UID |
+| `test_main_window_flows.py` | ~16 | One computation per table and its confirmation, a folder change and its confirmation, the results table in the session, STAPLE settings, the session file suffix |
+| `test_tolerance_keys.py` | ~16 | Tolerance lists from every settings shape, keys that carry their tolerance, every lookup by metric name seeing through it |
 | `test_matching.py` | ~20 | Levenshtein + cosine algorithm, canonicalisation, method labelling (tg263 / fuzzy / none), Match dataclass |
 | `test_tg263_synonyms.py` | ~20 | Bridging cases (Eyeball_L → Eye_L, OpticNerve_L → OpticNrv_L, etc.) AND pitfall non-collapses (Eye_L ≠ Eye_R, VB_L ≠ VB_R, Bone_Lacrimal ≠ Glnd_Lacrimal); regression tests for the four matcher-substitution bugs |
 | `test_staple.py` | ~15 | StapleConfig defaults (MICCAI), adaptive bbox sizing, outlier-rater detection |
@@ -1702,8 +1738,14 @@ bumping `pyproject.toml` updates the window title bar and every other
 - **Sub-voxel `continuous` rasteriser as the default**, `legacy` opt-in.
 - **Data linking by explicit reference**, no RTPLAN; ambiguity settled in Tab 1.
 - **Canonical organ grouping**, **Report tab** (Tab 7) with per-organ paired
-  statistics, figures and PDF export; session schema v6.
+  statistics, figures and PDF export.
 - The Match Contours visualiser uses the Qualitative tab's multiplanar viewer.
+- **External audit fixes (September 2026):** one computation per results table,
+  several tolerances in one run with the tolerance in each column's key, the
+  results table saved with the session (schema 7), *Computed at* and *Scored at*
+  columns, one planning image per comparison from matching to pairing, CT read
+  by series, the viewer showing the computed dose, and Likert scores that
+  survive restores. See the CHANGELOG.
 
 See [`V3_RELEASE_STATUS.md`](V3_RELEASE_STATUS.md) for what remains before
 release.

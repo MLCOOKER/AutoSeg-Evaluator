@@ -90,7 +90,7 @@ def median_ci(values: Sequence[float], alpha: float = 0.05) -> tuple[float, floa
     Exchangeability alone is not enough — dependent observations can be
     exchangeable and break the binomial calculation.
     """
-    data = sorted(float(v) for v in values if v is not None and not math.isnan(v))
+    data = sorted(float(v) for v in values if v is not None and math.isfinite(v))
     n = len(data)
     if n == 0:
         return None
@@ -119,8 +119,14 @@ def median_ci_coverage(n: int, alpha: float = 0.05) -> float | None:
 
 
 def describe(values: Sequence[float], alpha: float = 0.05) -> Description | None:
-    """Median [Q1, Q3] with its CI, plus mean (SD) and range."""
-    data = np.asarray([float(v) for v in values if v is not None and not math.isnan(v)])
+    """Median [Q1, Q3] with its CI, plus mean (SD) and range.
+
+    Only finite values are described. An infinite value is a metric with no
+    meaningful magnitude — a Hausdorff distance to an empty contour — and would
+    make the mean and SD infinite; the report counts it as *metric invalid*
+    alongside NaN.
+    """
+    data = np.asarray([float(v) for v in values if v is not None and math.isfinite(v)])
     if data.size == 0:
         return None
     ci = median_ci(data, alpha)
@@ -190,7 +196,7 @@ def signed_rank_exact_p(diffs: Sequence[float]) -> float:
     of any difference, and none of equivalence either.
     """
     d = np.asarray([float(x) for x in diffs], dtype=float)
-    d = d[~np.isnan(d)]
+    d = d[np.isfinite(d)]
     if d.size == 0 or np.all(d == 0):
         return 1.0
     ranks, signs = _pratt_ranks(d)
@@ -213,7 +219,7 @@ def rank_biserial(diffs: Sequence[float]) -> float | None:
     reported beside it — see :class:`PairedResult.n_zero`.
     """
     d = np.asarray([float(x) for x in diffs], dtype=float)
-    d = d[~np.isnan(d)]
+    d = d[np.isfinite(d)]
     if d.size == 0 or np.all(d == 0):
         return None
     ranks, signs = _pratt_ranks(d)
@@ -227,7 +233,7 @@ def rank_biserial(diffs: Sequence[float]) -> float | None:
 def walsh_averages(diffs: Sequence[float]) -> np.ndarray:
     """All ``(dᵢ + dⱼ)/2`` for i ≤ j — the candidate shifts, sorted."""
     d = np.asarray([float(x) for x in diffs], dtype=float)
-    d = d[~np.isnan(d)]
+    d = d[np.isfinite(d)]
     if d.size == 0:
         return np.asarray([])
     sums = d[:, None] + d[None, :]
@@ -318,6 +324,10 @@ def _probe_points(walsh: np.ndarray) -> list[tuple[float, bool]]:
     Duplicate Walsh averages define no gap between them and are collapsed.
     """
     distinct = np.unique(walsh)
+    # Callers pass finite differences only. Should an infinity slip through
+    # anyway, no finite step can move a probe past it, and the widening loop
+    # below would never end.
+    distinct = distinct[np.isfinite(distinct)]
     if distinct.size == 0:
         return []
     spread = float(distinct[-1] - distinct[0])
@@ -325,9 +335,9 @@ def _probe_points(walsh: np.ndarray) -> list[tuple[float, bool]]:
     # can round away to nothing when the spread is denormal. Fall back to an
     # absolute step, then widen until the probe really is outside.
     step = spread * 0.01 if spread > 0 else 1.0
-    while step > 0 and float(distinct[0]) - step >= float(distinct[0]):
+    while math.isfinite(step) and step > 0 and float(distinct[0]) - step >= float(distinct[0]):
         step *= 2.0
-    if step <= 0:
+    if not math.isfinite(step) or step <= 0:
         step = 1.0
 
     probes: list[tuple[float, bool]] = [(float(distinct[0]) - step, False)]
@@ -360,7 +370,7 @@ def confidence_set(diffs: Sequence[float], alpha: float = 0.05) -> ConfidenceSet
     interval is normally stated in.
     """
     d = np.asarray([float(x) for x in diffs], dtype=float)
-    d = d[~np.isnan(d)]
+    d = d[np.isfinite(d)]
     if d.size == 0:
         return ConfidenceSet(IntervalStatus.NO_DATA)
 
@@ -497,7 +507,7 @@ def sign_test(diffs: Sequence[float]) -> SignResult:
     patient carrying the magnitude.
     """
     d = np.asarray([float(x) for x in diffs], dtype=float)
-    d = d[~np.isnan(d)]
+    d = d[np.isfinite(d)]
     pos = int(np.sum(d > 0))
     neg = int(np.sum(d < 0))
     zero = int(np.sum(d == 0))
@@ -638,7 +648,10 @@ def paired_comparison(
     b = np.asarray([float(v) for v in values_b], dtype=float)
     if a.size != b.size:
         raise ValueError("paired_comparison needs aligned samples")
-    keep = ~(np.isnan(a) | np.isnan(b))
+    # A pair is usable only when both values are finite. An infinite difference
+    # has no place in a shift estimate, and inverting the test over it once
+    # never terminated.
+    keep = np.isfinite(a) & np.isfinite(b)
     a, b = a[keep], b[keep]
     if a.size == 0:
         return None

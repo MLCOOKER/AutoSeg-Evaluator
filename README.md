@@ -24,7 +24,7 @@ command-line or coding expertise.
 
 - **Two ways of measuring geometry, side by side**:
   - *3D mask metrics* — Dice, precision and recall, 3D Hausdorff 100% / 95%,
-    Mean Surface Distance, Surface Dice (configurable tolerance), centre-of-mass
+    Mean Surface Distance, Surface Dice (at one or several tolerances), centre-of-mass
     offset, signed volume difference and volume ratio, computed on binary masks;
     the surface metrics with Google DeepMind's
     [`surface-distance`](https://github.com/google-deepmind/surface-distance).
@@ -235,15 +235,19 @@ The application is organised into seven sequential tabs:
 4. **Qualitative Assessment** *(optional)* — score each contour on the 5-point
    MD Anderson Likert scale in a fast review UI (multiplanar viewer, swipe,
    per-grader blinded/transparent + include-GT + randomize configuration,
-   multiple graders). Scores flow into the Results table.
+   multiple graders). Scores flow into the Results table, each with the time it
+   was given, and scoring can continue over several sessions.
 5. **Compute** — choose 3D mask metrics and 2D contour metrics in two groups
-   side by side, each with its own tolerance, plus dosimetric metrics; then run
-   with detailed live progress and cancel. *Metric definitions…* explains
-   exactly how every metric is computed, and *Record audit detail* keeps the
-   detail behind every number for export.
-6. **Results** — review the banded metrics table (tolerance values baked into
-   the headers, 2D and 3D columns distinguished) and export to CSV, with the
-   audit record beside it when one was kept.
+   side by side, each with its own tolerance — or several, computed in the same
+   run — plus dosimetric metrics; then run with detailed live progress and
+   cancel. One computation fills the results table; computing again replaces
+   it, after asking. *Metric definitions…* explains exactly how every metric is
+   computed, and *Record audit detail* keeps the detail behind every number for
+   export.
+6. **Results** — review the banded metrics table (one column per tolerance,
+   named with it; 2D and 3D columns distinguished; when each row was computed)
+   and export to CSV, with the audit record beside it when one was kept. Saving
+   the session keeps the table, so it need not be computed again.
 7. **Report** — pick a ground truth, a metric and a comparison, and read the
    per-organ statistics, figures and acquisition summary; export the page as a
    PDF report.

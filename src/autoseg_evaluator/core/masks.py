@@ -121,11 +121,57 @@ def _apply_index_transform(pts_physical: np.ndarray, transform) -> np.ndarray:
     return ((pts_physical - origin) @ inv_direction.T) / spacing
 
 
-def read_dicom_image(folder: str) -> sitk.Image:
-    """Load a CT/MR/PT series from ``folder`` as a 3D SimpleITK volume."""
+def read_dicom_image(folder: str, series_uid: str | None = None) -> sitk.Image:
+    """Load a CT/MR/PT series from ``folder`` as a 3D SimpleITK volume.
+
+    Without ``series_uid`` GDCM reads whichever series it finds first in the
+    folder, which is only safe when the folder holds one. Code reading the image
+    a structure set was drawn on should use :func:`read_image_series`.
+    """
     reader = sitk.ImageSeriesReader()
-    files = reader.GetGDCMSeriesFileNames(str(folder))
+    if series_uid:
+        files = reader.GetGDCMSeriesFileNames(str(folder), series_uid)
+    else:
+        files = reader.GetGDCMSeriesFileNames(str(folder))
     reader.SetFileNames(files)
+    return reader.Execute()
+
+
+def _slice_position(path: str) -> float:
+    """Distance of one slice along its own normal, for ordering a series."""
+    ds = pydicom.dcmread(
+        path,
+        stop_before_pixels=True,
+        force=True,
+        specific_tags=["ImagePositionPatient", "ImageOrientationPatient"],
+    )
+    row, col = np.asarray(ds.ImageOrientationPatient, dtype=float).reshape(2, 3)
+    return float(np.dot(np.cross(row, col), np.asarray(ds.ImagePositionPatient, dtype=float)))
+
+
+def read_image_series(series) -> sitk.Image:
+    """Load exactly one image series: the one the link resolver chose.
+
+    An external audit found the CT read by folder: two series in one folder —
+    a planning CT and a CBCT, or two courses exported flat — shared whichever
+    GDCM happened to list first. Reading by SeriesInstanceUID restricts GDCM to
+    the resolved series while keeping its slice sorting, so a folder holding one
+    series gives exactly the image it always did. A series whose files span
+    several folders is ordered here instead, by position along the slice normal.
+    """
+    files = list(getattr(series, "files", []) or [])
+    if not files:
+        raise FileNotFoundError("the image series has no files")
+    uid = str(getattr(series, "series_instance_uid", "") or "")
+    folders = {os.path.dirname(f) for f in files}
+    if len(folders) == 1 and uid:
+        ordered = list(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(folders.pop(), uid))
+    else:
+        ordered = []
+    if not ordered:
+        ordered = sorted(files, key=_slice_position)
+    reader = sitk.ImageSeriesReader()
+    reader.SetFileNames(ordered)
     return reader.Execute()
 
 
@@ -548,3 +594,21 @@ def find_reference_image_folder(library, patient_id: str, rtstruct_sop_uid: str)
     from autoseg_evaluator.data.linkage import reference_image_folder
 
     return reference_image_folder(library, patient_id, rtstruct_sop_uid)
+
+
+def find_reference_image_series(library, patient_id: str, rtstruct_sop_uid: str):
+    """The image series an RTSTRUCT was drawn on, or ``None`` if unresolved.
+
+    Same resolution as :func:`find_reference_image_folder`, but returns the
+    series, which :func:`read_image_series` reads without picking up another
+    series stored in the same folder.
+    """
+    from autoseg_evaluator.data.linkage import reference_image_series
+
+    return reference_image_series(library, patient_id, rtstruct_sop_uid)
+
+
+def load_reference_image(library, patient_id: str, rtstruct_sop_uid: str) -> sitk.Image | None:
+    """Read the image an RTSTRUCT was drawn on, or ``None`` if unresolved."""
+    series = find_reference_image_series(library, patient_id, rtstruct_sop_uid)
+    return read_image_series(series) if series is not None else None

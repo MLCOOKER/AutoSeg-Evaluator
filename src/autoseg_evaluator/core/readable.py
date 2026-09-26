@@ -17,6 +17,13 @@ from __future__ import annotations
 
 import re
 
+from autoseg_evaluator.core.tolerance_keys import (
+    POLYGON_TOLERANCE_METRICS,
+    TOLERANCE_METRICS,
+    base_metric,
+    tolerance_of,
+)
+
 #: Metric key -> prose, without units or tolerance. Units belong on the axis and
 #: the tolerance in the subtitle, so a title stays a name.
 METRIC_PROSE: dict[str, str] = {
@@ -73,25 +80,9 @@ METRIC_UNITS: dict[str, str] = {
     "dmax_gy": "Gy",
 }
 
-#: Metrics whose value is meaningless without the tolerance they were computed
-#: at. Surface Dice at 1 mm and at 5 mm are different measurements, and two
-#: figures that do not say which cannot be compared.
-TOLERANCE_METRICS: frozenset[str] = frozenset(
-    {
-        "surface_dice",
-        # The 2D added path length takes its own tolerance, set in the 2D group
-        # on the Compute tab, not Surface Dice's.
-        "poly_apl_mm",
-        "poly_napl",
-        "poly_apl_reverse_mm",
-        "poly_napl_reverse",
-    }
-)
-
-#: Of those, the ones whose tolerance comes from the polygon stream.
-POLYGON_TOLERANCE_METRICS: frozenset[str] = frozenset(
-    {"poly_apl_mm", "poly_napl", "poly_apl_reverse_mm", "poly_napl_reverse"}
-)
+# ``TOLERANCE_METRICS`` — metrics whose value is meaningless without the
+# tolerance they were computed at — and ``POLYGON_TOLERANCE_METRICS`` live in
+# :mod:`autoseg_evaluator.core.tolerance_keys`, with the keys that carry it.
 
 
 #: Metrics bounded to [0, 1] by construction. Their axis shows the whole range,
@@ -148,7 +139,7 @@ def metric_scale(metric: str) -> str:
     the plot; the same figure on the full 0-1 range shows what it is, which is
     a small difference between four good contours.
     """
-    key = str(metric).strip().lower()
+    key = base_metric(str(metric).strip().lower())
     if key in BOUNDED_UNIT_METRICS:
         return SCALE_BOUNDED_UNIT
     # Differences are tested before anything else, because a difference of a
@@ -164,8 +155,12 @@ def metric_scale(metric: str) -> str:
 
 
 def readable_metric(metric: str) -> str:
-    """``surface_dice`` -> ``Surface Dice``, falling through unknown keys."""
-    key = str(metric).strip()
+    """``surface_dice`` -> ``Surface Dice``, falling through unknown keys.
+
+    The tolerance a key carries is not part of the name; it goes in the
+    subtitle, through :func:`tolerance_note`.
+    """
+    key = base_metric(str(metric).strip())
     prose = METRIC_PROSE.get(key.lower())
     if prose:
         return prose
@@ -179,7 +174,7 @@ def readable_metric(metric: str) -> str:
 
 
 def metric_units(metric: str) -> str:
-    key = str(metric).strip().lower()
+    key = base_metric(str(metric).strip().lower())
     if key in METRIC_UNITS:
         return METRIC_UNITS[key]
     if key.endswith("_gy"):
@@ -202,11 +197,18 @@ def tolerance_note(
     omits which was used cannot be compared with another, and the number looks
     authoritative either way — so where the tolerance is required and not
     recorded, that is said rather than left blank.
+
+    The tolerance comes from the key itself — ``surface_dice@3mm`` — which is
+    where every computed value now carries it. ``sd_tau_mm`` and ``poly_tau_mm``
+    stand in only for a bare key.
     """
-    key = str(metric).strip().lower()
+    text = str(metric).strip().lower()
+    key = base_metric(text)
     if key not in TOLERANCE_METRICS:
         return ""
-    tolerance = poly_tau_mm if key in POLYGON_TOLERANCE_METRICS else sd_tau_mm
+    tolerance = tolerance_of(text)
+    if tolerance is None:
+        tolerance = poly_tau_mm if key in POLYGON_TOLERANCE_METRICS else sd_tau_mm
     if tolerance is None:
         return "tolerance not recorded"
     return f"tolerance = {float(tolerance):.2f} mm"

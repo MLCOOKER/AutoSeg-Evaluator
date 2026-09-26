@@ -6,6 +6,56 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — external audit, September 2026
+Each has a regression test that reproduces the audit's case
+(`tests/test_audit_fixes.py` and beside the module concerned).
+- **The report could hang on an empty contour.** An empty mask gives an
+  infinite Hausdorff distance, and inverting the signed-rank test over a
+  difference of −∞ never terminated; +∞ returned an interval silently. Every
+  statistic now uses finite values only, and the report counts an infinite value
+  as *metric invalid*, like NaN, so the case still shows in the coverage table.
+  The Results table still shows ∞, which is the true value.
+- **Two image series in one folder shared one volume.** The link resolver found
+  the right series, but the image was then read by folder, and GDCM took
+  whichever series it listed first; the cache was keyed by folder too. The CT
+  is now read by its SeriesInstanceUID, in the worker, both viewers and the
+  consensus tab, and cached per series. A folder holding one series reads
+  exactly as before.
+- **Matching and consensus could combine different treatment courses.**
+  Auto-match searched every structure set of the patient; a second course's
+  contour could be matched to the first course's ground truth, unflagged, and
+  was then rasterised on the wrong CT. A structure set is now a candidate only
+  when it resolves to the ground truth's planning series — not its Frame of
+  Reference, which vendors get wrong (Prostate4). Auto-match skips the others
+  and says how many, a hand-added one is refused, and the worker turns any that
+  remain in an older session into an error row instead of a number. The
+  consensus builder keeps only raters on the majority planning image and names
+  the rest.
+- **Paired tests could pair different courses.** Pairing joined on the patient
+  and dropped the treatment context, so one vendor's first course was paired
+  with another's second. A pair is now the same patient on the same planning
+  image; a patient whose sources were assessed on different ones is withheld and
+  named with the others.
+- **Restarting a computation could destroy a running thread.** Compute All is
+  disabled while a run is active; a thread that has not stopped is kept until
+  it finishes rather than deleted; the previous run's signals are disconnected
+  so a late row cannot reach the next run; closing the window waits for it.
+- **The viewer could show a different dose from the one computed.** It chose
+  by its own rule. It now uses the metrics' dose resolver, with the user's link
+  answers, and samples the same dose grid the DVH integrates.
+- **Likert scores could land on another contour's row.** The score key had no
+  structure set, so two files from one source sharing an ROI number collided.
+- **A consensus ground truth could not be viewed.** It has no file; the viewer
+  and the Qualitative tab now build its mask from its raters as Compute does.
+- **STAPLE settings were not saved**; **Undo could not restore a drawer removed
+  directly** (and removing a drawer's last patient needed two Undos); **saving a
+  session without an extension raised an error**.
+- **A test assumed a SciPy fallback.** With exact computation (SciPy ≥ 1.14) its
+  data gave both zero conventions the same p; it now uses data that tells them
+  apart, computed exactly on both sides.
+- **The consensus UID changed between runs** (`hash()` is salted per process);
+  it is now a digest.
+
 ### Fixed
 - **2D metrics were unavailable for structure sets with dangling references.**
   A structure set naming a Frame of Reference it never declares, or image slices
@@ -36,6 +86,25 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   two candidates.
 
 ### Added
+- **Several tolerances in one run.** Surface Dice τ and APL τ accept a list,
+  such as "1, 2, 3". Each tolerance fills its own column, named with it
+  (`Surface Dice @ 1.00 mm`), and is its own metric in the report. Surface
+  distances are computed once, so extra tolerances cost almost nothing, and both
+  2D engines take the whole list in one call. The tolerance is part of the
+  metric's key (`surface_dice@3mm`), so a value can never be shown under
+  another run's tolerance; the single tolerance once stored for a whole results
+  table is gone. A single number in an older settings file still reads.
+- **The results table is saved with the session** (schema 7), so qualitative
+  scoring can continue over several days without computing the metrics again.
+- **A *Computed at* column** — when each row was produced — and **a *Scored at*
+  column beside each rater's Likert score**, since scoring can come sessions
+  later. Both are local time with the UTC offset. A score restored from an
+  older session has a blank time rather than a wrong one.
+- **Likert scores are never lost across sessions.** A score whose contour is no
+  longer among the drawers — a drawer renamed, a test row removed, drawers that
+  failed to restore — used to be dropped at restore and lost on the next save.
+  It is now kept, saved again, listed in Results as a row of its own, and rejoins
+  its grader once the contour is back.
 - **DVH method validation** (`scripts/validate_dvh_methods.py`,
   `docs/DVH_METHOD_VALIDATION.md`). It scores the DVH this version ships, v2's
   dicompyler-core DVH and the other alternatives considered against analytic
@@ -186,6 +255,17 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   which numbers the release moves.
 
 ### Changed
+- **One computation per results table.** Computing again replaces the table,
+  after the user confirms, with the option to export it first; rows are never
+  updated or merged, so every row in a table comes from one run with one set of
+  settings. Before, a second run appended its rows beside the first. Likert
+  scores are not part of a computation and are kept; *Clear* in Results
+  likewise discards computed rows only.
+- **Loading a different folder, or opening a session, clears the previous
+  cohort's work** — results, Likert scores, organ labels and the session path —
+  after the user confirms, with the option to save the session first. Before,
+  they carried into the new cohort, and Save could overwrite the previous
+  cohort's session. A rescan of the same folder keeps everything.
 - **DVHs are integrated over the contours themselves, not taken from
   dicompyler-core.** ⚠️ **This moves every DVH number.**
   - **How it works.** Each structure is read by the same rules as the geometric

@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from autoseg_evaluator.core.tolerance_keys import normalise_tolerances, tolerance_token
 from autoseg_evaluator.data.linkage import collect_link_issues
 from autoseg_evaluator.ui.dialogs.metric_definitions import MetricDefinitionsDialog
 from autoseg_evaluator.ui.widgets.progress_panel import ProgressPanel
@@ -251,12 +252,18 @@ class ComputeTab(QWidget):
         """Snapshot of the currently-selected metric configuration."""
         return {
             "geometric": {key: cb.isChecked() for key, cb in self._geom_checks.items()},
+            # Each is a list: every tolerance given is computed in the one run,
+            # and each fills its own column.
             "tolerances": {
-                "surface_dice_tau_mm": float(self._sd_tau_spin.value()),
+                "surface_dice_tau_mm": list(
+                    normalise_tolerances(self._sd_tau_edit.text().strip() or None)
+                ),
             },
             "polygon": {
                 "metrics": {key: cb.isChecked() for key, cb in self._poly_checks.items()},
-                "tolerance_mm": float(self._poly_tau_spin.value()),
+                "tolerance_mm": list(
+                    normalise_tolerances(self._poly_tau_edit.text().strip() or None)
+                ),
             },
             "dvh": {
                 "include_dmean": self._dose_checks["dmean"].isChecked(),
@@ -276,6 +283,17 @@ class ComputeTab(QWidget):
 
     def progress_panel(self) -> ProgressPanel:
         return self._progress
+
+    def set_running(self, running: bool) -> None:
+        """Disable Compute All while a run is in progress.
+
+        A second click used to tear the running thread down mid-computation and
+        could destroy it while still running. Cancel is the way out of a run.
+        """
+        self._compute_btn.setEnabled(not running)
+        self._compute_btn.setToolTip(
+            "A computation is running — cancel it below to stop." if running else ""
+        )
 
     # ---- UI construction --------------------------------------------------
 
@@ -363,13 +381,16 @@ class ComputeTab(QWidget):
         tol_form = QFormLayout()
         tol_form.setContentsMargins(0, 0, 0, 0)
         tol_form.setSpacing(6)
-        self._sd_tau_spin = _NoScrollSpinBox(box)
-        self._sd_tau_spin.setRange(0.0, 100.0)
-        self._sd_tau_spin.setSingleStep(0.1)
-        self._sd_tau_spin.setDecimals(2)
-        self._sd_tau_spin.setSuffix(" mm")
-        self._sd_tau_spin.valueChanged.connect(self._emit_config_changed)
-        tol_form.addRow("Surface Dice τ:", self._sd_tau_spin)
+        self._sd_tau_edit = QLineEdit(box)
+        self._sd_tau_edit.setPlaceholderText("3  or  1, 2, 3")
+        self._sd_tau_edit.setToolTip(
+            "Tolerance in mm within which surface counts as agreeing. Give several, "
+            "separated by commas, to compute Surface Dice at each in the same run: "
+            "each tolerance gets its own column, named with it. The surface "
+            "distances are computed once, so extra tolerances cost almost nothing."
+        )
+        self._sd_tau_edit.editingFinished.connect(self._emit_config_changed)
+        tol_form.addRow("Surface Dice τ (mm):", self._sd_tau_edit)
         layout.addLayout(tol_form)
 
         layout.addStretch(1)
@@ -405,18 +426,16 @@ class ComputeTab(QWidget):
         tol_form = QFormLayout()
         tol_form.setContentsMargins(0, 0, 0, 0)
         tol_form.setSpacing(6)
-        self._poly_tau_spin = _NoScrollSpinBox(box)
-        self._poly_tau_spin.setRange(0.0, 100.0)
-        self._poly_tau_spin.setSingleStep(0.1)
-        self._poly_tau_spin.setDecimals(2)
-        self._poly_tau_spin.setSuffix(" mm")
-        self._poly_tau_spin.setToolTip(
-            "Distance beyond which ground-truth contour counts as needing to be "
-            "redrawn. Applies to Added Path Length and its normalised form; the "
-            "distance metrics do not use it."
+        self._poly_tau_edit = QLineEdit(box)
+        self._poly_tau_edit.setPlaceholderText("3  or  1, 2, 3")
+        self._poly_tau_edit.setToolTip(
+            "Distance in mm beyond which ground-truth contour counts as needing to "
+            "be redrawn. Applies to Added Path Length and its normalised form; the "
+            "distance metrics do not use it. Give several, separated by commas, to "
+            "compute APL at each in the same run: each gets its own columns."
         )
-        self._poly_tau_spin.valueChanged.connect(self._emit_config_changed)
-        tol_form.addRow("APL tolerance τ:", self._poly_tau_spin)
+        self._poly_tau_edit.editingFinished.connect(self._emit_config_changed)
+        tol_form.addRow("APL tolerance τ (mm):", self._poly_tau_edit)
         layout.addLayout(tol_form)
 
         self._poly_engine_label = QLabel(_polygon_engine_note(), box)
@@ -625,9 +644,9 @@ class ComputeTab(QWidget):
             cb.blockSignals(True)
             cb.setChecked(bool(selected.get(key, False)))
             cb.blockSignals(False)
-        self._poly_tau_spin.blockSignals(True)
-        self._poly_tau_spin.setValue(float(stored_poly.get("tolerance_mm", 3.0)))
-        self._poly_tau_spin.blockSignals(False)
+        self._poly_tau_edit.blockSignals(True)
+        self._poly_tau_edit.setText(_tolerance_text(stored_poly.get("tolerance_mm")))
+        self._poly_tau_edit.blockSignals(False)
 
         stored_audit = (self._settings.get("audit") or {}) if self._settings else {}
         self._audit_check.blockSignals(True)
@@ -636,9 +655,9 @@ class ComputeTab(QWidget):
 
         # Tolerances
         tol = (self._settings.get("tolerances") or {}) if self._settings else {}
-        self._sd_tau_spin.blockSignals(True)
-        self._sd_tau_spin.setValue(float(tol.get("surface_dice_tau_mm", 3.0)))
-        self._sd_tau_spin.blockSignals(False)
+        self._sd_tau_edit.blockSignals(True)
+        self._sd_tau_edit.setText(_tolerance_text(tol.get("surface_dice_tau_mm")))
+        self._sd_tau_edit.blockSignals(False)
 
         # DVH config
         dvh = (self._settings.get("dvh") or {}) if self._settings else {}
@@ -780,6 +799,15 @@ class ComputeTab(QWidget):
 
 
 # ---- Helpers --------------------------------------------------------------
+
+
+def _tolerance_text(stored: object) -> str:
+    """A stored tolerance — one number, as before, or a list — as field text."""
+    try:
+        tolerances = normalise_tolerances(stored)
+    except ValueError:
+        tolerances = normalise_tolerances(None)
+    return ", ".join(tolerance_token(t) for t in tolerances)
 
 
 def _parse_number_list(text: str) -> list[float]:

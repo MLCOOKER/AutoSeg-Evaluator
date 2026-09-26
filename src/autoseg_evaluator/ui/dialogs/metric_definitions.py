@@ -152,6 +152,10 @@ heavily.</p>
 <p>The fraction of each surface lying within a tolerance &tau; of the other,
 summed over both directions and divided by the total surface area of both. Reads
 as "how much of the boundary is already close enough to accept".</p>
+<p>Several tolerances can be given at once; each is computed from the same
+surface distances and fills its own column, named with its tolerance. Values at
+different tolerances are different measurements and are never compared with each
+other. The 2D added path length takes its tolerances the same way.</p>
 
 <h3>Volume, volume difference and ratio, centre-of-mass offset</h3>
 <p>Volumes are voxel counts multiplied by the voxel volume. The difference is

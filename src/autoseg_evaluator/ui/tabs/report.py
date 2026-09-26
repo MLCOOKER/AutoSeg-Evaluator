@@ -926,7 +926,7 @@ class ReportTab(QWidget):
                 label: self._reference_median(label, metric, reference, axis, organs)
                 for label in family
             }
-        tolerance = tolerance_note(metric, *self._tolerances())
+        tolerance = tolerance_note(metric)
         metric_name = readable_metric(metric)
         if axis is FamilyAxis.SOURCES:
             organ_name = organs[0] if organs else ""
@@ -1002,21 +1002,6 @@ class ReportTab(QWidget):
                 "free-text descriptions are read."
             )
 
-    def _tolerances(self) -> tuple[float | None, float | None]:
-        """Surface Dice and 2D APL tolerances, if they were recorded.
-
-        Surface Dice at 1 mm and at 5 mm are different measurements, so a figure
-        that omits which was used cannot be compared with another.
-        """
-        empty = (None, None)
-        if self._results is None:
-            return empty
-        try:
-            recorded = tuple(self._results.tolerances())
-        except (AttributeError, TypeError, ValueError):
-            return empty
-        return (recorded + empty)[:2]
-
     def _repopulate_paired(self, family: dict) -> None:
         """Offer the rows that actually have a comparison to open up."""
         combo = self._paired_combo
@@ -1048,7 +1033,7 @@ class ReportTab(QWidget):
             self._paired.plot([], metric, reference=reference, challenger=challenger)
             return
 
-        tolerance = tolerance_note(metric, *self._tolerances())
+        tolerance = tolerance_note(metric)
         subtitle = f"Each line is one patient · {challenger} against {reference}"
         if tolerance:
             subtitle = f"{subtitle} · {tolerance}"
@@ -1366,10 +1351,11 @@ class ReportTab(QWidget):
                 f"({', '.join(excluded[:4])}"
                 + (f" and {len(excluded) - 4} more" if len(excluded) > 4 else "")
                 + "): each contributed more than one treatment context — a "
-                "re-irradiation or a replan — for these organs. Two courses of one "
-                "patient are not two independent observations, and choosing between "
-                "them is a study-design decision, so neither is used. Restrict the "
-                "cohort on Tab 1 if you intend to analyse a particular course."
+                "re-irradiation or a replan — for these organs, or the two sources "
+                "were assessed on different ones. Two courses of one patient are not "
+                "two independent observations, and choosing between them is a "
+                "study-design decision, so neither is used. Restrict the cohort on "
+                "Tab 1 if you intend to analyse a particular course."
             )
         if missing:
             notes.append(
@@ -1640,7 +1626,7 @@ class ReportTab(QWidget):
         metric = self._selected_metric()
         reference = self._reference_combo.currentText()
         challenger = self._challenger_combo.currentText()
-        tolerance = tolerance_note(metric, *self._tolerances())
+        tolerance = tolerance_note(metric)
         produced = datetime.now().strftime("%d %B %Y · %H:%M")
 
         fixed_label = "Challenger" if axis is FamilyAxis.ORGANS else "Organ"

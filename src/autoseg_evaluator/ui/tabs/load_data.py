@@ -8,6 +8,7 @@ displays the cohort overview, summary statistics, and any detected issues.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -64,6 +65,10 @@ class LoadDataTab(QWidget):
         self._library: MetadataLibrary | None = None
         self._worker: ScanWorker | None = None
         self._thread: QThread | None = None
+        # Asked before a folder the user picks is loaded; returns False to stay
+        # on the current one. MainWindow uses it to keep or discard the current
+        # cohort's work.
+        self._folder_change_guard: Callable[[str], bool] | None = None
 
         self._build_ui()
         # Remember the last-used folder across sessions, but do not auto-load it —
@@ -168,6 +173,10 @@ class LoadDataTab(QWidget):
         if folder_path:
             self._start_scan(folder_path)
 
+    def set_folder_change_guard(self, guard: Callable[[str], bool] | None) -> None:
+        """Set the check run before a folder the user picks is loaded."""
+        self._folder_change_guard = guard
+
     # ---- Slots / handlers -------------------------------------------------
 
     def _on_load_clicked(self) -> None:
@@ -175,8 +184,11 @@ class LoadDataTab(QWidget):
         folder = QFileDialog.getExistingDirectory(
             self, "Select a DICOM folder", start_dir or os.path.expanduser("~")
         )
-        if folder:
-            self._start_scan(folder)
+        if not folder:
+            return
+        if self._folder_change_guard is not None and not self._folder_change_guard(folder):
+            return
+        self._start_scan(folder)
 
     def _on_reload_clicked(self) -> None:
         if self._library is not None and self._library.root_folder:

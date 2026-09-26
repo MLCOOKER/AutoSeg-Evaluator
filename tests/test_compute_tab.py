@@ -83,7 +83,9 @@ def test_compute_tab_defaults_load_from_settings(qapp):
     assert cfg["geometric"]["hausdorff100"] is False
     # Not in these settings, so it takes its default: on, like the rest of 3D.
     assert cfg["geometric"]["precision_recall"] is True
-    assert cfg["tolerances"]["surface_dice_tau_mm"] == pytest.approx(5.0)
+    # A single stored number, as settings held before tolerance lists, reads
+    # as a list of one.
+    assert cfg["tolerances"]["surface_dice_tau_mm"] == pytest.approx([5.0])
     assert "apl_mean" not in cfg["geometric"]
     assert "apl_tolerance_mm" not in cfg["tolerances"]
     assert cfg["dvh"]["include_dmean"] is False
@@ -265,14 +267,14 @@ def test_the_polygon_block_reaches_the_config(qapp):
     tab = ComputeTab()
     tab._poly_checks["hd95"].setChecked(True)
     tab._poly_checks["apl"].setChecked(True)
-    tab._poly_tau_spin.setValue(2.5)
+    tab._poly_tau_edit.setText("2.5")
 
     polygon = tab.config()["polygon"]
 
     assert polygon["metrics"]["hd95"] is True
     assert polygon["metrics"]["apl"] is True
     assert polygon["metrics"]["median"] is False
-    assert polygon["tolerance_mm"] == 2.5
+    assert polygon["tolerance_mm"] == [2.5]
     tab.deleteLater()
 
 
@@ -286,14 +288,46 @@ def test_the_config_is_what_the_worker_reads(qapp):
 
     tab = ComputeTab()
     tab._poly_checks["mean"].setChecked(True)
-    tab._poly_tau_spin.setValue(4.0)
+    tab._poly_tau_edit.setText("4")
 
     config = PolygonConfig.from_dict(tab.config()["polygon"])
 
     assert config.any_enabled()
     assert config.metrics == {"mean"}
-    assert config.tolerance_mm == 4.0
+    assert config.tolerances_mm == (4.0,)
     assert "poly_mean_distance_mm" in config.columns()
+    tab.deleteLater()
+
+
+def test_several_tolerances_reach_the_worker_as_several_columns(qapp):
+    """Tolerances are typed as a list and each fills its own APL columns."""
+    from autoseg_evaluator.core.polygon_metrics import PolygonConfig
+
+    tab = ComputeTab()
+    tab._poly_checks["apl"].setChecked(True)
+    tab._poly_tau_edit.setText("3, 1, 2.5, 1.0")
+    tab._sd_tau_edit.setText("2, 1")
+
+    cfg = tab.config()
+    config = PolygonConfig.from_dict(cfg["polygon"])
+
+    # Sorted, and 1 and 1.0 are one tolerance.
+    assert config.tolerances_mm == (1.0, 2.5, 3.0)
+    assert cfg["tolerances"]["surface_dice_tau_mm"] == [1.0, 2.0]
+    assert [c for c in config.columns() if c.startswith("poly_apl_mm")] == [
+        "poly_apl_mm@1mm",
+        "poly_apl_mm@2.5mm",
+        "poly_apl_mm@3mm",
+    ]
+    tab.deleteLater()
+
+
+def test_an_unreadable_tolerance_is_refused_before_computing(qapp):
+    tab = ComputeTab()
+    tab._sd_tau_edit.setText("2, two")
+
+    with pytest.raises(ValueError, match="two"):
+        tab.config()
     tab.deleteLater()
 
 

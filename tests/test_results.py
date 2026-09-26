@@ -421,3 +421,125 @@ def test_results_tab_export_button_writes_file(qapp, tmp_path, monkeypatch):
     text = target.read_text(encoding="utf-8")
     assert "Drawer" in text
     assert metric_display_label("dice") in text
+
+
+# ---- Audit fixes: tolerance columns, one computation, scores, timestamps ----
+
+
+def test_each_tolerance_is_its_own_column_in_the_canonical_place():
+    """Surface Dice at several tolerances: one column each, where Surface Dice goes."""
+    rm = ResultsManager()
+    rm.add_row(_row(metrics={"dice": 0.8, "surface_dice@3mm": 0.9, "surface_dice@1mm": 0.6}))
+    cols = rm.metric_columns()
+    assert "surface_dice" not in cols
+    assert cols.index("dice") < cols.index("surface_dice@1mm") < cols.index("surface_dice@3mm")
+    assert cols.index("surface_dice@3mm") < cols.index("hausdorff100")
+    labels = [metric_display_label(k) for k in cols]
+    assert "Surface Dice @ 1.00 mm" in labels and "Surface Dice @ 3.00 mm" in labels
+    assert rm.tolerances_in_use() == {"surface_dice_mm": [1.0, 3.0], "polygon_apl_mm": []}
+
+
+def test_an_uncomputed_tolerance_metric_keeps_its_placeholder_column():
+    rm = ResultsManager()
+    rm.add_row(_row(metrics={"dice": 0.8}))
+    assert "surface_dice" in rm.metric_columns()
+
+
+def test_clearing_the_computation_keeps_the_likert_scores():
+    """Replacing a computation must not discard hours of rating."""
+    rm = ResultsManager()
+    rm.add_row(_row(metrics={"dice": 0.8}))
+    _score(rm, rater="Alice", score=4, blinded=True)
+    rm.clear_computed()
+    assert rm.computed_row_count() == 0
+    rows = rm.rows()
+    assert len(rows) == 1 and rows[0]["comparison_mode"] == "Qualitative"
+    assert rows[0]["metrics"]["likert_Alice"] == 4
+    rm.clear()
+    assert rm.rows() == []
+
+
+def test_two_structure_sets_sharing_source_and_roi_number_keep_their_own_scores():
+    """External audit: the score key omitted the structure set, so two files from
+    one source with the same ROI number collided — the second score landed on the
+    first file's row and the second row stayed unscored."""
+    rm = ResultsManager()
+    for sop in ("rtss-1", "rtss-2"):
+        row = _row(metrics={"dice": 0.8})
+        row["test_rtstruct_sop_uid"] = sop
+        rm.add_row(row)
+    for sop, score in (("rtss-1", 2), ("rtss-2", 5)):
+        rm.upsert_qualitative_score(
+            patient_id="HN1",
+            drawer="Prostate",
+            source_label="Limbus",
+            roi_name="Prostate",
+            roi_number=2,
+            is_gt=False,
+            rater="Alice",
+            score=score,
+            blinded=True,
+            rtstruct_sop_uid=sop,
+        )
+    by_file = {r["test_rtstruct_sop_uid"]: r["metrics"].get("likert_Alice") for r in rm.rows()}
+    assert by_file == {"rtss-1": 2, "rtss-2": 5}
+
+
+def test_each_score_says_when_it_was_given_and_each_row_when_it_was_computed(tmp_path):
+    rm = ResultsManager()
+    row = _row(metrics={"dice": 0.8})
+    row["computed_at"] = "2026-09-20 10:00:00+08:00"
+    rm.add_row(row)
+    _score(rm, rater="Alice", score=4, blinded=True)
+    rm.upsert_qualitative_score(
+        patient_id="HN1",
+        drawer="Prostate",
+        source_label="Limbus",
+        roi_name="Prostate",
+        roi_number=2,
+        is_gt=False,
+        rater="Bob",
+        score=3,
+        blinded=True,
+        scored_at="",  # restored from a session saved before times were kept
+    )
+    metrics = rm.rows()[0]["metrics"]
+    assert metrics["scored_at_Alice"]  # given now
+    assert metrics["scored_at_Bob"] == ""  # stays blank rather than claiming now
+    cols = rm.metric_columns()
+    assert cols.index("likert_Alice") + 1 == cols.index("scored_at_Alice")
+    assert metric_display_label("scored_at_Alice") == "Scored at — Alice"
+
+    path = tmp_path / "out.csv"
+    rm.export_csv(path)
+    with path.open(encoding="utf-8") as f:
+        record = next(csv.DictReader(f))
+    assert record["Computed at"] == "2026-09-20 10:00:00+08:00"
+    assert record["Scored at — Alice"]
+
+
+def test_the_computed_table_round_trips_through_a_session_file(tmp_path):
+    """Scoring over several days must not mean computing the metrics again."""
+    import json
+
+    import numpy as np
+
+    rm = ResultsManager()
+    row = _row(metrics={"dice": np.float64(0.8), "hausdorff100": float("inf")})
+    row["audit"] = {"mask": {"gt_voxels": np.int64(12), "spacing": (1.0, 1.0, 2.0)}}
+    row["computed_at"] = "2026-09-20 10:00:00+08:00"
+    rm.add_row(row)
+    _score(rm, rater="Alice", score=4, blinded=True)
+
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps(rm.session_state()), encoding="utf-8")
+    restored = ResultsManager()
+    assert restored.apply_session_state(json.loads(path.read_text(encoding="utf-8"))) == 1
+
+    back = restored.rows()[0]
+    assert back["metrics"]["dice"] == 0.8
+    assert math.isinf(back["metrics"]["hausdorff100"])
+    assert back["audit"]["mask"] == {"gt_voxels": 12, "spacing": [1.0, 1.0, 2.0]}
+    assert back["computed_at"] == "2026-09-20 10:00:00+08:00"
+    # The scores are the Qualitative tab's to restore, not the table's.
+    assert "likert_Alice" not in back["metrics"]

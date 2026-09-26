@@ -127,19 +127,24 @@ def test_all_zero_differences_give_p_of_one():
     assert rank_biserial([0.0] * 8) is None
 
 
-@pytest.mark.filterwarnings("ignore:Sample size too small")
 def test_zeros_are_ranked_not_discarded():
     """Pratt keeps zeros in the ranking; SciPy's default drops them.
 
     The two give different p-values on the same data, which is exactly why the
     convention has to be stated rather than inherited.
+
+    Both sides are exact, so the comparison does not depend on which SciPy
+    version is installed: dropping the zeros and asking for the exact test is
+    what ``zero_method="wilcox"`` means. The data need mixed signs. When every
+    non-zero difference has the same sign both conventions give 2 / 2**k, which
+    is why an earlier version of this test passed only while SciPy fell back to
+    a normal approximation.
     """
-    diffs = [0.0, 0.0, 0.03, 0.05, 0.02, 0.04, 0.06, 0.01]
+    diffs = [0.0, 0.0, 0.01, 0.02, 0.03, 0.04, 0.05, -0.06]
     ours = signed_rank_exact_p(diffs)
-    # SciPy warns that it fell back to a normal approximation here; the point
-    # of the test is that the two conventions disagree, not which is exact.
-    discarded = wilcoxon(diffs, zero_method="wilcox", alternative="two-sided").pvalue
-    assert ours != pytest.approx(discarded, abs=1e-6)
+    discarded = wilcoxon([d for d in diffs if d != 0], method="exact").pvalue
+    assert ours == pytest.approx(0.28125)
+    assert discarded == pytest.approx(0.4375)
 
 
 def test_smallest_attainable_p_is_two_over_two_to_the_n():
@@ -427,6 +432,27 @@ def test_the_same_data_give_an_unbounded_set_below_six_observations():
         found = confidence_set([0.1] * n)
         assert found.status is IntervalStatus.UNBOUNDED, n
         assert not found.available
+
+
+@pytest.mark.parametrize("infinity", [float("inf"), float("-inf")])
+def test_an_infinite_difference_is_ignored_not_iterated_on(infinity):
+    """External audit: ``-inf`` never terminated the probe-step loop.
+
+    A Hausdorff distance to an empty contour is infinite. No finite step moves a
+    probe past ``-inf``, so the widening loop spun forever; ``+inf`` returned an
+    interval silently. Every entry point now uses the finite values only.
+    """
+    finite = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    with_infinity = [infinity, *finite]
+    assert confidence_set(with_infinity) == confidence_set(finite)
+    assert signed_rank_exact_p(with_infinity) == signed_rank_exact_p(finite)
+    assert hodges_lehmann(with_infinity) == hodges_lehmann(finite)
+    assert sign_test(with_infinity) == sign_test(finite)
+    assert describe(with_infinity) == describe(finite)
+    assert median_ci(with_infinity) == median_ci(finite)
+    assert _probe_points(np.asarray([infinity, 1.0, 2.0]))[0][0] < 1.0
+    paired = paired_comparison([infinity, *finite], [0.0] * 8)
+    assert paired.n_pairs == 7
 
 
 def test_a_clean_sweep_is_detectable_at_ten_pairs():

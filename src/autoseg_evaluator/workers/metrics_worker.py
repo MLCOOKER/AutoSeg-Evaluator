@@ -32,11 +32,10 @@ from autoseg_evaluator.core.dvh import (
 )
 from autoseg_evaluator.core.masks import (
     MaskConversionError,
-    extract_mask_for_roi,
-    find_reference_image_folder,
+    find_reference_image_series,
     gt_z_extent_mm,
     mask_with_reading,
-    read_dicom_image,
+    read_image_series,
     read_rtstruct,
     truncate_to_gt_z_extent,
 )
@@ -54,8 +53,16 @@ from autoseg_evaluator.core.staple import (
     StapleConfig,
     compute_staple,
     sensitivity_specificity_vs_reference,
+    staple_from_structures,
 )
-from autoseg_evaluator.data.linkage import resolve_dose, resolve_image_series, series_uid_of
+from autoseg_evaluator.data.linkage import (
+    consensus_constituents,
+    planning_series_uid,
+    resolve_dose,
+    resolve_image_series,
+    series_uid_of,
+)
+from autoseg_evaluator.utils.timestamps import now_local
 
 # "Mode" value for the per-organ STAPLE summary row (sensitivity/specificity
 # live on the per-rater rows; this row carries the aggregate consensus metrics
@@ -115,8 +122,8 @@ class MetricsWorker(QObject):
         self._cancelled = False
         # Caches keyed by SOP UID / patient ID to avoid redundant DICOM I/O
         self._rtstruct_cache: dict[str, Any] = {}
-        # Keyed by (patient_id, image folder) and (patient_id, dose SOP UID)
-        # rather than by patient alone: one patient can legitimately have more
+        # Keyed by (patient_id, image SeriesInstanceUID) and (patient_id, dose
+        # SOP UID) rather than by patient alone: one patient can legitimately have more
         # than one CT and more than one dose (re-irradiation, replans), and a
         # patient-level key silently served the first one to every structure
         # set that followed.
@@ -225,6 +232,9 @@ class MetricsWorker(QObject):
             ):
                 if row.get("error"):
                     errors += 1
+                # When the row was produced: shown in the Results table and
+                # kept with the session, since scoring may come days later.
+                row.setdefault("computed_at", now_local())
                 self.result.emit(row)
 
             units_done += self._group_weight(group)
@@ -365,6 +375,7 @@ class MetricsWorker(QObject):
         # get a stub error row and are dropped from the STAPLE pool.
         test_records: list[dict[str, Any]] = []
         load_errors: list[dict[str, Any]] = []
+        gt_series = planning_series_uid(self._library, group["patient_id"], group["gt_sop"])
         for test in group["tests"]:
             if self._cancelled:
                 # Bail mid-group when cancelled. Whatever masks loaded so far
@@ -374,6 +385,19 @@ class MetricsWorker(QObject):
                 # on its next iteration and stop dispatching new groups.
                 return list(load_errors)
             try:
+                # Every test is rasterised on the GT's CT, so a structure set
+                # drawn on another planning image — a second course — would be
+                # measured in the wrong patient coordinates and still produce
+                # plausible numbers. Matching already refuses these; this also
+                # catches sessions saved before it did.
+                test_series = planning_series_uid(
+                    self._library, group["patient_id"], test["rtstruct_sop_uid"]
+                )
+                if gt_series is not None and test_series is not None and test_series != gt_series:
+                    raise RuntimeError(
+                        "this structure set was drawn on a different planning image "
+                        "from the ground truth, so the two cannot be compared"
+                    )
                 test_rtss = self._load_rtstruct(group["patient_id"], test["rtstruct_sop_uid"])
                 test_mask = self._get_mask(
                     group["patient_id"],
@@ -689,11 +713,11 @@ class MetricsWorker(QObject):
         candidate_notes = self._structure_notes.get(candidate_key, {})
 
         result = engine.compare(
-            reference, candidate, tolerance_mm=self._polygon_config.tolerance_mm
+            reference, candidate, tolerance_mm=self._polygon_config.tolerances_mm
         )
         if self._audit:
             record = dict(engine.settings)
-            record["tolerance_mm"] = self._polygon_config.tolerance_mm
+            record["tolerances_mm"] = list(self._polygon_config.tolerances_mm)
             record["missing_plane_policy"] = MISSING_PLANE_POLICY
             record["nested_planes_composed"] = reference_notes.get(
                 "nested_planes", 0
@@ -1277,15 +1301,16 @@ class MetricsWorker(QObject):
         return None
 
     def _load_ct(self, patient_id: str, rtstruct_sop_uid: str):
-        folder = find_reference_image_folder(self._library, patient_id, rtstruct_sop_uid)
-        if folder is None:
+        series = find_reference_image_series(self._library, patient_id, rtstruct_sop_uid)
+        if series is None:
             return None
-        key = (patient_id, folder)
+        # Keyed by series, not folder: two series in one folder are two images.
+        key = (patient_id, series_uid_of(series))
         if key in self._ct_cache:
             return self._ct_cache[key]
         try:
-            image = read_dicom_image(folder)
-        except Exception:  # noqa: BLE001 — corrupt CT folder shouldn't crash the batch
+            image = read_image_series(series)
+        except Exception:  # noqa: BLE001 — corrupt CT series shouldn't crash the batch
             self._ct_cache[key] = None
             return None
         self._ct_cache[key] = image
@@ -1293,9 +1318,9 @@ class MetricsWorker(QObject):
 
     def _release_ct(self, patient_id: str, rtstruct_sop_uid: str) -> None:
         """Drop one cached CT volume — the counterpart to :meth:`_load_ct`."""
-        folder = find_reference_image_folder(self._library, patient_id, rtstruct_sop_uid)
-        if folder is not None:
-            self._ct_cache.pop((patient_id, folder), None)
+        series = find_reference_image_series(self._library, patient_id, rtstruct_sop_uid)
+        if series is not None:
+            self._ct_cache.pop((patient_id, series_uid_of(series)), None)
 
     def _get_mask(self, patient_id: str, sop_uid: str, roi_number: int, ct, rtss):
         key = (patient_id, sop_uid, roi_number)
@@ -1333,23 +1358,20 @@ class MetricsWorker(QObject):
         when fewer than 2 constituent masks could be built (STAPLE needs
         at least 2 raters).
         """
-        constituents = entry.constituent_groups.get(roi_number) or []
+        constituents = consensus_constituents(self._library, patient_id, entry, roi_number)
         if len(constituents) < 2:
             return None
-        masks = []
+        structures = []
         for real_sop, real_roi in constituents:
             try:
                 real_rtss = self._load_rtstruct(patient_id, real_sop)
             except Exception:  # noqa: BLE001 — missing constituent shouldn't crash the batch
                 continue
-            if real_rtss is None:
-                continue
-            real_mask = extract_mask_for_roi(ct, real_rtss, int(real_roi))
-            if real_mask is not None:
-                masks.append(real_mask)
-        if len(masks) < 2:
+            if real_rtss is not None:
+                structures.append((real_rtss, real_roi))
+        if len(structures) < 2:
             return None
-        result = compute_staple(masks, self._staple_config)
+        result = staple_from_structures(ct, structures, self._staple_config)
         consensus = result.consensus_mask if result is not None else None
         # Capture the aggregate consensus scalars (cheap) so the GT branch can
         # emit a "STAPLE Details" row without re-running EM.
@@ -1362,7 +1384,6 @@ class MetricsWorker(QObject):
         # pressure), so release them explicitly + collect now rather than
         # letting them stack with the test masks loaded next. This caps the
         # synthetic-GT transient at the STAPLE call itself.
-        del masks
         result = None
         gc.collect()
         return consensus

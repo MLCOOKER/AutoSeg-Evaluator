@@ -64,6 +64,7 @@ from autoseg_evaluator.core.statistics import (
     holm_detection_ceiling,
     paired_comparison,
 )
+from autoseg_evaluator.core.tolerance_keys import base_metric
 
 # ---- Metric families ------------------------------------------------------
 
@@ -176,8 +177,8 @@ def metric_family(metric: str) -> str:
     on shared planes. Sliding between them is easier than sliding from Dice to
     D95, and the consequence is worse: the numbers look comparable.
     """
-    name = str(metric).strip()
-    lower = name.lower()
+    # A tolerance in the key (``surface_dice@3mm``) does not change the family.
+    lower = base_metric(str(metric).strip()).lower()
     # Checked first: several polygon keys would otherwise be swallowed by the
     # geometric set or by the dose suffix rules.
     if lower.startswith("poly_"):
@@ -249,7 +250,7 @@ DIAGNOSTIC_COLUMNS = frozenset(
 
 def metric_direction(metric: str) -> int:
     """``+1`` higher is better, ``-1`` lower is better, ``0`` no direction."""
-    name = metric.lower()
+    name = base_metric(metric).lower()
     if name in HIGHER_IS_BETTER:
         return 1
     if name in LOWER_IS_BETTER:
@@ -538,6 +539,31 @@ class ReportModel:
             if patient not in ambiguous
         }
 
+    def _linked_values(self, organ: str, source: str, metric: str) -> dict[str, tuple[str, float]]:
+        """``{patient: (linkage, value)}`` — :meth:`values` with the case kept."""
+        ambiguous = self.multi_case_patients(organ, source, metric)
+        return {
+            patient: (linkage, value)
+            for (patient, linkage), value in self.cases(organ, source, metric).items()
+            if patient not in ambiguous
+        }
+
+    def cross_case_patients(
+        self, organ: str, metric: str, source_a: str, source_b: str
+    ) -> set[str]:
+        """Patients both sources produced, but on different treatment contexts.
+
+        Each source has one case for the patient, so neither is ambiguous on its
+        own, yet pairing them would set one course's contour against another's.
+        """
+        a_cases = self._linked_values(organ, source_a, metric)
+        b_cases = self._linked_values(organ, source_b, metric)
+        return {
+            patient
+            for patient in set(a_cases) & set(b_cases)
+            if a_cases[patient][0] != b_cases[patient][0]
+        }
+
     def describe_cell(
         self, organ: str, source: str, metric: str, alpha: float = 0.05
     ) -> Description | None:
@@ -548,16 +574,23 @@ class ReportModel:
     def paired_values(
         self, organ: str, metric: str, source_a: str, source_b: str
     ) -> list[tuple[str, float, float]]:
-        """``[(patient, a, b)]`` for the patients both sources contoured.
+        """``[(patient, a, b)]`` for the cases both sources contoured.
 
         The raw material of the paired test, returned in the same order the test
         consumes it, so a figure drawn from this is showing exactly what was
         analysed rather than a parallel selection of it.
+
+        A pair is one **case**: the same patient *and* the same treatment
+        context. Joining on the patient alone once paired one source's first
+        course with another source's second.
         """
-        a_values = self.values(organ, source_a, metric)
-        b_values = self.values(organ, source_b, metric)
-        shared = sorted(set(a_values) & set(b_values))
-        return [(patient, a_values[patient], b_values[patient]) for patient in shared]
+        a_cases = self._linked_values(organ, source_a, metric)
+        b_cases = self._linked_values(organ, source_b, metric)
+        return [
+            (patient, a_cases[patient][1], b_cases[patient][1])
+            for patient in sorted(set(a_cases) & set(b_cases))
+            if a_cases[patient][0] == b_cases[patient][0]
+        ]
 
     def pairing_sets(
         self, metric: str, reference: str, labels: dict[str, str]
@@ -579,9 +612,15 @@ class ReportModel:
         return found
 
     def excluded_patients(self, organ: str, metric: str, source_a: str, source_b: str) -> set[str]:
-        """Patients dropped from this comparison for contributing several cases."""
-        return self.multi_case_patients(organ, source_a, metric) | self.multi_case_patients(
-            organ, source_b, metric
+        """Patients dropped from this comparison.
+
+        Either one source contributed several cases for them, or the two sources
+        each contributed one but on different treatment contexts.
+        """
+        return (
+            self.multi_case_patients(organ, source_a, metric)
+            | self.multi_case_patients(organ, source_b, metric)
+            | self.cross_case_patients(organ, metric, source_a, source_b)
         )
 
     def coverage(self, organ: str, metric: str, source: str) -> CoverageCell:
@@ -629,16 +668,14 @@ class ReportModel:
         much the pairing discarded — a source that contoured six of ten patients
         is compared only on those six, and they are unlikely to be a random six.
         """
-        a_values = self.values(organ, source_a, metric)
-        b_values = self.values(organ, source_b, metric)
-        shared = sorted(set(a_values) & set(b_values))
-        if not shared:
+        pairs = self.paired_values(organ, metric, source_a, source_b)
+        if not pairs:
             return None
         return paired_comparison(
-            [a_values[p] for p in shared],
-            [b_values[p] for p in shared],
-            n_a=len(a_values),
-            n_b=len(b_values),
+            [a for _patient, a, _b in pairs],
+            [b for _patient, _a, b in pairs],
+            n_a=len(self.values(organ, source_a, metric)),
+            n_b=len(self.values(organ, source_b, metric)),
             alpha=alpha,
         )
 
@@ -911,6 +948,10 @@ def build_report_model(
                 continue
             if str(metric).lower() in DIAGNOSTIC_COLUMNS:
                 continue
+            # An infinite value — the Hausdorff distance to an empty contour —
+            # has no magnitude to analyse. It is kept as *metric invalid*, like
+            # NaN, so the coverage table still counts the case.
+            observed = float(value) if math.isfinite(value) else math.nan
             key = (organ, source, str(metric), patient, linkage, reference)
             if key in model.observations:
                 # A second row for the same contour adds no information, and
@@ -918,12 +959,13 @@ def build_report_model(
                 # test. A second row with a *different* value inside one case is
                 # a genuine collision and is counted separately — a second
                 # course is not this, it is its own case.
-                if model.observations[key] == float(value):
+                held = model.observations[key]
+                if held == observed or (math.isnan(held) and math.isnan(observed)):
                     model.duplicates_collapsed += 1
                 else:
                     model.conflicting_observations += 1
                 continue
-            model.observations[key] = float(value)
+            model.observations[key] = observed
     return model
 
 

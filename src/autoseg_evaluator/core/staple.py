@@ -227,6 +227,30 @@ def compute_staple(
     )
 
 
+def staple_from_structures(
+    image: sitk.Image,
+    structures: list[tuple[object, int]],
+    config: StapleConfig | None = None,
+) -> StapleResult | None:
+    """Rasterise each ``(RTSTRUCT dataset, ROI number)`` on ``image``, then STAPLE.
+
+    The one route from a synthetic consensus's constituents to its mask, so the
+    metrics, the Match Contours viewer and the qualitative viewer all show the
+    same consensus. Returns ``None`` when fewer than two constituents yield a
+    mask, as :func:`compute_staple` does.
+    """
+    from autoseg_evaluator.core.masks import extract_mask_for_roi
+
+    masks = []
+    for rtss, roi_number in structures:
+        mask = extract_mask_for_roi(image, rtss, int(roi_number))
+        if mask is not None:
+            masks.append(mask)
+    if len(masks) < 2:
+        return None
+    return compute_staple(masks, config)
+
+
 def sensitivity_specificity_vs_reference(
     reference: sitk.Image,
     test: sitk.Image,

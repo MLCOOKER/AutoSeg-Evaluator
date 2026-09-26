@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pydicom
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
@@ -48,11 +49,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from autoseg_evaluator.core.dose import dose_array_on_reference
+from autoseg_evaluator.core.dose import dose_grid_on_reference
+from autoseg_evaluator.core.dvh import DoseGrid
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
-    find_reference_image_folder,
-    read_dicom_image,
+    load_reference_image,
     read_rtstruct,
     truncate_to_gt_z_extent,
 )
@@ -63,6 +64,12 @@ from autoseg_evaluator.core.matching import (
     similarity,
 )
 from autoseg_evaluator.core.organ_groups import AUTOMATIC_TIERS, QUALIFIER_OAR
+from autoseg_evaluator.core.staple import StapleConfig, staple_from_structures
+from autoseg_evaluator.data.linkage import (
+    consensus_constituents,
+    planning_series_uid,
+    resolve_dose,
+)
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
     OrganEntry,
@@ -125,6 +132,10 @@ class MatchContoursTab(QWidget):
         # Persisted in the session JSON so the rejection memory survives
         # save/load cycles.
         self._test_denylist: dict[tuple[str, str], set[tuple[str, int]]] = {}
+        # ``(patient_id, sop_uid)`` of structure sets auto-match passed over
+        # because they were drawn on a different planning image from the GT.
+        # Reset per matching pass and reported in its status line.
+        self._skipped_other_image: set[tuple[str, str]] = set()
 
         self._build_ui()
 
@@ -867,6 +878,7 @@ class MatchContoursTab(QWidget):
         self._push_undo_snapshot()
         skipped: list[str] = []
         new_subsections = 0
+        self._skipped_other_image = set()
         for patient_id, sop_uid, roi_number, roi_name in organs:
             rtss = _find_rtstruct(self._library, patient_id, sop_uid)
             if rtss is None:
@@ -927,6 +939,12 @@ class MatchContoursTab(QWidget):
             bits.append(f"Set {new_subsections} ground truth(s) and auto-matched tests.")
         if skipped:
             bits.append("Skipped: " + ", ".join(skipped))
+        if self._skipped_other_image:
+            count = len(self._skipped_other_image)
+            bits.append(
+                f"{count} structure set(s) drawn on a different planning image from "
+                "their patient's ground truth were not matched."
+            )
         if bits:
             self._show_status(" ".join(bits))
 
@@ -991,6 +1009,15 @@ class MatchContoursTab(QWidget):
             return []
         threshold = self._similarity_threshold()
         rules = self._replacement_rules()
+        # Only structure sets drawn on the GT's planning image are candidates.
+        # An external audit found a second course's structure set matched to
+        # the first course's GT with a perfect, unflagged name score, and then
+        # rasterised on the wrong CT. The test is the resolved planning series,
+        # not the Frame of Reference: a vendor in this project's own cohort
+        # wrote a different FrameOfReferenceUID for the same CT. Where either
+        # link is unresolved, Load Data has already raised it, so the match
+        # goes ahead as before.
+        gt_series = planning_series_uid(self._library, patient_id, gt_sop_uid)
         tests: list[TestRow] = []
         for ctx in patient.contexts:
             for rtss in ctx.rtstructs:
@@ -998,6 +1025,11 @@ class MatchContoursTab(QWidget):
                     continue
                 if not rtss.organs:
                     continue
+                if gt_series is not None:
+                    series = planning_series_uid(self._library, patient_id, rtss.sop_instance_uid)
+                    if series is not None and series != gt_series:
+                        self._skipped_other_image.add((patient_id, rtss.sop_instance_uid))
+                        continue
                 chosen, match = best_match(
                     gt_roi_name,
                     rtss.organs,
@@ -1072,6 +1104,13 @@ class MatchContoursTab(QWidget):
             if any(t.rtstruct_sop_uid == sop_uid and t.roi_number == roi_number for t in sub.tests):
                 skipped.append(f"{patient_id}/{roi_name} (already added)")
                 continue
+            gt_series = planning_series_uid(self._library, patient_id, sub.gt_rtstruct_sop_uid)
+            series = planning_series_uid(self._library, patient_id, sop_uid)
+            if gt_series is not None and series is not None and series != gt_series:
+                skipped.append(
+                    f"{patient_id}/{roi_name} (drawn on a different planning image from the GT)"
+                )
+                continue
             match = similarity(
                 roi_name,
                 sub.gt_roi_name,
@@ -1101,11 +1140,14 @@ class MatchContoursTab(QWidget):
 
     # ---- Remove handlers --------------------------------------------------
 
-    def _on_remove_drawer(self, organ_name: str) -> None:
-        drawer = self._drawers.pop(organ_name, None)
-        if drawer is None:
+    def _on_remove_drawer(self, organ_name: str, *, snapshot: bool = True) -> None:
+        if organ_name not in self._drawers:
             return
-        self._push_undo_snapshot()
+        # Snapshot while the drawer is still present, or Undo has nothing to
+        # bring back.
+        if snapshot:
+            self._push_undo_snapshot()
+        drawer = self._drawers.pop(organ_name)
         if self._focused_drawer is drawer:
             self._focused_drawer = None
             self._add_selected_btn.setText("Add Selected → (auto)")
@@ -1122,12 +1164,12 @@ class MatchContoursTab(QWidget):
             return
         self._push_undo_snapshot()
         drawer.remove_patient(patient_id)
-        # Auto-cleanup: if the drawer is now empty, remove the drawer too.
+        # Auto-cleanup: if the drawer is now empty, remove the drawer too. The
+        # snapshot above already holds the drawer with its patient, so one Undo
+        # restores both; a second snapshot would make the first Undo bring back
+        # an empty drawer.
         if drawer.patient_count() == 0:
-            # Note: _on_remove_drawer also pushes a snapshot, but the second
-            # push is a no-op for undo correctness — the user just sees one
-            # extra step that quickly resolves to the same state.
-            self._on_remove_drawer(organ_name)
+            self._on_remove_drawer(organ_name, snapshot=False)
         else:
             self._resync_tree_marks()
 
@@ -1216,15 +1258,20 @@ class MatchContoursTab(QWidget):
         ``None`` when no dose is available / it fails to load (the overlay is
         optional and never blocks the viewer).
         """
-        folder = find_reference_image_folder(self._library, patient_id, sub.gt_rtstruct_sop_uid)
-        if folder is None:
-            raise RuntimeError(f"No reference image folder found for patient {patient_id}.")
-        ct = read_dicom_image(folder)
-        gt_path = self._rtstruct_path(patient_id, sub.gt_rtstruct_sop_uid)
-        if gt_path is None:
-            raise RuntimeError("GT RTSTRUCT file not found in loaded folder.")
-        gt_rtss = read_rtstruct(gt_path)
-        gt_mask = extract_mask_for_roi(ct, gt_rtss, sub.gt_roi_number)
+        ct = load_reference_image(self._library, patient_id, sub.gt_rtstruct_sop_uid)
+        if ct is None:
+            raise RuntimeError(f"No reference image found for patient {patient_id}.")
+        gt_entry = _find_rtstruct(self._library, patient_id, sub.gt_rtstruct_sop_uid)
+        if gt_entry is not None and gt_entry.is_synthetic_consensus:
+            # No file of its own: built from its raters exactly as Compute
+            # builds it, with the same STAPLE parameters.
+            gt_mask = self._consensus_mask(patient_id, gt_entry, sub.gt_roi_number, ct)
+        else:
+            gt_path = self._rtstruct_path(patient_id, sub.gt_rtstruct_sop_uid)
+            if not gt_path:
+                raise RuntimeError("GT RTSTRUCT file not found in loaded folder.")
+            gt_rtss = read_rtstruct(gt_path)
+            gt_mask = extract_mask_for_roi(ct, gt_rtss, sub.gt_roi_number)
         test_pairs: list[tuple[str, object]] = []
         for t in sub.tests:
             path = self._rtstruct_path(patient_id, t.rtstruct_sop_uid)
@@ -1246,46 +1293,42 @@ class MatchContoursTab(QWidget):
         dose_path = self._find_dose_path_for_viz(patient_id, sub.gt_rtstruct_sop_uid)
         if dose_path:
             try:
-                dose_arr = dose_array_on_reference(dose_path, ct)
+                grid = DoseGrid.from_dataset(pydicom.dcmread(dose_path, force=True))
+                dose_arr = dose_grid_on_reference(grid, ct)
             except Exception:  # noqa: BLE001 — dose overlay is optional; never block the viewer
                 dose_arr = None
         return ct, gt_mask, test_pairs, dose_arr
 
-    def _find_dose_path_for_viz(self, patient_id: str, gt_sop_uid: str) -> str | None:
-        """Locate an RT Dose file for the overlay.
+    def _consensus_mask(self, patient_id: str, entry: RTSTRUCTEntry, roi_number: int, ct):
+        """A synthetic consensus ROI's mask, built from its raters on ``ct``."""
+        structures = []
+        for sop, roi in consensus_constituents(self._library, patient_id, entry, roi_number):
+            path = self._rtstruct_path(patient_id, sop)
+            if not path:
+                continue
+            try:
+                structures.append((read_rtstruct(path), roi))
+            except Exception:  # noqa: BLE001 — one unreadable rater leaves the rest
+                continue
+        config = StapleConfig.from_dict(self._settings.get("staple", {}) or {})
+        result = staple_from_structures(ct, structures, config)
+        return result.consensus_mask if result is not None else None
 
-        Prefers a dose sharing the GT's frame of reference (so it resamples
-        onto the CT cleanly) and a ``PLAN`` summation type; falls back to any
-        dose the patient has. Returns ``None`` when the patient has no dose.
+    def _find_dose_path_for_viz(self, patient_id: str, gt_sop_uid: str) -> str | None:
+        """The RT Dose file Compute uses for this GT, or ``None``.
+
+        The same resolver as the metrics — explicit references first, the
+        user's own answers in Load Data winning over everything — so the overlay
+        shows the dose the DVH was computed from. An external audit found the
+        viewer choosing by its own rule and showing a different dose. When the
+        link is ambiguous or absent there is no overlay, as there is no DVH.
         """
-        patient = self._library.patients.get(patient_id) if self._library else None
-        if patient is None:
+        if self._library is None:
             return None
-        gt_for: str | None = None
-        for ctx in patient.contexts:
-            for rtss in ctx.rtstructs:
-                if rtss.sop_instance_uid == gt_sop_uid:
-                    gt_for = rtss.frame_of_reference_uid
-                    break
-            if gt_for is not None:
-                break
-        # (same-FoR, is-PLAN, path) — sort so the most preferred candidate wins.
-        candidates: list[tuple[bool, bool, str]] = []
-        for ctx in patient.contexts:
-            for dose in ctx.rtdoses:
-                if not dose.file_path:
-                    continue
-                candidates.append(
-                    (
-                        dose.frame_of_reference_uid == gt_for,
-                        dose.dose_summation_type == "PLAN",
-                        dose.file_path,
-                    )
-                )
-        if not candidates:
+        found = resolve_dose(self._library, patient_id, gt_sop_uid)
+        if not found.is_resolved:
             return None
-        candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-        return candidates[0][2]
+        return getattr(found.target, "file_path", None) or None
 
     def _rtstruct_path(self, patient_id: str, sop_uid: str) -> str | None:
         patient = self._library.patients.get(patient_id) if self._library else None

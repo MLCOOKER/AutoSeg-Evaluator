@@ -6,7 +6,12 @@ two months, recompute on top of the existing matches). It contains:
 
 * the source folder path,
 * the active replacement rules and template,
-* every organ drawer with its full per-patient GT and test rows.
+* every organ drawer with its full per-patient GT and test rows,
+* the consensus entries, data-link answers and organ labels,
+* the qualitative run: graders, their configurations and every score with the
+  time it was given,
+* the computed results table, so scoring can continue in a later session
+  without computing the metrics again.
 
 JSON load/save is intentionally separated from the tab/UI layer; the
 restore step itself lives on :class:`MatchContoursTab` as
@@ -20,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_SUFFIX = ".session.json"
 
 
@@ -34,6 +39,7 @@ def build_session_dict(
     qualitative: dict[str, Any] | None = None,
     link_overrides: dict[str, str] | None = None,
     organ_assignments: dict[str, str] | None = None,
+    results: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the on-disk JSON dictionary.
 
@@ -64,6 +70,12 @@ def build_session_dict(
     free-text contour names had to be sorted out by hand does not have to be
     sorted out again. Absent means every name is grouped automatically, which
     is a valid state rather than an unfinished one.
+
+    ``results`` (added in schema v7) is the computed results table, so that
+    qualitative scoring can continue over several sessions without computing
+    the metrics again. Each row keeps the time it was computed. The Likert
+    scores are not in it: they travel in ``qualitative``, each with the time it
+    was given. Older sessions omit the key and restore with no results.
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -76,6 +88,7 @@ def build_session_dict(
         "qualitative": dict(qualitative or {}),
         "link_overrides": dict(link_overrides or {}),
         "organ_assignments": dict(organ_assignments or {}),
+        "results": dict(results or {}),
     }
 
 

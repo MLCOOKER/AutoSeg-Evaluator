@@ -24,6 +24,7 @@ from autoseg_evaluator.core.polygon_metrics import (
     ENGINE_FAST,
     ENGINE_REFERENCE,
     ENGINE_VARIABLE,
+    POLYGON_TOLERANCE_METRICS,
     REFERENCE_SAMPLING_MM,
     ROW_KEYS,
     ContourRegions,
@@ -33,6 +34,7 @@ from autoseg_evaluator.core.polygon_metrics import (
     parse_structure,
     select_engine,
 )
+from autoseg_evaluator.core.tolerance_keys import tolerance_key
 
 FRAME = generate_uid()
 
@@ -396,7 +398,11 @@ def test_a_comparison_fills_every_column_it_promises(engine_name):
     )
 
     assert result.available and not result.status
-    assert set(ROW_KEYS) <= set(result.values)
+    # The APL columns carry the tolerance they were measured at.
+    promised = {
+        tolerance_key(key, 2.0) if key in POLYGON_TOLERANCE_METRICS else key for key in ROW_KEYS
+    }
+    assert promised <= set(result.values)
     assert result.engine.startswith(engine_name)
     assert result.detail, "the full engine output is kept for the audit record"
 
@@ -450,7 +456,30 @@ def test_the_two_engines_agree_within_the_sampling_engines_own_interval():
     for key in ("poly_hd95_mm", "poly_mean_distance_mm", "poly_median_distance_mm"):
         assert fast.values[key] == pytest.approx(slow.values[key], abs=REFERENCE_SAMPLING_MM)
     # APL is exact in both: no sampling is involved on either side.
-    assert fast.values["poly_apl_mm"] == pytest.approx(slow.values["poly_apl_mm"], abs=1e-9)
+    assert fast.values["poly_apl_mm@2mm"] == pytest.approx(slow.values["poly_apl_mm@2mm"], abs=1e-9)
+
+
+@pytest.mark.parametrize("engine_name", [ENGINE_FAST, ENGINE_REFERENCE])
+def test_several_tolerances_in_one_call_match_one_call_each(engine_name):
+    """Every tolerance comes out of one engine call, keyed by its own value.
+
+    The same numbers as asking for each tolerance separately, so computing
+    several in one run changes nothing but the number of columns.
+    """
+    if engine_name == ENGINE_FAST and not library_available():
+        pytest.skip("no compiled library for this platform")
+    engine = select_engine(engine_name)
+    reference = _regions({0: box(0, 0, 10, 10), 1: box(0, 0, 10, 10)}, "CLOSED_PLANAR")
+    test = _regions({0: box(1, 1, 8, 8), 1: box(2, 2, 9, 9)}, "CLOSED_PLANAR")
+
+    together = compare_structures(reference, test, tolerance_mm=[3.0, 0.5, 1.5], engine=engine)
+    for tau in (0.5, 1.5, 3.0):
+        alone = compare_structures(reference, test, tolerance_mm=tau, engine=engine)
+        for key in POLYGON_TOLERANCE_METRICS:
+            keyed = tolerance_key(key, tau)
+            assert together.values[keyed] == pytest.approx(alone.values[keyed], abs=1e-9)
+    # Different tolerances really are different measurements here.
+    assert together.values["poly_apl_mm@0.5mm"] > together.values["poly_apl_mm@3mm"]
 
 
 def test_a_structure_with_no_contours_is_undefined_not_zero():
@@ -521,7 +550,7 @@ def test_an_undetermined_median_blanks_the_median_and_nothing_else():
     assert "poly_median_distance_mm" not in result.values
     assert set(result.undefined) == {"poly_median_distance_mm"}
     assert "from 0 to 2 mm" in result.undefined["poly_median_distance_mm"]
-    for kept in ("poly_hd100_mm", "poly_hd95_mm", "poly_mean_distance_mm", "poly_apl_mm"):
+    for kept in ("poly_hd100_mm", "poly_hd95_mm", "poly_mean_distance_mm", "poly_apl_mm@1mm"):
         assert kept in result.values
     assert result.values["poly_hd100_mm"] == pytest.approx(2 * np.sqrt(2), abs=1e-9)
 
@@ -554,7 +583,7 @@ def test_switching_off_the_engines_refusal_changes_no_number():
     kwargs = {"taus": [1.0], "missing_plane_policy": "exclude"}
 
     strict = fast.compare(reference, test, error_mm=0.001, **kwargs)
-    lifted = engine._compare(reference, test, 1.0)
+    lifted = engine._compare(reference, test, (1.0,))
 
     for key, value in strict.items():
         assert lifted[key] == value, key
@@ -591,4 +620,4 @@ def test_planes_reached_by_only_one_structure_are_counted_not_hidden():
     assert values["poly_planes_gt_only"] == 1
     assert values["poly_planes_test_only"] == 0
     # APL counts the reference-only plane's full length as path to be drawn.
-    assert values["poly_apl_mm"] > 40.0
+    assert values["poly_apl_mm@2mm"] > 40.0

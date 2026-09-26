@@ -47,6 +47,11 @@ import numpy as np
 
 from autoseg_evaluator.core.contour_grid import PLANE_ALIGNMENT_BUDGET_MM, ContourGrid
 from autoseg_evaluator.core.contour_reading import ContourReadingError, Outline, read_outlines
+from autoseg_evaluator.core.tolerance_keys import (
+    POLYGON_TOLERANCE_METRICS,
+    normalise_tolerances,
+    tolerance_key,
+)
 from autoseg_evaluator.vendor import native_contour_metrics as _reference
 from autoseg_evaluator.vendor import native_contour_metrics_fast as _fast
 from autoseg_evaluator.vendor.native_contour_metrics import (
@@ -467,21 +472,26 @@ class _Engine:
     def prepare(self, regions: ContourRegions) -> Any:
         raise NotImplementedError
 
-    def _compare(self, a: Any, b: Any, tolerance_mm: float) -> dict[str, Any]:
+    def _compare(self, a: Any, b: Any, tolerances_mm: tuple[float, ...]) -> dict[str, Any]:
         raise NotImplementedError
 
-    def _row(self, raw: dict[str, Any]) -> dict[str, float]:
+    def _row(self, raw: dict[str, Any], tolerances_mm: tuple[float, ...]) -> dict[str, float]:
         raise NotImplementedError
 
-    def compare(self, a: Any, b: Any, tolerance_mm: float) -> PolygonMetrics:
+    def compare(self, a: Any, b: Any, tolerance_mm: float | Sequence[float]) -> PolygonMetrics:
         """Measure one pair, converting a documented refusal into a status.
+
+        ``tolerance_mm`` may be one tolerance or several. Every tolerance comes
+        out of the same call, and each fills its own APL columns, keyed by the
+        tolerance: ``poly_apl_mm@3mm``.
 
         Only the failures the suppliers document are caught. Anything else is a
         defect in this integration and should surface as one rather than be
         filed as an unavailable metric.
         """
+        tolerances = normalise_tolerances(tolerance_mm)
         try:
-            raw = self._compare(a, b, float(tolerance_mm))
+            raw = self._compare(a, b, tolerances)
         except (AmbiguousQuantileError, _ReferenceAmbiguousQuantileError) as exc:
             # Only the reference engine still gets here: it cannot report a
             # quantile's gap without raising, so it loses the whole comparison.
@@ -490,7 +500,7 @@ class _Engine:
             return PolygonMetrics(status=f"undefined: {exc}", engine=self.label)
         except (RuntimeError, ArithmeticError) as exc:
             return PolygonMetrics(status=f"unavailable: {exc}", engine=self.label)
-        values = self._row(raw)
+        values = self._row(raw, tolerances)
         undefined = self._undetermined(raw)
         for column in undefined:
             values.pop(column, None)
@@ -532,11 +542,11 @@ class _FastEngine(_Engine):
             "quantile_guard_scope": "per metric, on the reported (larger-direction) value",
         }
 
-    def _compare(self, a: Any, b: Any, tolerance_mm: float) -> dict[str, Any]:
+    def _compare(self, a: Any, b: Any, tolerances_mm: tuple[float, ...]) -> dict[str, Any]:
         return _fast.compare(
             a,
             b,
-            taus=[tolerance_mm],
+            taus=list(tolerances_mm),
             error_mm=_ENGINE_REFUSAL_LIFTED_MM,
             missing_plane_policy=MISSING_PLANE_POLICY,
         )
@@ -544,13 +554,15 @@ class _FastEngine(_Engine):
     def _undetermined(self, raw: dict[str, Any]) -> dict[str, str]:
         return _undetermined(raw)
 
-    def _row(self, raw: dict[str, Any]) -> dict[str, float]:
-        apl = raw["apl"][0]
+    def _row(self, raw: dict[str, Any], tolerances_mm: tuple[float, ...]) -> dict[str, float]:
+        row: dict[str, float] = {}
+        for tau, apl in zip(tolerances_mm, raw["apl"], strict=True):
+            row[tolerance_key("poly_apl_mm", tau)] = float(apl["apl_a_mm"])
+            row[tolerance_key("poly_napl", tau)] = float(apl["napl_a"])
+            row[tolerance_key("poly_apl_reverse_mm", tau)] = float(apl["apl_b_mm"])
+            row[tolerance_key("poly_napl_reverse", tau)] = float(apl["napl_b"])
         return {
-            "poly_apl_mm": float(apl["apl_a_mm"]),
-            "poly_napl": float(apl["napl_a"]),
-            "poly_apl_reverse_mm": float(apl["apl_b_mm"]),
-            "poly_napl_reverse": float(apl["napl_b"]),
+            **row,
             "poly_hd100_mm": float(raw["hd_mm"]),
             "poly_hd95_mm": float(raw["hd95_mm"]),
             "poly_mean_distance_mm": float(raw["mean_mm"]),
@@ -572,11 +584,11 @@ class _ReferenceEngine(_Engine):
         # Nothing to precompute; this engine samples afresh on every call.
         return _reference.from_planes(dict(regions.planes))
 
-    def _compare(self, a: Any, b: Any, tolerance_mm: float) -> dict[str, Any]:
+    def _compare(self, a: Any, b: Any, tolerances_mm: tuple[float, ...]) -> dict[str, Any]:
         return _reference.compare(
             a,
             b,
-            tolerances_mm=(tolerance_mm,),
+            tolerances_mm=tuple(tolerances_mm),
             error_mm=self.sampling_mm,
             missing_plane_policy=MISSING_PLANE_POLICY,
         )
@@ -585,16 +597,10 @@ class _ReferenceEngine(_Engine):
     def settings(self) -> dict[str, Any]:
         return {**super().settings, "sampling_mm": self.sampling_mm}
 
-    def _row(self, raw: dict[str, Any]) -> dict[str, float]:
+    def _row(self, raw: dict[str, Any], tolerances_mm: tuple[float, ...]) -> dict[str, float]:
         distance = raw["distance"]
-        apl = raw["apl"][0]
-        forward, reverse = apl["reference_to_test"], apl["test_to_reference"]
         coverage = raw["plane_coverage"]
-        napl = forward["napl"]
-        napl_reverse = reverse["napl"]
         row = {
-            "poly_apl_mm": float(forward["apl_mm"]),
-            "poly_apl_reverse_mm": float(reverse["apl_mm"]),
             "poly_hd100_mm": float(distance["hd100"]["mm"]),
             "poly_hd95_mm": float(distance["hd95"]["mm"]),
             "poly_mean_distance_mm": float(distance["mean_contour_distance"]["mm"]),
@@ -603,12 +609,16 @@ class _ReferenceEngine(_Engine):
             "poly_planes_gt_only": int(coverage["excluded_a_planes"]),
             "poly_planes_test_only": int(coverage["excluded_b_planes"]),
         }
-        # NAPL is undefined against an empty reference; the kernel says so with
-        # ``None`` and that is not a zero.
-        if napl is not None:
-            row["poly_napl"] = float(napl)
-        if napl_reverse is not None:
-            row["poly_napl_reverse"] = float(napl_reverse)
+        for tau, apl in zip(tolerances_mm, raw["apl"], strict=True):
+            forward, reverse = apl["reference_to_test"], apl["test_to_reference"]
+            row[tolerance_key("poly_apl_mm", tau)] = float(forward["apl_mm"])
+            row[tolerance_key("poly_apl_reverse_mm", tau)] = float(reverse["apl_mm"])
+            # NAPL is undefined against an empty reference; the kernel says so
+            # with ``None`` and that is not a zero.
+            if forward["napl"] is not None:
+                row[tolerance_key("poly_napl", tau)] = float(forward["napl"])
+            if reverse["napl"] is not None:
+                row[tolerance_key("poly_napl_reverse", tau)] = float(reverse["napl"])
         return row
 
 
@@ -659,7 +669,7 @@ def compare_structures(
     reference: ContourRegions,
     test: ContourRegions,
     *,
-    tolerance_mm: float,
+    tolerance_mm: float | Sequence[float],
     engine: _Engine | None = None,
 ) -> PolygonMetrics:
     """Measure one ROI pair. Convenience over prepare-then-compare.
@@ -713,7 +723,7 @@ class PolygonConfig:
     """
 
     metrics: frozenset[str] = frozenset()
-    tolerance_mm: float = 3.0
+    tolerances_mm: tuple[float, ...] = (3.0,)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> PolygonConfig:
@@ -723,24 +733,38 @@ class PolygonConfig:
             chosen = {str(k) for k, v in selected.items() if v}
         else:
             chosen = {str(k) for k in selected}
+        # ``tolerance_mm`` held one number before tolerance lists existed; a
+        # list or a number is accepted under either name.
+        tolerances = data.get("tolerances_mm", data.get("tolerance_mm"))
         return cls(
             metrics=frozenset(chosen & set(METRIC_COLUMNS)),
-            tolerance_mm=float(data.get("tolerance_mm", 3.0)),
+            tolerances_mm=normalise_tolerances(tolerances),
         )
+
+    @property
+    def tolerance_mm(self) -> float:
+        """The first tolerance, for callers that take one."""
+        return self.tolerances_mm[0]
 
     def any_enabled(self) -> bool:
         return bool(self.metrics)
 
     def columns(self) -> tuple[str, ...]:
-        """The row keys this configuration fills, in display order."""
+        """The row keys this configuration fills, in display order.
+
+        The added-path-length columns come once per tolerance, keyed by it.
+        """
         if not self.metrics:
             return ()
-        chosen = [
-            column
-            for key, columns in METRIC_COLUMNS.items()
-            if key in self.metrics
-            for column in columns
-        ]
+        chosen: list[str] = []
+        for key, columns in METRIC_COLUMNS.items():
+            if key not in self.metrics:
+                continue
+            for column in columns:
+                if column in POLYGON_TOLERANCE_METRICS:
+                    chosen.extend(tolerance_key(column, tau) for tau in self.tolerances_mm)
+                else:
+                    chosen.append(column)
         return tuple(chosen) + CONTEXT_COLUMNS
 
     def select(self, values: Mapping[str, float]) -> dict[str, float]:
@@ -748,7 +772,9 @@ class PolygonConfig:
         return {key: values[key] for key in self.columns() if key in values}
 
 
-#: The columns a successful comparison fills, in the order they are shown.
+#: The columns a successful comparison fills, in the order they are shown. The
+#: four added-path-length columns are named here without their tolerance; a row
+#: holds them once per tolerance, keyed by it (``poly_apl_mm@3mm``).
 ROW_KEYS: Sequence[str] = (
     "poly_apl_mm",
     "poly_napl",

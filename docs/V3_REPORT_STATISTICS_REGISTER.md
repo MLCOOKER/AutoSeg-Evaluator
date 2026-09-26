@@ -102,6 +102,27 @@ sets on the one CT.
 - **Revisit if** — Cohorts routinely contain re-irradiation, at which point withholding those
   patients costs more than a stated rule for choosing a course would — or organ-level
   conclusions are shown to differ from a mixed model fitted to the same data.
+
+**A pair is one case, not one patient.** An external audit (September 2026) found pairing
+joined the two sources on the patient alone, after each had been reduced to one case per
+patient — so a vendor assessed only on the first course was paired with another assessed
+only on the second, with no exclusion shown. A pair now requires the same planning image
+on both sides, and a patient whose sources were assessed on different ones is withheld and
+named with the multi-case patients.
+
+**An infinite value is *metric invalid*.** A Hausdorff distance to an empty contour is
+infinite. It has no magnitude a shift estimate or its interval can use — inverting the test
+over a difference of −∞ never terminated — so the report treats it as it treats NaN: the
+case is counted as *metric invalid* in the coverage table and left out of that metric's
+statistics. The same contour's Dice, recall and Surface Dice of 0 still count against the
+source. Treating it as the worst rank was considered and rejected: the signed-rank p-value
+would survive it, but the Hodges–Lehmann estimate and its interval would not.
+
+**Each tolerance is its own metric.** Surface Dice and the 2D APL columns carry their
+tolerance in the metric's name (`surface_dice@2mm`), so values computed at different
+tolerances are never pooled or compared with each other. The multiplicity note counts the
+comparisons in one table; reporting several tolerances of one metric is several tables, and
+a primary tolerance should be named in advance.
 - **In code** — `ReportModel.observations` is keyed on
   `(organ, source, metric, patient, linkage)`; `multi_case_patients()` finds patients with
   several cases and `values()` omits them. Repeats *within* one case are collapsed, and
