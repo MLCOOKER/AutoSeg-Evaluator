@@ -173,6 +173,41 @@ Each has a regression test that reproduces the audit's case
 
   Every method but v2's is the application's own `core.dvh`, so the report
   measures the code that runs. It needs the new `validation` extra.
+- **2D metrics against the analytical shapes**
+  (`scripts/validate_polygon_analytic.py`,
+  `docs/POLYGON_ANALYTIC_VALIDATION.md`). The 150 pairs of Boukerroui et al.
+  (2023), read from their DICOM files by the application and measured as a run
+  measures them, against three references kept apart: the ideal shapes'
+  closed-form values, the authors' own published results, and audited values
+  for the polygons as stored. Distances fall within 0.058 mm of the ideal shapes
+  on the coarse grid (0.008 mm on the fine), all of it the stored circles' own
+  polygonal approximation; within 0.013 mm of the authors' software; and within
+  5e-10 mm of the audited values.
+- **The rasteriser in an independent six-converter study**
+  (`scripts/validate_rasterisation_fidelity.py`,
+  `docs/RASTERISATION_FIDELITY.md`). Both backends run on the study's own 108
+  configurations and 14 shape families, scored with its own code against its
+  own references, aggregated by its own rules — which reproduce its published
+  tables to 2e-16. The default backend converts all 1,512 cases, XOR contours
+  included; on the 176 cases every converter shares its error is 22.46 %, level
+  with Plastimatch (22.47 %), the best converter, against 19.12 % for the
+  attainable optimum; it is unbiased and unchanged by oblique frames and large
+  coordinates. The legacy backend scores identically to PlatiPy, its origin.
+- **DVH from a mask against DVH from the contours**
+  (`scripts/validate_dvh_mask_vs_polygon.py`, `docs/DVH_MASK_VS_POLYGON.md`).
+  A STAPLE consensus has no contours, so its dose statistics come from its
+  voxels; every other structure's from its contours. Each Nelms et al. (2015)
+  structure is taken both ways, the mask made from its own RTSTRUCT (and shown
+  to be what a unanimous STAPLE consensus returns), and scored against the
+  analytic truth and against each other, on the dataset's 0.6 mm CT and on the
+  cohort's 1.07 and 1.37 mm pixels at four sub-pixel offsets. On 0.6 mm pixels
+  a mask's Dmean is within 0.12 % of the contours'; on 1.37 mm pixels within
+  2.2 % (a boundary shift under half a pixel), with volume up to 9.4 % and D99
+  up to 13.8 % apart. The contour path is unaffected by the CT grid. Shifted
+  copies of each structure, with known true differences, then compare the ways
+  of setting a test contour against a mask reference: from the test's mask,
+  the error in every dose statistic's difference falls (Dmean 2.0 → 0.25 % at
+  the 95th percentile on 1.37 mm pixels); a total volume difference does not.
 - **A *Dose grid coverage (%)* column.** Dose statistics describe the part of
   a structure inside the dose grid; the part outside has no calculated dose,
   so it is left out rather than given one. The column gives the share of the
@@ -312,6 +347,16 @@ Each has a regression test that reproduces the audit's case
   which numbers the release moves.
 
 ### Changed
+- ⚠️ **Against a consensus, dose statistics come from masks on both sides.**
+  A test compared against a Tab 2 consensus ground truth, and every contour in a
+  drawer's STAPLE rows, now takes its DVH from its own mask, as the consensus
+  does; against a manual ground truth, both sides still come from their
+  contours. Taking the test from its contours built the mask's own error into
+  the difference — a contour identical to the consensus showed one — and like
+  for like cuts the 95th-percentile error in a Dmean difference from 2.0 % to
+  0.25 % on 1.37 mm pixels (`docs/DVH_MASK_VS_POLYGON.md`). A new *DVH from*
+  column says which, on every dose row. This moves the dose values of
+  consensus rows; manual-ground-truth rows are unchanged.
 - **One computation per results table.** Computing again replaces the table,
   after the user confirms, with the option to export it first; rows are never
   updated or merged, so every row in a table comes from one run with one set of

@@ -20,11 +20,11 @@ clean.
 | 1 | Precision / recall metrics | **Done** |
 | 2 | Validate dcmrtstruct2nii against PlatiPy | **Done** |
 | 3 | Robust DICOM ingestion and grouping, without RTPLAN | **Done** |
-| 4 | Performance / parallelisation | **Not started** — needs re-profiling first |
+| 4 | Performance / parallelisation | **Done without parallelism** (user decision) — seven exact optimisations |
 | 5 | Two-stream metric architecture | **Done**, all seven phases |
 | 6 | Canonical organ bucketing + statistics | **Done**, both halves |
 | 7 | Quantify DVH on mask vs on RTSS | **Done** — DVH now integrated over the contours |
-| 8 | Validation report for the Stream B metrics | **Partly done** — synthetic half written |
+| 8 | Validation report for the Stream B metrics | **Partly done** — synthetic and analytic halves written |
 
 ---
 
@@ -132,12 +132,17 @@ depend on which one happened to be listed first.
 
 ### 4 — Performance / parallelisation
 
-Not started; no `multiprocessing` or `concurrent.futures` anywhere in `src/`.
-The original case rested on profiling that put ~91 % of rasterisation time in
-`skimage.draw.polygon`. **That call is gone from the default path**: the shared
-contour reading (spec D10) fills with a scanline that took the tender H&N
-cohort from 815 s to 219 s. Re-profile a full run before deciding whether
-parallelism is still the lever.
+**Done (2026-09-26), without parallelism.** An external speed review proposed
+seven changes and parallel processing; the seven were made, each checked to
+leave every reported value bit-for-bit unchanged (commits `18d8c96`,
+`4aae855`), and the user ruled parallel processing out. On a real 453-row run
+the rows matched the previous build exactly apart from *Computed at*, and the
+computation took 232 s instead of 673 s. The changes: Results and Report
+refresh in batches and only when visible; masks leave the cache after their
+last drawer; the mask metrics work on the pair's shared crop; STAPLE summaries
+come from the cropped images; surface distances sort with NumPy; a contour's
+DVH is integrated once per drawer; the audit record reuses the metrics'
+surface distances. See the CHANGELOG's speed section.
 
 ### 5 — Two-stream metric architecture
 
@@ -282,12 +287,34 @@ Three defects in today's DVH path, all in dicompyler-core 0.5.6:
   was measured against dicompyler, not against truth. Against truth,
   dicompyler is the outlier.
 
+**Mask against contours, quantified (2026-09-26).**
+`docs/DVH_MASK_VS_POLYGON.md` measures what separates a STAPLE consensus's
+dose row (sampled over its mask) from a contour's (integrated over its
+polygons) for the same Nelms structure. On the dataset's 0.6 mm CT, Dmean is
+within 0.12 %; on 1.37 mm pixels, the tender cohort's coarsest (1.07 mm is its
+most common), within 2.2 %, with volume up to 9.4 % and D99 up to 13.8 % apart.
+Against the analytic truth, parameters beyond 3 % rise from 3.0 % (0.6 mm) to
+8.9 % (1.07 mm) and 9.8 % (1.37 mm) for the mask path and stay at 3.2–3.3 % for
+the contour path.
+
+**Decided 2026-09-29: against a mask reference, like for like.** Anything
+compared against a consensus (a Tab 2 consensus ground truth, or a drawer's
+STAPLE rows) takes its DVH from its own mask; a *DVH from* column names the
+basis on every dose row. Tested on shifted Nelms pairs with known true
+differences: the 95th-percentile error in the Dmean difference falls from
+1.0 % to 0.28 % on 1.07 mm pixels and from 2.0 % to 0.25 % on 1.37 mm, and every
+dose statistic's falls with it; a total volume difference does not improve.
+
 ### 8 — Validation report for the Stream B metrics
 
 Partly done. `docs/POLYGON_VALIDATION_REPORT.md` covers the published synthetic
 pairs, the stress cases, the adapter and the DICOM path, and
 `scripts/validate_contour_reading.py` checks the shared reading on a real
-cohort. The report on this paper's own data is still to be written. Because
+cohort. `docs/POLYGON_ANALYTIC_VALIDATION.md` (2026-09-26) compares the
+application, from the DICOM files, with the ideal analytical shapes, the
+authors' own software and the audited polygons: distances within 0.058 mm of
+the ideal shapes, all of it the stored polygons' own. The report on this
+paper's own data is still to be written. Because
 mask-APL is going, there is no cross-stream head-to-head metric left, so the 2D
 metrics are validated against synthetic and analytic ground truth rather than
 against Stream A.

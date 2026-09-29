@@ -77,6 +77,21 @@ _MODE_MULTI_OBSERVER = "Multi-observer STAPLE"
 _MODE_GENERIC_STAPLE_GT = "Generic STAPLE with GT"
 _MODE_GENERIC_STAPLE_NO_GT = "Generic STAPLE no GT"
 
+#: What a row's dose statistics were integrated over, in its ``dvh_basis``
+#: column. A STAPLE consensus exists only as a mask, so its DVH comes from its
+#: voxels; a structure compared against one takes its DVH from its own mask on
+#: the same grid, so both sides carry the same voxel staircase and a contour
+#: identical to the consensus differs from it by nothing. Taking the test from
+#: its contours instead built the mask's own error into every comparison: on
+#: the Nelms benchmark, up to 2.2 % in Dmean and 9.4 % in volume on 1.37 mm
+#: pixels for a contour identical to the reference. For a contour that differs
+#: from it, like for like cut the 95th-percentile error in the Dmean difference
+#: from 2.0 % to 0.25 % there, and every dose statistic's with it; only a total
+#: volume difference was no better (docs/DVH_MASK_VS_POLYGON.md).
+#: Against a reference with contours, both sides come from their contours.
+DVH_FROM_CONTOURS = "contours"
+DVH_FROM_MASK = "mask"
+
 
 class MetricsWorker(QObject):
     """Drives the per-row metric loop on a background thread.
@@ -603,18 +618,17 @@ class MetricsWorker(QObject):
                     row["metrics"]["staple_sensitivity"] = ss[0]
                     row["metrics"]["staple_specificity"] = ss[1]
             if self._dvh_config.any_enabled():
-                self._dose_into_row(
+                # Against a Tab 2 consensus, which is a mask, from the test's
+                # mask; against a manual ground truth, from its contours.
+                self._structure_dose_into_row(
                     row,
                     group,
-                    lambda dose: structure_dvh(
-                        record["rtss"],
-                        test["roi_number"],
-                        dose,
-                        record["mask"],
-                        self._dvh_config,
-                        z_extent_mm=z_extent_mm,
-                    ),
-                    contour=(test["rtstruct_sop_uid"], int(test["roi_number"]), z_extent_mm),
+                    sop=test["rtstruct_sop_uid"],
+                    roi_number=test["roi_number"],
+                    rtss=record["rtss"],
+                    mask=record["mask"],
+                    z_extent_mm=z_extent_mm,
+                    from_mask=bool(group.get("_gt_synthetic")),
                 )
             # The polygon stream, measured on the stored contours rather than
             # on the rasterised masks above. It is a separate measurement of the
@@ -843,19 +857,18 @@ class MetricsWorker(QObject):
             comparison_mode="gt_dose",
             was_designated_gt=True,
         )
-        if gt_rtss is None:
-            # A Tab 2 consensus used as ground truth exists only as a mask, so
-            # its voxels are sampled, as the STAPLE consensus rows are.
-            self._dose_into_row(row, group, lambda dose: mask_dvh(gt_mask, dose, self._dvh_config))
-        else:
-            self._dose_into_row(
-                row,
-                group,
-                lambda dose: structure_dvh(
-                    gt_rtss, group["gt_roi_number"], dose, gt_mask, self._dvh_config
-                ),
-                contour=(group["gt_sop"], int(group["gt_roi_number"]), None),
-            )
+        # A Tab 2 consensus used as ground truth exists only as a mask, so its
+        # voxels are sampled, as the STAPLE consensus rows are.
+        self._structure_dose_into_row(
+            row,
+            group,
+            sop=group["gt_sop"],
+            roi_number=group["gt_roi_number"],
+            rtss=gt_rtss,
+            mask=gt_mask,
+            z_extent_mm=None,
+            from_mask=gt_rtss is None or bool(group.get("_gt_synthetic")),
+        )
         return row
 
     # ---- STAPLE branch -----------------------------------------------------
@@ -942,8 +955,9 @@ class MetricsWorker(QObject):
         # lookup so raters outside the pool can still appear in results
         # (with empty sens/spec) compared against the consensus.
         pool_idx_by_id = {id(r): i for i, r in enumerate(staple_pool)}
-        # Dose is computed per rater (each source label's own contour), so the
-        # results carry dose for every rater — not just the consensus.
+        # Dose is computed per rater, from each rater's own mask, so the results
+        # carry dose for every rater — not just the consensus — on the same
+        # basis as the consensus they are compared against.
         dose_ds = (
             self._load_dose(group["patient_id"], group["gt_sop"])
             if self._dvh_config.any_enabled()
@@ -991,26 +1005,20 @@ class MetricsWorker(QObject):
                 # else: GT excluded from pool — sens/spec stay empty since the
                 # EM never saw this rater's mask. Geometric vs consensus still
                 # populated so the user can quantify GT-vs-AI-ensemble agreement.
-                # Per-rater dose (this source label's own contour), truncated to
-                # the GT extent for test raters (not the GT rater itself).
-                if dose_ds is not None and rater.get("rtss") is not None:
-                    rater_z_extent = None if rater["was_designated_gt"] else dvh_z_extent
-                    self._dose_into_row(
+                # Per-rater dose, from the rater's own mask: these rows are
+                # compared against the consensus, which is a mask. Test raters'
+                # masks are already cut to the GT's extent when truncating; the
+                # GT rater's never is.
+                if dose_ds is not None:
+                    self._structure_dose_into_row(
                         row,
                         group,
-                        lambda dose, r=rater, z=rater_z_extent: structure_dvh(
-                            r["rtss"],
-                            r["roi_number"],
-                            dose,
-                            r["mask"],
-                            self._dvh_config,
-                            z_extent_mm=z,
-                        ),
-                        contour=(
-                            rater["rtstruct_sop_uid"],
-                            int(rater["roi_number"]),
-                            rater_z_extent,
-                        ),
+                        sop=rater["rtstruct_sop_uid"],
+                        roi_number=rater["roi_number"],
+                        rtss=rater.get("rtss"),
+                        mask=rater["mask"],
+                        z_extent_mm=None if rater["was_designated_gt"] else dvh_z_extent,
+                        from_mask=True,
                     )
             except Exception as exc:  # noqa: BLE001
                 row["error"] = f"{type(exc).__name__}: {exc}"
@@ -1026,6 +1034,45 @@ class MetricsWorker(QObject):
                 out.append(self._make_consensus_dose_row(group, consensus_mask))
         return out
 
+    def _structure_dose_into_row(
+        self,
+        row: dict[str, Any],
+        group: dict[str, Any],
+        *,
+        sop: str,
+        roi_number: int,
+        rtss: Any,
+        mask: Any,
+        z_extent_mm: tuple[float, float] | None,
+        from_mask: bool,
+    ) -> None:
+        """One structure's dose statistics: from its contours, or from its mask.
+
+        ``from_mask`` when the row's reference exists only as a mask (see
+        :data:`DVH_FROM_MASK`). ``mask`` is the one the geometric metrics used,
+        already cut to the ground truth's extent when the drawer truncates;
+        ``z_extent_mm`` cuts the contours to the same range. A structure with no
+        contours to read, a consensus, can only be taken from its mask.
+        """
+        if from_mask or rtss is None:
+            self._dose_into_row(
+                row,
+                group,
+                lambda dose: mask_dvh(mask, dose, self._dvh_config),
+                contour=(sop, int(roi_number), z_extent_mm),
+                basis=DVH_FROM_MASK,
+            )
+            return
+        self._dose_into_row(
+            row,
+            group,
+            lambda dose: structure_dvh(
+                rtss, roi_number, dose, mask, self._dvh_config, z_extent_mm=z_extent_mm
+            ),
+            contour=(sop, int(roi_number), z_extent_mm),
+            basis=DVH_FROM_CONTOURS,
+        )
+
     def _dose_into_row(
         self,
         row: dict[str, Any],
@@ -1033,6 +1080,7 @@ class MetricsWorker(QObject):
         compute: Callable[[DoseGrid], DVHResult],
         *,
         contour: tuple[str, int, tuple[float, float] | None] | None = None,
+        basis: str = DVH_FROM_CONTOURS,
     ) -> None:
         """Put one structure's dose statistics into ``row``.
 
@@ -1048,20 +1096,25 @@ class MetricsWorker(QObject):
         those three are everything the result depends on; a contour compared
         both against the ground truth and against the drawer's STAPLE consensus
         used to be integrated twice. Its failure is kept too, so both rows say
-        the same thing. A DVH of a mask has no contour to name and is not kept.
+        the same thing. A consensus mask has no contour to name and is not kept.
+
+        ``basis`` — :data:`DVH_FROM_CONTOURS` or :data:`DVH_FROM_MASK` — goes in
+        the row's ``dvh_basis`` column, and in the kept result's key: one
+        contour's DVH from its contours and from its mask are different numbers.
         """
+        key = (basis, *contour) if contour is not None else None
         try:
             dose = self._load_dose_grid(group["patient_id"], group["gt_sop"])
             if dose is None:
                 return
-            result = self._dvh_cache.get(contour) if contour is not None else None
+            result = self._dvh_cache.get(key) if key is not None else None
             if result is None:
                 try:
                     result = compute(dose)
                 except DVHError as exc:
                     result = exc
-                if contour is not None:
-                    self._dvh_cache[contour] = result
+                if key is not None:
+                    self._dvh_cache[key] = result
             if isinstance(result, DVHError):
                 raise result
         except DVHError as exc:
@@ -1071,6 +1124,7 @@ class MetricsWorker(QObject):
         # On every dose row, so a structure the dose grid only partly covers
         # cannot pass for one it covers: the statistics describe that part.
         row["metrics"]["dose_coverage_pct"] = result.coverage_pct
+        row["metrics"]["dvh_basis"] = basis
         if result.status:
             row["metrics"]["dvh_status"] = result.status
         if self._audit:
@@ -1249,7 +1303,10 @@ class MetricsWorker(QObject):
         row["truncated_slices"] = 0
         row["truncated_extent_mm"] = 0.0
         self._dose_into_row(
-            row, group, lambda dose: mask_dvh(consensus_mask, dose, self._dvh_config)
+            row,
+            group,
+            lambda dose: mask_dvh(consensus_mask, dose, self._dvh_config),
+            basis=DVH_FROM_MASK,
         )
         return row
 

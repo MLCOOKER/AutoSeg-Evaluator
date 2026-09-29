@@ -144,7 +144,7 @@ def _band_for_metric_key(key: str) -> str:
     ):
         return "qualitative"
     # DVH built-ins or dynamic ``d{X}_gy`` / ``v{X}gy_cc``
-    if key in ("dose_coverage_pct", "dvh_status", "dmin_gy", "dmean_gy", "dmax_gy"):
+    if key in ("dose_coverage_pct", "dvh_status", "dvh_basis", "dmin_gy", "dmean_gy", "dmax_gy"):
         return "dvh"
     if key.startswith("d") and key.endswith("_gy"):
         return "dvh"

@@ -134,6 +134,9 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
     # D{X}cc is larger than that part, and is blank otherwise.
     "dose_coverage_pct",
     "dvh_status",
+    # Whether the row's dose statistics come from the structure's contours or
+    # from its mask: from the mask when the reference is a consensus mask.
+    "dvh_basis",
     "dmin_gy",
     "dmean_gy",
     "dmax_gy",
@@ -180,6 +183,7 @@ _METRIC_LABELS: dict[str, str] = {
     # DVH (static)
     "dose_coverage_pct": "Dose grid coverage (%)",
     "dvh_status": "Dose status",
+    "dvh_basis": "DVH from",
     "dmin_gy": "Dmin (Gy)",
     "dmean_gy": "Dmean (Gy)",
     "dmax_gy": "Dmax (Gy)",

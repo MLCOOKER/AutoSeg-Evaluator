@@ -460,7 +460,8 @@ def test_the_worker_puts_statistics_status_and_audit_in_the_row(monkeypatch):
         row, group, lambda d: structure_dvh(rtss, 1, d, _image(), worker._dvh_config)
     )
 
-    assert set(row["metrics"]) == {"dmean_gy", "dmax_gy", "dose_coverage_pct"}
+    assert set(row["metrics"]) == {"dmean_gy", "dmax_gy", "dose_coverage_pct", "dvh_basis"}
+    assert row["metrics"]["dvh_basis"] == "contours"
     assert row["metrics"]["dose_coverage_pct"] == 100.0
     assert row["metrics"]["dmean_gy"] == pytest.approx(D0 + 0.4, abs=1e-6)
     assert row["error"] == ""

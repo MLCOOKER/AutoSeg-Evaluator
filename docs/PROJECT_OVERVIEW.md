@@ -1045,8 +1045,15 @@ it came from dicompyler-core (see *Why it changed* below).
 
 **Consensus structures** (`mask_dvh`): a STAPLE consensus, or a Tab 2
 consensus used as ground truth, has no contours. Its voxels are sub-sampled by
-the same spacing rule and read the same way, so a comparison against a
-consensus uses one DVH method on both sides.
+the same spacing rule and read the same way. Anything compared against a
+consensus — a test against a Tab 2 consensus ground truth, every contour in a
+drawer's STAPLE rows — takes its DVH from its own mask on the same grid, so
+both sides carry the same voxel staircase and a contour identical to the
+consensus differs from it by nothing. Against a manual ground truth both sides
+come from their contours. The `dvh_basis` column (*DVH from*) records which, on
+every dose row. `docs/DVH_MASK_VS_POLYGON.md` measures the choice: taking the
+test from its contours instead put up to 2 % of mask error into a Dmean
+difference on 1.37 mm pixels, like for like about 0.25 %.
 
 **Dose grid coverage:** the statistics describe the part of a structure
 inside the dose grid. A part outside it has no calculated dose, so it is left
