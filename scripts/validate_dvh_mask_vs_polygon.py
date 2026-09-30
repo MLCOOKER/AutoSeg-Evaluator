@@ -58,6 +58,7 @@ from validate_dvh_methods import (  # noqa: E402
     NELMS_GRADIENT,
     TEST_NAMES,
     Case,
+    NelmsRow,
     closed_roi,
     ct_geometry,
     curve_error,
@@ -131,9 +132,79 @@ def coarser(
     return image
 
 
+def _contour_points(root: Path, stem: str) -> list[np.ndarray]:
+    ds = pydicom.dcmread(str(nelms_structure_path(root, stem)))
+    return [
+        np.asarray(c.ContourData, float).reshape(-1, 3)
+        for c in ds.ROIContourSequence[0].ContourSequence
+    ]
+
+
+def along_field_rows(root: Path, rows: list[NelmsRow]) -> list[NelmsRow]:
+    """The diagonally shifted copies again, in the front-to-back field.
+
+    The dataset pairs each diagonal copy (moved sideways and front-to-back) with
+    the head-to-foot field, which neither movement climbs, so its analytic values
+    equal its twin's. In the front-to-back field the same copy has moved along
+    the gradient, and a linear field makes its truth exact without a table:
+    moving a structure by ``t`` in a gradient ``g`` adds ``g · t`` to every dose
+    statistic and leaves the volume alone. ``t`` is measured from the two files,
+    and checked to be a pure translation; ``g`` from the dose grid itself.
+    """
+    twins = {(r.structure, r.voxel, r.gradient): r for r in rows}
+    gradients: dict[str, np.ndarray] = {}
+    out = []
+    for row in rows:
+        if row.gradient != "SI" or "," not in row.shift:
+            continue
+        shape, code = row.structure.split("_")[:2]
+        twin = twins.get((f"{shape}_{code}_0", row.voxel, "AP"))
+        if twin is None:
+            continue
+        before, after = _contour_points(root, twin.structure), _contour_points(root, row.structure)
+        t = np.concatenate(after).mean(axis=0) - np.concatenate(before).mean(axis=0)
+        if len(before) != len(after) or any(
+            a.shape != b.shape or np.abs(b - a - t).max() > 1e-6
+            for a, b in zip(before, after, strict=True)
+        ):
+            raise ValueError(f"{row.structure} is not a translation of {twin.structure}")
+        if row.voxel not in gradients:
+            ds = pydicom.dcmread(
+                str(
+                    root
+                    / "DOSE GRIDS"
+                    / f"{NELMS_GRADIENT['AP']}_{NELMS_DOSE[row.voxel]}_Aligned.dcm"
+                )
+            )
+            grid = DoseGrid.from_dataset(ds)
+            centre = np.concatenate(before).mean(axis=0)
+            gradients[row.voxel] = np.array(
+                [
+                    (
+                        grid.sample(np.array([centre + e]))[0]
+                        - grid.sample(np.array([centre - e]))[0]
+                    )
+                    / 2.0
+                    for e in np.eye(3)
+                ]
+            )
+        delta = float(gradients[row.voxel] @ t)
+        truth = {k: (v if k == "volume_cc" else v + delta) for k, v in twin.truth.items()}
+        out.append(NelmsRow(row.structure, row.spacing, row.shift, row.voxel, "AP", truth))
+    return out
+
+
 def run(root: Path) -> tuple[dict[str, list[dict]], dict]:
-    """Every Nelms structure and dose, through both paths, on each CT grid."""
+    """Every Nelms structure and dose, through both paths, on each CT grid.
+
+    Records of the dataset's own rows go in the first dict, by grid; those of
+    the extra along-field rows (:func:`along_field_rows`) in ``extra["design"]``,
+    because only the design comparison uses them.
+    """
     rows = read_nelms_rows(root)
+    along = along_field_rows(root, rows)
+    design_only = {id(r) for r in along}
+    rows = [*rows, *along]
     curves = read_nelms_curves(root)
     test3_dose = np.round(np.arange(0.0, 30.0001, 0.1), 6)
     doses: dict[tuple[str, str], tuple] = {}
@@ -143,6 +214,7 @@ def run(root: Path) -> tuple[dict[str, list[dict]], dict]:
         groups[(row.structure, row.spacing)].append(row)
 
     records: dict[str, list[dict]] = {grid_label(p): [] for p in PIXELS_MM}
+    design: dict[str, list[dict]] = {grid_label(p): [] for p in PIXELS_MM}
     staple_checks = []
     for n, ((stem, spacing), group) in enumerate(groups.items(), 1):
         print(f"  {n}/{len(groups)}: {stem}", flush=True)
@@ -176,16 +248,17 @@ def run(root: Path) -> tuple[dict[str, list[dict]], dict]:
                     doses[dose_key] = (ds, DoseGrid.from_dataset(ds))
                 dose_ds, grid = doses[dose_key]
                 case = Case(rtss, roi, dose_ds, grid, ct)
+                target = design if id(row) in design_only else records
                 for path in PATHS:
                     record = _measure(case, mask, path, row, curves, test3_dose)
                     record["phase"] = phase
-                    records[grid_label(pixel_mm)].append(record)
+                    target[grid_label(pixel_mm)].append(record)
     geometry = {
         spacing: (tuple(round(v, 3) for v in image.GetSpacing()), image.GetSize())
         for (spacing, pixel_mm, _phase), image in cts.items()
         if pixel_mm is None
     }
-    return records, {"staple": staple_checks, "ct": geometry}
+    return records, {"staple": staple_checks, "ct": geometry, "design": design}
 
 
 def _measure(case: Case, mask, path: str, row, curves, test3_dose) -> dict:
@@ -498,22 +571,32 @@ DESIGNS = (
 )
 DESIGN_METRICS = ("volume_cc", "dmean", "d99", "d95", "d5", "d1", "d0.03cc")
 
+#: The two sets of shifted pairs, by whether the shift climbs the dose field.
+ACROSS = "across"
+ALONG = "along"
+SHIFT_KINDS = {
+    ACROSS: "Shifted across the field: true difference zero",
+    ALONG: "Shifted along the field: true difference 0.5-1.5 Gy",
+}
 
-def _shift_pairs(records: list[dict]) -> list[tuple[dict, dict]]:
+
+def _shift_pairs(records: list[dict], extra: list[dict] = ()) -> dict[str, list[tuple[dict, dict]]]:
     """Each shifted structure with its unshifted twin: same dose, grid and offset.
 
     The twin stands for the reference and the shifted copy for a test contour
     that differs from it. Both have analytic values, so the true difference is
-    known. Sideways shifts are paired with the front-to-back field, which they
-    do not change, so there the true dose difference is zero; diagonal shifts
-    with the head-to-foot field, which they do change.
+    known. The dataset's own pairings shift each copy across its field, which
+    leaves the dose unchanged, so there the true difference is zero; the extra
+    along-field rows (:func:`along_field_rows`) shift it along the field, where
+    it is not. The pairs are returned under :data:`ACROSS` and :data:`ALONG`.
     """
+    everything = [*records, *extra]
     index = {}
-    for r in records:
+    for r in everything:
         row = r["row"]
         index[(row.structure, row.voxel, row.gradient, r.get("phase"), r["method"])] = r
-    out = []
-    for r in records:
+    out: dict[str, list[tuple[dict, dict]]] = {ACROSS: [], ALONG: []}
+    for r in everything:
         row = r["row"]
         if r["method"] != POLYGON or row.shift == "0" or row.test == "1":
             continue
@@ -525,7 +608,8 @@ def _shift_pairs(records: list[dict]) -> list[tuple[dict, dict]]:
             ref = {p: index[(twin, row.voxel, row.gradient, phase, p)] for p in PATHS}
         except KeyError:
             continue
-        out.append((test, ref))
+        moved = abs(test[POLYGON]["row"].truth["dmean"] - ref[POLYGON]["row"].truth["dmean"])
+        out[ALONG if moved > 1e-9 else ACROSS].append((test, ref))
     return out
 
 
@@ -543,7 +627,7 @@ def _design_errors(pairs, metric: str, test_path: str, ref_path: str) -> list[fl
     return errors
 
 
-def design_section(by_grid: dict[str, list[dict]]) -> list[str]:
+def design_section(by_grid: dict[str, list[dict]], design: dict[str, list[dict]]) -> list[str]:
     """Which way of taking a DVH difference against a mask reference is closest to the truth."""
     lines = [
         "## A test contour against a reference that is a mask",
@@ -553,71 +637,110 @@ def design_section(by_grid: dict[str, list[dict]]) -> list[str]:
         "rasterised on the same grid (like for like). To see which is closer to the",
         "true difference, each shifted Nelms structure is taken as a test contour and",
         "its unshifted twin as the reference, on the same dose grid, CT grid and",
-        "offset; both have analytic values, so the true difference is known. Half the",
-        "pairs are shifted sideways (0.5-1.5 mm) in the front-to-back field, where the",
-        "true dose difference is zero; half diagonally in the head-to-foot field,",
-        "where it is 0.5-1.5 Gy. *Both from contours* is the best case, open only to",
-        "a reference that has contours.",
+        "offset, in two sets:",
         "",
-        "Error in the difference (measured minus true), as % of the reference's",
-        "analytic value: 95th percentile / largest, over every pair and offset.",
+        "- **Shifted across the field.** The dataset's own pairings: copies moved",
+        "  sideways (0.5-1.5 mm) in the front-to-back field, and diagonally (sideways",
+        "  and front-to-back, 0.5-1.5 mm each) in the head-to-foot field. Neither",
+        "  movement climbs its field, so the true dose difference is zero, as the",
+        "  dataset's analytic values confirm: any difference measured is discretisation.",
+        "- **Shifted along the field.** The diagonal copies again, in the front-to-back",
+        "  field, which their front-to-back movement climbs. A linear field makes the",
+        "  truth exact without the dataset tabulating it: moving a structure by *s* mm",
+        "  along a gradient of *g* Gy/mm adds *g·s* to every dose statistic and leaves",
+        "  its volume alone, here 0.5, 1 or 1.5 Gy. The movement and the gradient are",
+        "  measured from the files, and each copy checked to be an exact translation",
+        "  of its twin.",
+        "",
+        "*Both from contours* is the best case, open only to a reference that has",
+        "contours. Error in the difference (measured minus true), as % of the",
+        "reference's analytic value: 95th percentile / largest, over every pair and",
+        "offset.",
         "",
     ]
-    rows = []
-    for label, records in by_grid.items():
-        pairs = _shift_pairs(records)
-        for _key, design, test_path, ref_path in DESIGNS:
-            cells = [GRID_NAME.get(label, label), design]
+    for kind, heading in SHIFT_KINDS.items():
+        rows = []
+        n_pairs = 0
+        for label, records in by_grid.items():
+            pairs = _shift_pairs(records, design.get(label, []))[kind]
+            n_pairs = max(n_pairs, len(pairs))
+            for _key, name, test_path, ref_path in DESIGNS:
+                cells = [GRID_NAME.get(label, label), name]
+                for metric in DESIGN_METRICS:
+                    _med, p95, worst = _stats(_design_errors(pairs, metric, test_path, ref_path))
+                    cells.append(f"{_f(p95)} / {_f(worst)} %")
+                rows.append(cells)
+        lines += [f"### {heading}", "", f"Up to {n_pairs} pairs per CT grid, over its offsets.", ""]
+        lines += table(
+            ["CT pixel", "Difference taken", *(LABEL[m] for m in DESIGN_METRICS)],
+            rows,
+            align="ll" + "r" * len(DESIGN_METRICS),
+        )
+        # The reading, from the numbers above: per grid, where like for like is
+        # the smaller error at the 95th percentile and where it is not.
+        for label, records in by_grid.items():
+            if label == NATIVE:
+                continue
+            pairs = _shift_pairs(records, design.get(label, []))[kind]
+            better, worse = [], []
             for metric in DESIGN_METRICS:
-                _med, p95, worst = _stats(_design_errors(pairs, metric, test_path, ref_path))
-                cells.append(f"{_f(p95)} / {_f(worst)} %")
-            rows.append(cells)
-    lines += table(
-        ["CT pixel", "Difference taken", *(LABEL[m] for m in DESIGN_METRICS)],
-        rows,
-        align="ll" + "r" * len(DESIGN_METRICS),
+                mixed = _stats(_design_errors(pairs, metric, POLYGON, MASK))[1]
+                masks = _stats(_design_errors(pairs, metric, MASK, MASK))[1]
+                (better if masks < mixed else worse).append(
+                    f"{LABEL[metric]} {_f(mixed)} → {_f(masks)} %"
+                )
+            lines += [
+                f"On {GRID_NAME[label]}, taking the test from its mask lowers the 95th-percentile",
+                f"error for {', '.join(better) or 'no statistic'}"
+                + (f", and raises it for {', '.join(worse)}." if worse else "."),
+                "",
+            ]
+    # Whether like for like loses on every statistic at every coarser grid when
+    # the shift climbs the field: the finding the conclusion rests on.
+    along_worse = all(
+        _stats(_design_errors(pairs, metric, MASK, MASK))[1]
+        > _stats(_design_errors(pairs, metric, POLYGON, MASK))[1]
+        for label, records in by_grid.items()
+        if label != NATIVE
+        for pairs in (_shift_pairs(records, design.get(label, []))[ALONG],)
+        for metric in DESIGN_METRICS
     )
-    # The reading, from the numbers above: per grid, where like for like is the
-    # smaller error at the 95th percentile and where it is not.
-    for label, records in by_grid.items():
-        if label == NATIVE:
-            continue
-        pairs = _shift_pairs(records)
-        better, worse = [], []
-        for metric in DESIGN_METRICS:
-            mixed = _stats(_design_errors(pairs, metric, POLYGON, MASK))[1]
-            masks = _stats(_design_errors(pairs, metric, MASK, MASK))[1]
-            (better if masks < mixed else worse).append(
-                f"{LABEL[metric]} {_f(mixed)} → {_f(masks)} %"
-            )
-        lines += [
-            f"On {GRID_NAME[label]}, taking the test from its mask lowers the 95th-percentile",
-            f"error for {', '.join(better) or 'no statistic'}"
-            + (f", and raises it for {', '.join(worse)}." if worse else "."),
-            "",
-        ]
     lines += [
-        "The dose statistics improve because a test contour close to the reference",
-        "falls among the voxels much as the reference does, so the two masks' errors",
-        "largely cancel in the difference. The total volume does not: moving a shape",
-        "by part of a voxel changes its mask's volume more or less at random, so two",
-        "masks carry two independent volume errors where the mixed difference carries",
-        "one. Total volume is not a DVH column in AutoSeg, whose volume columns come",
-        "from the masks on both sides against a consensus already; the V at x Gy",
-        "columns are volume-like and are not tested here, because the Nelms truth",
-        "has no V at x Gy for the shifted structures. On the dataset's own 0.6 mm",
-        "pixels the two ways are about even.",
+        "Taking the test from its mask cancels the mask's error only where the two",
+        "masks fall among the voxels alike along the dose gradient. The copies",
+        "shifted across the field do: none moves along its field, so its mask's",
+        "staircase along the gradient matches its twin's and most of the error",
+        "cancels. That is, in effect, the case of a contour identical to the",
+        "reference, where all of it cancels. The copies shifted along the field move",
+        "0.5-1.5 mm up the gradient, a fraction of a voxel off their twins'",
+        "staircase, and then the two masks carry independent errors that add: like",
+        "for like is "
+        + (
+            "worse than taking the test from its contours on every statistic at both of the"
+            if along_worse
+            else "worse than taking the test from its contours on most statistics at the"
+        ),
+        "cohort's grids. A contour from another source differs from a consensus by",
+        "far more than half a voxel, so it is the second case that applies.",
         "",
-        "AutoSeg takes a test from its mask whenever its reference is a mask (the",
-        "*DVH from* column says so on every dose row).",
+        "AutoSeg therefore takes every contour's DVH from its contours, whatever it",
+        "is compared against, and only a consensus, which has none, from its mask",
+        "(the *DVH from* column says which on every dose row). The consensus's error",
+        "is then the same in every source's difference, and cancels when two sources",
+        "are compared with each other; the price is that a contour identical to the",
+        "consensus differs from it by that error. The V at x Gy columns are not",
+        "tested here, because the Nelms truth has no V at x Gy for the shifted",
+        "structures.",
         "",
     ]
     return lines
 
 
-def design_summary(by_grid: dict[str, list[dict]], label: str) -> dict[str, float]:
+def design_summary(
+    by_grid: dict[str, list[dict]], design: dict[str, list[dict]], label: str, kind: str
+) -> dict[str, float]:
     """95th percentile of |error| over volume and clinical doses, per design."""
-    pairs = _shift_pairs(by_grid[label])
+    pairs = _shift_pairs(by_grid[label], design.get(label, []))[kind]
     return {
         key: float(
             np.percentile(
@@ -632,6 +755,7 @@ def write_report(
     target: Path, by_grid: dict[str, list[dict]], extra: dict, seconds: float, revision: str
 ) -> None:
     records = by_grid[NATIVE]
+    design = extra.get("design", {})
     pairs = _pair(records)
     coarse = _pair(by_grid[grid_label(PIXELS_MM[-1])])
     failures = [r for r in records if r["result"].error]
@@ -686,16 +810,24 @@ def write_report(
         f"  and any clinical dose parameter up to "
         f"{_f(max(v for k in CLINICAL for v in _relative(coarse, k)))} % "
         f"(95th percentile {_f(float(np.percentile([v for k in CLINICAL for v in _relative(coarse, k)], 95)))} %).",
-        "- **Against a mask reference, compare like for like.** For a test contour that differs from",
-        "  the reference, the error in its DVH difference (95th percentile over volume and clinical",
-        "  doses) is "
+        "- **Against a mask reference**, the error in a test contour's DVH difference (95th percentile",
+        "  over volume and clinical doses, with the test from its contours → from its mask; both from",
+        "  contours in brackets) is, for a copy shifted across the field (true difference zero), "
         + "; ".join(
-            f"{GRID_NAME[g].split(' (')[0]}: {v['mixed']:.2f} % with the test from its contours, "
-            f"{v['masks']:.2f} % from its mask ({v['contours']:.2f} % with both from contours)"
-            for g, v in ((g, design_summary(by_grid, g)) for g in by_grid if g != NATIVE)
+            f"{GRID_NAME[g].split(' (')[0]}: {v['mixed']:.2f} → {v['masks']:.2f} % ({v['contours']:.2f} %)"
+            for g, v in (
+                (g, design_summary(by_grid, design, g, ACROSS)) for g in by_grid if g != NATIVE
+            )
         )
-        + ". The dose statistics gain the most; the total volume difference is no better from",
-        "  masks (see the design section).",
+        + "; and for one shifted along it (true difference 0.5-1.5 Gy), "
+        + "; ".join(
+            f"{GRID_NAME[g].split(' (')[0]}: {v['mixed']:.2f} → {v['masks']:.2f} % ({v['contours']:.2f} %)"
+            for g, v in (
+                (g, design_summary(by_grid, design, g, ALONG)) for g in by_grid if g != NATIVE
+            )
+        )
+        + ". So AutoSeg takes every contour from its contours and only a consensus from its mask",
+        "  (see the design section).",
         "- **A unanimous STAPLE consensus is the raters' own mask** "
         + (
             f"voxel for voxel on all {len(extra['staple'])} structures, so the mask path is what a consensus of agreeing raters is scored with."
@@ -746,7 +878,7 @@ def write_report(
     lines += difference_section(pairs)
     lines += test3_section(records)
     lines += grid_section(by_grid)
-    lines += design_section(by_grid)
+    lines += design_section(by_grid, design)
     lines += [
         "## STAPLE check",
         "",
@@ -778,14 +910,17 @@ def write_report(
         "cochlea, the optic chiasm -- expect larger differences than these, and for",
         "large organs smaller. `docs/DVH_METHOD_VALIDATION.md` measures both paths",
         "on disc phantoms of 2.5-20 mm radius, where the truth is exact for the",
-        "contours as drawn. Consensus masks of raters who disagree are a",
-        "different question, answered by the STAPLE validation, not this.",
+        "contours as drawn. The design comparison uses rigid shifts of 0.5-1.5 mm;",
+        "a test contour whose shape differs from the reference's is not tested,",
+        "though a difference in shape makes the two masks' errors less alike still.",
+        "Consensus masks of raters who disagree are a different question, answered",
+        "by the STAPLE validation, not this.",
         "",
         "## Source",
         "",
-        "Nelms BE, Robinson G, Markham J, et al. Variation in external beam treatment",
-        "planning dose-volume histogram calculations: a multi-institutional",
-        "comparison and a novel approach. *Med Phys* 2015;42:4435. doi:10.1118/1.4923175.",
+        "Nelms B, Stambaugh C, Hunt D, Tonner B, Zhang G, Feygelman V. Methods,",
+        "software and datasets to verify DVH calculations against analytical values:",
+        "twenty years late(r). *Med Phys* 2015;42(8):4435-48. doi:10.1118/1.4923175.",
         "",
         "Reproduce with:",
         "",

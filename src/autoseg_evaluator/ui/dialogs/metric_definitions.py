@@ -271,15 +271,16 @@ lying outside it has no calculated dose, so it is left out rather than given
 one, and the <i>Dose grid coverage</i> column gives the share of the structure's
 volume the statistics describe: 100% when the grid covers all of it. A consensus ground truth
 has no contours, so its voxels are sampled instead, by the same spacing rule.</p>
-<p>Anything compared against a consensus — a test against a Tab 2 consensus
-ground truth, or any contour in a drawer's STAPLE rows — takes its dose from its
-own mask the same way, so both sides of the comparison carry the same voxel
-staircase and a contour identical to the consensus differs from it by nothing.
-Against a manual ground truth, both sides take theirs from their contours. The
-<i>DVH from</i> column says which, on every dose row. The two can differ for
-the same structure by up to about 2% in Dmean and 9% in volume on 1.37 mm
-pixels (<code>docs/DVH_MASK_VS_POLYGON.md</code>), so a contour's dose values in
-its consensus rows need not equal those in its manual rows.</p>
+<p>Everything else — every contour, whatever it is compared against — takes its
+dose from its contours; the <i>DVH from</i> column says which, on every dose
+row. Against a consensus, then, the only voxel error in a difference is the
+consensus's own. It is the same for every contour compared with that consensus,
+so it cancels when two sources are compared with each other, but it means a
+contour identical to the consensus differs from it by that error: up to about
+2% in Dmean on 1.37 mm pixels (<code>docs/DVH_MASK_VS_POLYGON.md</code>). Taking
+each contour from its own mask as well would remove that error only for
+contours that coincide with the consensus, and adds a second, independent one
+for contours that do not.</p>
 <p>Validated against the analytic datasets of Nelms et al., <i>Methods, software
 and datasets to verify DVH calculations against analytical values</i>, Medical
 Physics 42 (2015) 4435, and against analytic disc phantoms

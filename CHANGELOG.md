@@ -204,10 +204,13 @@ Each has a regression test that reproduces the audit's case
   a mask's Dmean is within 0.12 % of the contours'; on 1.37 mm pixels within
   2.2 % (a boundary shift under half a pixel), with volume up to 9.4 % and D99
   up to 13.8 % apart. The contour path is unaffected by the CT grid. Shifted
-  copies of each structure, with known true differences, then compare the ways
-  of setting a test contour against a mask reference: from the test's mask,
-  the error in every dose statistic's difference falls (Dmean 2.0 → 0.25 % at
-  the 95th percentile on 1.37 mm pixels); a total volume difference does not.
+  copies of each structure then compare the ways of setting a test contour
+  against a mask reference. Taking the test from its own mask too cancels the
+  mask error when the two coincide on the voxels (copies shifted across the
+  dose field, true difference zero: Dmean error 2.0 → 0.25 % at the 95th
+  percentile on 1.37 mm pixels), but adds an independent one when they do not
+  (copies shifted along it, true difference 0.5-1.5 Gy: 2.1 → 3.0 %, and every
+  dose statistic worse), so the test is taken from its contours.
 - **A *Dose grid coverage (%)* column.** Dose statistics describe the part of
   a structure inside the dose grid; the part outside has no calculated dose,
   so it is left out rather than given one. The column gives the share of the
@@ -345,18 +348,15 @@ Each has a regression test that reproduces the audit's case
   conformance test cannot silently skip.
 - `docs/V3_RELEASE_STATUS.md` — what v3.0.0 contains, what is outstanding, and
   which numbers the release moves.
+- **A *DVH from* column** on every dose row says whether its statistics were
+  integrated over the structure's contours or sampled over a mask. Only a
+  consensus, which has no contours, is taken from a mask; every contour is
+  taken from its contours, whatever it is compared against, so against a
+  consensus the mask's error is common to every source and cancels between
+  them (`docs/DVH_MASK_VS_POLYGON.md` has why the contour is not taken from its
+  own mask too).
 
 ### Changed
-- ⚠️ **Against a consensus, dose statistics come from masks on both sides.**
-  A test compared against a Tab 2 consensus ground truth, and every contour in a
-  drawer's STAPLE rows, now takes its DVH from its own mask, as the consensus
-  does; against a manual ground truth, both sides still come from their
-  contours. Taking the test from its contours built the mask's own error into
-  the difference — a contour identical to the consensus showed one — and like
-  for like cuts the 95th-percentile error in a Dmean difference from 2.0 % to
-  0.25 % on 1.37 mm pixels (`docs/DVH_MASK_VS_POLYGON.md`). A new *DVH from*
-  column says which, on every dose row. This moves the dose values of
-  consensus rows; manual-ground-truth rows are unchanged.
 - **One computation per results table.** Computing again replaces the table,
   after the user confirms, with the option to export it first; rows are never
   updated or merged, so every row in a table comes from one run with one set of

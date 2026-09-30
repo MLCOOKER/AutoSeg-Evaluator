@@ -1,13 +1,12 @@
-"""Each row's DVH on the basis its reference calls for, integrated once per drawer.
+"""Each row's DVH from its contours, the consensus's from its mask, once per drawer.
 
-Against a manual ground truth, both sides of a comparison take their dose
-statistics from their contours. Against a consensus, which exists only as a
-mask, every structure takes them from its own mask, so both sides carry the
-same voxel staircase: taking the test from its contours built the mask's own
-error into the difference, up to 2.2 % in Dmean for a contour identical to the
-reference (docs/DVH_MASK_VS_POLYGON.md). Within a drawer the dose and the CT
-are the ground truth's, so a structure's DVH on one basis is computed once, and
-a failure keeps its wording.
+Every structure with contours takes its dose statistics from them, whatever it
+is compared against; a consensus, which exists only as a mask, is sampled over
+its voxels. So against a consensus the one mask error in a difference is the
+consensus's own, the same for every source, and it cancels between sources
+(docs/DVH_MASK_VS_POLYGON.md has why the test is not taken from its mask too).
+Within a drawer the dose and the CT are the ground truth's, so a structure's
+DVH is computed once, and a failure keeps its wording.
 """
 
 from __future__ import annotations
@@ -116,7 +115,7 @@ def _dose_rows(rows: list[dict]) -> list[dict]:
     return [r for r in rows if "dmean_gy" in r["metrics"]]
 
 
-def test_contours_against_a_manual_truth_masks_against_the_consensus(tmp_path, monkeypatch):
+def test_contours_everywhere_but_the_consensus(tmp_path, monkeypatch):
     sops = _cohort(tmp_path)
     from_contours = _counting(monkeypatch, "structure_dvh")
     from_masks = _counting(monkeypatch, "mask_dvh")
@@ -128,12 +127,16 @@ def test_contours_against_a_manual_truth_masks_against_the_consensus(tmp_path, m
     # Against the manual ground truth: its own dose row and both vendors'.
     assert len(manual_rows) == 3
     assert {r["metrics"]["dvh_basis"] for r in manual_rows} == {DVH_FROM_CONTOURS}
-    # Against the drawer's consensus: the three raters and the consensus itself.
+    # Against the drawer's consensus: the three raters from their contours, and
+    # the consensus itself, which has none, from its mask.
     assert len(pool_rows) == 4
-    assert {r["metrics"]["dvh_basis"] for r in pool_rows} == {DVH_FROM_MASK}
-    # Each structure once on each basis: three contours, four masks.
+    consensus = [r for r in pool_rows if r["comparison_mode"] == "gt_dose"]
+    raters = [r for r in pool_rows if r["comparison_mode"] != "gt_dose"]
+    assert [r["metrics"]["dvh_basis"] for r in consensus] == [DVH_FROM_MASK]
+    assert {r["metrics"]["dvh_basis"] for r in raters} == {DVH_FROM_CONTOURS}
+    # Each contour integrated once, shared by its manual and pool rows; one mask.
     assert sorted(from_contours.values()) == [1, 1, 1]
-    assert sorted(from_masks.values()) == [1, 1, 1, 1]
+    assert sorted(from_masks.values()) == [1]
 
 
 def test_reuse_changes_no_row(tmp_path):
@@ -221,7 +224,14 @@ def _consensus_cohort(root: Path):
     return sops
 
 
-def test_a_contour_identical_to_a_consensus_truth_differs_from_it_by_nothing(qapp, tmp_path):
+def test_against_a_consensus_truth_the_mask_error_is_common_to_every_source(qapp, tmp_path):
+    """Tests take their dose from their contours; only the consensus from its mask.
+
+    So the consensus's own mask error is in every test's difference alike, and
+    a difference between two sources is exactly the difference of their contour
+    DVHs. The price: a contour identical to the consensus differs from it by
+    that mask error rather than by nothing.
+    """
     from autoseg_evaluator.core.dvh import structure_dvh
     from autoseg_evaluator.ui.tabs.build_consensus import BuildConsensusTab
 
@@ -266,19 +276,23 @@ def test_a_contour_identical_to_a_consensus_truth_differs_from_it_by_nothing(qap
     rows = _run(worker)
     by_source = {r["test_source_label"]: r for r in _dose_rows(rows)}
 
-    assert {r["metrics"]["dvh_basis"] for r in by_source.values()} == {DVH_FROM_MASK}
-    identical, different = by_source["ManualCopy"], by_source["VendorA"]
-    for key in DVH_KEYS:
-        assert identical["metrics"][f"{key}_diff"] == 0.0
-    assert different["metrics"]["dmean_gy_diff"] != 0.0
+    consensus = by_source.pop(entry.source_label)["metrics"]
+    assert consensus["dvh_basis"] == DVH_FROM_MASK
+    assert {r["metrics"]["dvh_basis"] for r in by_source.values()} == {DVH_FROM_CONTOURS}
 
-    # From its contours instead, the identical contour would have differed from
-    # the consensus: the difference taking the test from its contours reported.
-    consensus = by_source[entry.source_label]["metrics"]["dmean_gy"]
+    # Each test's value is its contour DVH, and its difference is taken from
+    # the one consensus value, so between sources the consensus cancels.
     ct = worker_module.read_image_series(
         worker_module.find_reference_image_series(library, "P1", sops["ManualCopy"])
     )
-    rtss = worker_module.read_rtstruct(worker._rtstruct_file_path("P1", sops["ManualCopy"]))
-    from_contours = structure_dvh(rtss, 1, _dose(), ct, worker._dvh_config)
-    assert abs(from_contours.metrics["dmean_gy"] - consensus) > 0.01
+    for source, row in by_source.items():
+        rtss = worker_module.read_rtstruct(worker._rtstruct_file_path("P1", sops[source]))
+        expected = structure_dvh(rtss, 1, _dose(), ct, worker._dvh_config).metrics
+        for key in DVH_KEYS:
+            assert row["metrics"][key] == pytest.approx(expected[key])
+            assert row["metrics"][f"{key}_diff"] == pytest.approx(expected[key] - consensus[key])
+    a, b = by_source["ManualCopy"]["metrics"], by_source["VendorA"]["metrics"]
+    assert a["dmean_gy_diff"] - b["dmean_gy_diff"] == pytest.approx(a["dmean_gy"] - b["dmean_gy"])
+    # The identical contour differs from the consensus by the mask's own error.
+    assert abs(by_source["ManualCopy"]["metrics"]["dmean_gy_diff"]) > 0.01
     builder.deleteLater()

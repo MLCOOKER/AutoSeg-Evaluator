@@ -297,13 +297,20 @@ Against the analytic truth, parameters beyond 3 % rise from 3.0 % (0.6 mm) to
 8.9 % (1.07 mm) and 9.8 % (1.37 mm) for the mask path and stay at 3.2–3.3 % for
 the contour path.
 
-**Decided 2026-09-29: against a mask reference, like for like.** Anything
-compared against a consensus (a Tab 2 consensus ground truth, or a drawer's
-STAPLE rows) takes its DVH from its own mask; a *DVH from* column names the
-basis on every dose row. Tested on shifted Nelms pairs with known true
-differences: the 95th-percentile error in the Dmean difference falls from
-1.0 % to 0.28 % on 1.07 mm pixels and from 2.0 % to 0.25 % on 1.37 mm, and every
-dose statistic's falls with it; a total volume difference does not improve.
+**Decided 2026-09-29, reverted 2026-09-30: every contour from its contours.**
+Taking anything compared against a consensus from its own mask ("like for
+like") was adopted on a test whose shifted Nelms pairs all turned out to have a
+true dose difference of zero: the dataset's shifted copies never move along
+their dose field, so both masks fell among the voxels alike and their errors
+cancelled — the identical-contour case, and there like for like cut the
+95th-percentile error in the Dmean difference from 2.0 % to 0.25 % on 1.37 mm
+pixels. Re-tested with the same copies in the field they do climb (true
+difference 0.5-1.5 Gy, exact for a linear field), it raised it from 2.1 % to
+3.0 %, and every dose statistic's with it, on both cohort grids. Real test
+contours differ from a consensus far more than half a voxel. So every contour
+takes its DVH from its contours and only the consensus from its mask: the
+consensus's error is then common to every source and cancels between them. The
+*DVH from* column still names the basis on every dose row.
 
 ### 8 — Validation report for the Stream B metrics
 

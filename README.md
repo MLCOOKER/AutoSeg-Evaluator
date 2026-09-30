@@ -317,10 +317,11 @@ reference implementation or published values:
   mask (a STAPLE consensus) is sampled over its voxels instead; for the same
   Nelms structure its Dmean is within 0.12 % of the contours' on the dataset's
   0.6 mm CT, and within 2.2 % on a 1.37 mm CT, where its volume differs by up
-  to 9.4 %. Anything compared against a consensus therefore takes its dose from
-  its own mask too, which cuts the error in a Dmean difference from 2.0 % to
-  0.25 % (95th percentile, 1.37 mm pixels). See
-  [`docs/DVH_MASK_VS_POLYGON.md`](docs/DVH_MASK_VS_POLYGON.md).
+  to 9.4 %. Contours compared against a consensus still take their dose from
+  their contours: the consensus's mask error is then common to every source and
+  cancels between them, while taking each contour from its own mask too adds an
+  independent error for any contour that does not coincide with the consensus.
+  See [`docs/DVH_MASK_VS_POLYGON.md`](docs/DVH_MASK_VS_POLYGON.md).
 
 The full per-ROI breakdowns are in
 [`docs/VALIDATION_REPORT.md`](docs/VALIDATION_REPORT.md) (masks + 3D metrics;
