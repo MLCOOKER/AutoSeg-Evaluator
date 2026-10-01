@@ -173,6 +173,16 @@ Each has a regression test that reproduces the audit's case
 
   Every method but v2's is the application's own `core.dvh`, so the report
   measures the code that runs. It needs the new `validation` extra.
+- **The surface-distance port against Google DeepMind's package**
+  (`scripts/validate_surface_distance_equivalence.py`,
+  `docs/SURFACE_DISTANCE_EQUIVALENCE.md`). 1,000 synthetic mask pairs (edge
+  cases, organ-sized, irregular, small and large shapes) at seven voxel
+  spacings, anisotropic ones included. The port's every per-element distance
+  and area, Dice, Hausdorff at five percentiles, both directional means and
+  Surface Dice at six tolerances, and the application's whole metric path from
+  images with physical spacing, are identical to the package's bit for bit. The
+  report also measures what passing the spacing in reverse axis order, as v1
+  did, would change.
 - **2D metrics against the analytical shapes**
   (`scripts/validate_polygon_analytic.py`,
   `docs/POLYGON_ANALYTIC_VALIDATION.md`). The 150 pairs of Boukerroui et al.

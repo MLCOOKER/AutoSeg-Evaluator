@@ -286,7 +286,12 @@ reference implementation or published values:
 - **3D mask metrics** — Dice, HD100, HD95, Surface Dice @ 3 mm and mean
   surface distance produce zero absolute difference vs
   `google-deepmind/surface-distance` (Nikolov et al. 2018) on every
-  ROI–metric comparison of a clinical head-and-neck sample dataset.
+  ROI–metric comparison of a clinical head-and-neck sample dataset. On 1,000
+  synthetic mask pairs at seven voxel spacings, anisotropic ones included,
+  the embedded port and the application's whole metric path are identical to
+  the package bit for bit: every per-element distance and area, Hausdorff at
+  five percentiles, both directional means and Surface Dice at six tolerances;
+  see [`docs/SURFACE_DISTANCE_EQUIVALENCE.md`](docs/SURFACE_DISTANCE_EQUIVALENCE.md).
 - **2D contour metrics** — both engines reproduce the published values of
   Boukerroui et al. (2023) on all 150 synthetic pairs through this
   application's own call path, and the default compiled engine does so from
@@ -326,6 +331,7 @@ reference implementation or published values:
 The full per-ROI breakdowns are in
 [`docs/VALIDATION_REPORT.md`](docs/VALIDATION_REPORT.md) (masks + 3D metrics;
 generated at v2.3.2, when it also covered the since-removed mask APL),
+[`docs/SURFACE_DISTANCE_EQUIVALENCE.md`](docs/SURFACE_DISTANCE_EQUIVALENCE.md),
 [`docs/POLYGON_VALIDATION_REPORT.md`](docs/POLYGON_VALIDATION_REPORT.md),
 [`docs/POLYGON_ANALYTIC_VALIDATION.md`](docs/POLYGON_ANALYTIC_VALIDATION.md),
 [`docs/RASTERISATION_FIDELITY.md`](docs/RASTERISATION_FIDELITY.md),
@@ -340,6 +346,7 @@ independently:
 
 ```bash
 python scripts/validate_against_upstream.py        --data <CT+RTSS folder>          --out docs/VALIDATION_REPORT.md
+python scripts/validate_surface_distance_equivalence.py                             --out docs/SURFACE_DISTANCE_EQUIVALENCE.md
 python scripts/validate_polygon_metrics.py         --data <published archives>      --out docs/POLYGON_VALIDATION_REPORT.md
 python scripts/validate_polygon_analytic.py        --package <review package>       --out docs/POLYGON_ANALYTIC_VALIDATION.md
 python scripts/validate_rasterisation_fidelity.py  --study <study>/project          --out docs/RASTERISATION_FIDELITY.md
