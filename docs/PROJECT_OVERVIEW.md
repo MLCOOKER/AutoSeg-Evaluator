@@ -489,7 +489,11 @@ every number is kept for a `.audit.json` beside the export (it cannot be
 recovered from a finished table).
 
 **STAPLE consensus parameters** (collapsible group):
-- `max_iterations` default 100 (BraTS / Asman & Landman convention).
+- `max_iterations` default 500, the spin box's maximum: a safeguard, high
+  enough that STAPLE converges as SimpleITK runs it on its own (SimpleITK sets
+  no practical limit). 100, the earlier default, stopped 2 of HN1's 55 organs
+  short of convergence. The *STAPLE converged* column flags any run that
+  reaches the cap.
 - `confidence_weight` default 1.0 (ITK docstring recommendation).
 - `target_fg_ratio_max` default 0.50 — the adaptive bbox's upper
   foreground-ratio target (Iglesias & Sabuncu 2015; Asman & Landman 2011).
@@ -1116,15 +1120,19 @@ IEEE TMI 2004). For each call:
 1. Build the union of all rater foregrounds.
 2. **Adaptive bounding-box sizing**: grow the union bbox padding one
    voxel-ring at a time until the foreground/total ratio falls to or below
-   `target_fg_ratio_max` (default 0.50, per Iglesias & Sabuncu 2015 and
-   Asman & Landman 2011). Only this upper target is enforced — padding can
-   only *lower* the ratio, so a sparse structure simply keeps its natural
-   (low) ratio. Cap at `bbox_padding_max_voxels = 25`. Keeps per-rater
-   specificity informative even for small structures (without this, a 5×5×5
-   lens in a 15×15×15 padded bbox has 3.7 % foreground → specificity ~1.0
-   → no diagnostic information).
-3. Run STAPLE on the cropped stack with `max_iterations=100`,
-   `confidence_weight=1.0`.
+   `target_fg_ratio_max` (default 0.50, a heuristic). Only this upper target
+   is enforced — padding can only *lower* the ratio, so a sparse structure
+   simply keeps its natural (low) ratio. Cap at `bbox_padding_max_voxels = 25`.
+   The crop chooses STAPLE's estimation domain: specificity and the
+   foreground prior are estimated from every voxel given, and over a whole CT
+   both are dominated by agreed background, so they would depend on the
+   scan's field of view rather than the contours. It is not needed to stop
+   small organs collapsing: on the HN1 sample whole-image STAPLE empties none
+   and agrees on 50 of 55 organs; the other five are larger by up to 8 %
+   (`docs/STAPLE_VALIDATION_REPORT.md`, *What the crop changes*). The
+   per-rater specificity reported is therefore relative to the box.
+3. Run STAPLE on the cropped stack with `max_iterations=500` (a safeguard;
+   STAPLE runs to convergence) and `confidence_weight=1.0`.
 4. Threshold at P ≥ 0.5 → binary consensus.
 5. Pad both the probability map and the binary consensus back to the
    original image extent.

@@ -28,15 +28,23 @@ def _cube(shape_xyz, lo_xyz, hi_xyz, spacing=(1.0, 1.0, 1.0)) -> sitk.Image:
 
 def test_staple_config_defaults():
     cfg = StapleConfig()
-    # MICCAI consensus pipeline defaults: 100 iterations, adaptive bbox
-    # targeting a <= 0.50 foreground-to-bbox ratio (upper target only).
-    assert cfg.max_iterations == 100
+    # An iteration cap high enough to converge (SimpleITK sets none), and an
+    # adaptive bbox targeting a <= 0.50 foreground-to-bbox ratio (upper only).
+    assert cfg.max_iterations == 500
     assert cfg.confidence_weight == 1.0
     assert cfg.target_fg_ratio_max == 0.50
     assert cfg.bbox_padding_min_voxels == 2
     assert cfg.bbox_padding_max_voxels == 25
     # The unused lower-ratio knob was removed (padding can only lower the ratio).
     assert not hasattr(cfg, "target_fg_ratio_min")
+
+
+def test_the_compute_tab_offers_the_same_iteration_default():
+    """The Reset button and an unset config must give the core's default."""
+    from autoseg_evaluator.ui.tabs.compute import _STAPLE_DEFAULTS
+
+    assert _STAPLE_DEFAULTS["max_iterations"] == StapleConfig().max_iterations
+    assert StapleConfig.from_dict({}).max_iterations == StapleConfig().max_iterations
 
 
 def test_staple_config_from_dict_round_trip():
@@ -190,16 +198,17 @@ def test_staple_converged_flag_set_when_elapsed_below_cap():
     assert result.elapsed_iterations < 100
 
 
-# ---- Bounding-box small-structure workaround ----------------------------
+# ---- Bounding-box crop ----------------------------------------------------
 
 
 def test_staple_bbox_crop_keeps_small_structures_visible():
-    """Small structures with a generous image around them shouldn't get
-    collapsed to zero — the union-bbox crop should rescale the prior.
+    """A small structure in a large image keeps a non-empty consensus, and the
+    adaptive sizer pads its box into the target foreground ratio.
 
-    A 3×3×3 cube in a 60×60×60 image — without the crop, STAPLE's prior
-    would be ~0.0005, plenty small enough to make the EM kill it. With the
-    crop the prior becomes ~5–10% of the cropped region, which is workable.
+    A 3×3×3 cube in a 60×60×60 image. The crop is a choice of estimation
+    domain (the structure's neighbourhood, not the field of view); whole-image
+    STAPLE does not empty small organs on the HN1 sample either, so this
+    checks the sizer, not a rescue.
     """
     a = _cube((60, 60, 60), (28, 28, 28), (31, 31, 31))
     b = _cube((60, 60, 60), (28, 28, 28), (31, 31, 31))

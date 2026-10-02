@@ -8,11 +8,16 @@ For each ``compute_staple`` call we:
 
 1. Compute the union bounding box of all input masks, pad it (so the
    probabilistic edges aren't clipped), and crop every mask to that ROI.
-   This is the "small-structure" workaround — STAPLE's automatic prior is
-   the average per-rater volume fraction of the whole image; for small
-   organs (lens, optic chiasm, cochlea) that fraction is so tiny the EM
-   algorithm collapses the consensus to zero. Cropping rescales the prior
-   to a more reasonable fraction of the relevant region.
+   STAPLE estimates each rater's specificity and the foreground prior from
+   every voxel it is given. Over a whole CT those are dominated by background
+   all raters agree on, so they depend on the scan's field of view rather than
+   on the contours: specificity tends to 1 and the prior to 0. Estimating in
+   the neighbourhood of the structure, where the raters' delineations differ,
+   keeps both about the contours. It is a choice of estimation domain, in the
+   spirit of STAPLE's consensus-region variants (Asman & Landman 2011), not a
+   rescue: on the HN1 sample whole-image STAPLE leaves no organ empty, the
+   cochleae included, and gives the same consensus for 50 of 55 organs; the
+   other five are larger by up to 8 % (docs/STAPLE_VALIDATION_REPORT.md).
 2. Run STAPLE on the cropped stack and read back per-rater
    sensitivity / specificity and the probabilistic truth.
 3. Threshold the probability map at 0.5 → binary consensus mask.
@@ -69,9 +74,13 @@ class StapleConfig:
 
     Defaults are aligned with published MICCAI consensus-contour pipelines:
 
-    * ``max_iterations=100`` matches the BraTS / MICCAI consensus challenges
-      (Bakas 2018; Asman & Landman 2011); SimpleITK's default of 5 is too
-      few to converge for clinical OARs.
+    * ``max_iterations=500`` is a safeguard, not part of the method. SimpleITK
+      itself sets no practical limit (its default is the largest unsigned
+      integer) and stops when the estimates converge, which is STAPLE as
+      published. A cap of 100 stopped 2 of the 55 organs of the HN1 sample
+      short of convergence (one needs 151 iterations); 500 lets every one
+      converge, so the result is SimpleITK's own, and a run that does reach it
+      says so in the *STAPLE converged* column. The Compute tab allows 1-500.
     * ``confidence_weight=1.0`` — "leave it alone" per the ITK docstring.
     * ``target_fg_ratio_max=0.50`` is the upper target for the adaptive
       bounding box. The padder grows the union bbox one voxel-ring at a
@@ -81,8 +90,11 @@ class StapleConfig:
       rather than trivially ~1.0. Only the upper bound is enforced:
       growing the box can only *lower* the ratio, and the box is never
       cropped inside the union, so a sparse structure simply keeps its
-      natural (low) ratio. Rationale: Iglesias & Sabuncu 2015; Asman &
-      Landman 2011.
+      natural (low) ratio. The value is a heuristic, not taken from the
+      literature. On the HN1 sample the union's own box is already below it
+      for every organ, so the padding stays at its 2-voxel minimum; a
+      25-voxel margin instead gives whole-image STAPLE's consensus on the five
+      organs where that differs (docs/STAPLE_VALIDATION_REPORT.md).
     * ``bbox_padding_min_voxels=2`` — always include this much boundary
       headroom regardless of ratio, so STAPLE has room to estimate the
       probabilistic edge.
@@ -90,7 +102,7 @@ class StapleConfig:
       expansion on tiny / sparse contours.
     """
 
-    max_iterations: int = 100
+    max_iterations: int = 500
     confidence_weight: float = 1.0
     target_fg_ratio_max: float = 0.50
     bbox_padding_min_voxels: int = 2
@@ -100,7 +112,7 @@ class StapleConfig:
     def from_dict(cls, d: dict | None) -> StapleConfig:
         d = dict(d or {})
         return cls(
-            max_iterations=int(d.get("max_iterations", 100)),
+            max_iterations=int(d.get("max_iterations", 500)),
             confidence_weight=float(d.get("confidence_weight", 1.0)),
             target_fg_ratio_max=float(d.get("target_fg_ratio_max", 0.50)),
             bbox_padding_min_voxels=int(d.get("bbox_padding_min_voxels", 2)),
@@ -183,11 +195,11 @@ def compute_staple(
         if m.GetSize() != reference.GetSize() or m.GetSpacing() != reference.GetSpacing():
             raise ValueError("STAPLE requires all masks to share geometry.")
 
-    # Crop to the union bounding box. Padding is chosen adaptively so the
-    # foreground-to-bbox ratio falls inside the target band (Iglesias 2015,
-    # Asman 2011) — keeps specificity informative for small structures
-    # without squeezing the boundary on large ones. Build the union once
-    # and reuse it for both the adaptive sizer and the final bbox.
+    # Crop to the union bounding box, so STAPLE estimates in the structure's
+    # neighbourhood rather than over the scan's field of view (see the module
+    # docstring). Padding is chosen adaptively against the foreground-ratio
+    # target. Build the union once and reuse it for both the adaptive sizer
+    # and the final bbox.
     image_size_xyz = reference.GetSize()
     union_mask = _build_union_mask(valid)
     chosen_padding, fg_ratio_after = _choose_adaptive_padding(

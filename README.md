@@ -311,7 +311,9 @@ reference implementation or published values:
 - **STAPLE consensus** — 55 / 55 multi-rater consensus computations
   bit-identical to a direct `SimpleITK.STAPLEImageFilter` invocation
   (Warfield et al. 2004): every per-rater sensitivity/specificity matched
-  to zero, every binary consensus voxel-identical.
+  to zero, every binary consensus voxel-identical. All 55 are also identical
+  to SimpleITK run on its own defaults, which set no iteration limit: STAPLE
+  converges in 2–151 iterations, inside the application's cap of 500.
 - **DVH** — against the analytic datasets of Nelms et al. (Med Phys 2015,
   42:4435), no dose-volume parameter is more than 3 % off with contours every
   0.2 mm (0 / 260) and 10 / 195 are with 1–3 mm contours and dose grids,

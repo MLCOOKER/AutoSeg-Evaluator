@@ -367,6 +367,25 @@ Each has a regression test that reproduces the audit's case
   own mask too).
 
 ### Changed
+- ⚠️ **STAPLE runs to convergence by default.** The iteration cap's default
+  rises from 100 to 500, the most the Compute tab allows. SimpleITK itself sets
+  no practical limit and stops when its estimates converge; the cap of 100 was
+  justified by a SimpleITK default of 5 that does not exist, and on the HN1
+  sample it stopped 2 of 55 organs short of convergence (the slowest needs 151
+  iterations). Their consensus masks were already identical; their per-rater
+  sensitivity and specificity move by up to 8e-6. The STAPLE report now also
+  compares every organ with SimpleITK run on its own defaults. A settings file
+  that saved 100 keeps it until *Reset to defaults* is pressed.
+- **What the STAPLE crop is for, said correctly and measured.** STAPLE runs in
+  the raters' union bounding box. The code justified this as keeping small
+  organs from collapsing to an empty consensus; on the HN1 sample whole-image
+  STAPLE empties no organ, the cochleae included. What the crop does is choose
+  the estimation domain: specificity and the foreground prior are estimated
+  from every voxel given, and over a whole CT both would depend on the scan's
+  field of view rather than the contours. The STAPLE report now compares the
+  cropped consensus with whole-image STAPLE: identical for 50 of 55 organs,
+  the other five larger over the whole image by up to 8 % (Dice ≥ 0.96). The
+  per-rater specificity reported is relative to the box. No result changes.
 - **One computation per results table.** Computing again replaces the table,
   after the user confirms, with the option to export it first; rows are never
   updated or merged, so every row in a table comes from one run with one set of

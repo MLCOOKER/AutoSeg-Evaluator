@@ -65,11 +65,12 @@ class _NoScrollSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
-# STAPLE parameter defaults — aligned with MICCAI consensus-contour pipelines
-# (Asman & Landman 2011; Iglesias & Sabuncu 2015; Bakas BraTS 2018). Surfaced
-# in the UI labels so the user can recover them and used by the Reset button.
+# STAPLE parameter defaults, as in core.staple.StapleConfig (which says why).
+# Surfaced in the UI labels so the user can recover them and used by the Reset
+# button. The iteration cap is the spin box's maximum, so by default STAPLE
+# runs to convergence, as SimpleITK does on its own.
 _STAPLE_DEFAULTS = {
-    "max_iterations": 100,
+    "max_iterations": 500,
     "confidence_weight": 1.0,
     "target_fg_ratio_max": 0.50,
 }
@@ -578,17 +579,18 @@ class ComputeTab(QWidget):
         # that per-rater specificity stays informative. Replaces the old
         # fixed-voxel padding that over-tightened large structures. Only an upper
         # target is exposed: padding can only lower the ratio, so a lower bound
-        # is not enforceable. Value from Iglesias & Sabuncu 2015; Asman 2011.
+        # is not enforceable. A heuristic; core.staple says what the crop is for.
         self._staple_fg_max_spin = _NoScrollSpinBox(box)
         self._staple_fg_max_spin.setDecimals(2)
         self._staple_fg_max_spin.setRange(0.05, 0.99)
         self._staple_fg_max_spin.setSingleStep(0.05)
         self._staple_fg_max_spin.setValue(_STAPLE_DEFAULTS["target_fg_ratio_max"])
         self._staple_fg_max_spin.setToolTip(
-            "Upper target for the adaptive bbox foreground ratio. The padder "
-            "grows the union bbox until foreground/total drops to (or below) "
-            "this value, keeping per-rater specificity informative even for "
-            "small structures."
+            "Upper target for the adaptive bbox foreground ratio. STAPLE is "
+            "estimated within the raters' union bounding box, so its specificity "
+            "and prior describe the structure's neighbourhood rather than the "
+            "scan's field of view; the padder grows that box until "
+            "foreground/total drops to (or below) this value."
         )
         self._staple_fg_max_spin.valueChanged.connect(self._emit_config_changed)
         layout.addRow(
