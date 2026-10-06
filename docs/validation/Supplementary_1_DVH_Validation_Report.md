@@ -7,7 +7,7 @@ AutoSeg Evaluator 2.6.1, commit 9dc078f · computed 2026-10-02 by `scripts/valid
 A dose-volume histogram (DVH) shows how much of a structure receives each dose, and AutoSeg Evaluator compares contours dosimetrically through statistics read from it, such as the mean dose (Dmean) or the dose received by the hottest 95 % of the structure (D95). AutoSeg Evaluator versions 1 and 2 computed DVHs with dicompyler-core 0.5.6 [2]. Version 3 computes them with its own method, which integrates the dose over the contour polygons directly. This validation asks two questions:
 
 1. **Is the v3 method accurate?** It is scored against DVHs whose true values are known exactly, beside v1-v2's dicompyler-core, the other methods considered, and two commercial systems.
-2. **What does a DVH from a binary mask cost?** A STAPLE consensus [3] exists only as a binary mask, with no contours, so its DVH has to come from its voxels. How far is a mask's DVH from the DVH of the same structure's contours? And when contours are compared with a consensus, should each contour's DVH come from a mask too, so that both are taken the same way?
+2. **What does a consensus's binary mask cost?** A STAPLE consensus [3] exists only as a binary mask, with no contours, so its DVH has to come from its voxels. What error does that add when a test structure set is compared with a consensus? And should the test's DVH be computed from a mask too, so that both are taken the same way?
 
 ## Method
 
@@ -40,14 +40,12 @@ The paper's own results for two commercial systems, Pinnacle³ (v9.8) and PlanIQ
 
 **Large structures.** One sphere or cylinder per size, from 4 to 6,220 cc, each timed on one machine, to weigh accuracy against computing time.
 
-**Mask against contours.** Every Nelms structure and dose was taken both ways: from its contours, and from the binary mask AutoSeg makes from those contours. That mask is what a STAPLE consensus of identical raters returns, which was checked. Masks were made on the Nelms CT and again with its pixels enlarged to 1.07 mm and 1.37 mm, keeping the slices. These are the most common and the coarsest in-plane pixel sizes among the planning CTs of the authors' clinical cohort. A mask's error depends on where a structure falls among the voxels, so each coarser grid was laid at 4 sub-pixel offsets.
+**Contours against a consensus mask.** A test structure set compared with a STAPLE consensus has its DVH difference taken between a contour and a mask. To measure the error this adds, the shifted copies in the Nelms dataset were used: the same shapes moved by 0.5, 1 or 1.5 mm, whose analytic values are known. Each shifted copy played the test contour, and its unshifted twin the reference, converted to the binary mask a STAPLE consensus of identical raters returns (checked below). Both shared the same dose grid, CT grid and sub-pixel offset, so the true dose difference between them is known exactly, and each way of taking the difference can be scored against it. The copies come in two kinds:
 
-To decide how a contour should be compared with a consensus, each shifted Nelms copy was treated as a test contour and its unshifted twin as the reference, on the same dose grid, CT grid and offset. The copies come in two kinds:
+- *across the gradient*: copies whose movement does not climb the dose field, so the true difference is 0 Gy;
+- *along the gradient*: copies whose movement climbs the 1 Gy/mm field, so the true difference is 0.5-1.5 Gy, known exactly because the field is linear.
 
-- copies shifted across the dose gradient, whose true dose difference from the twin is zero; and
-- copies shifted 0.5-1.5 mm along it, whose true difference is 0.5-1.5 Gy, known exactly because the field is linear.
-
-The DVH difference between test and reference was taken three ways: the test from its contours and the reference from its mask (AutoSeg's choice); both from masks ("like for like"); and both from contours, the best case, which only a reference with contours allows. Each was scored against the true difference.
+The difference was taken three ways: the test from its contours and the reference from its mask (*contour vs mask*, AutoSeg's choice); both from masks (*mask vs mask*); and both from contours (*contour vs contour*, the lower limit, which a consensus reference does not allow). Masks were made on the Nelms CT (0.6 mm pixels) and again with its pixels enlarged to 1.07 mm and 1.37 mm, keeping the slices: the most common and the coarsest in-plane pixel sizes among the planning CTs of the authors' clinical cohort. A mask's error depends on where a structure falls among the voxels, so each coarser grid was laid at 4 sub-pixel offsets.
 
 **Criterion.** As in Nelms et al., a statistic fails when it is more than 3 % from its analytic value. The statistics scored are the volume, Dmean, D99, D95, D5, D1 and D0.03cc. Dmin and Dmax are set aside, as the paper set them aside, being the least clinically relevant.
 
@@ -97,32 +95,21 @@ For large structures, the time for one structure against one dose, with AutoSeg'
 | cylinder, 3,177 cc | 1 mm | 0.72 | 52.06 | 0.006 |
 | cylinder, 6,220 cc | 1 mm | 1.25 | 102.33 | 0.155 |
 
-### DVH from a mask against DVH from the contours
+### A test contour against a consensus mask
 
-For the same structure, the difference between the DVH from its mask and the DVH from its contours, as % of the analytic value: 95th percentile / largest, over the 100 structure and dose combinations and, on the coarser grids, their 4 offsets.
+Error in the DVH difference between a test structure and a reference shifted 0.5-1.5 mm along the dose gradient (true difference 0.5-1.5 Gy), with each DVH computed from its binary mask or its polygon contours, on 1.37 mm pixels (60 pairs over 4 offsets): 95th percentile / largest error (measured minus true difference), as % of the reference's analytic value.
 
-| CT pixel | Volume | Dmean | D99 | D95 | D5 | D1 | D0.03cc |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0.6 mm (Nelms CT) | 1.47 / 3.76 | 0.04 / 0.12 | 3.70 / 4.83 | 0.00 / 2.78 | 0.00 / 0.97 | 0.75 / 0.85 | 0.20 / 3.34 |
-| 1.07 mm | 4.36 / 6.63 | 1.01 / 1.88 | 5.32 / 10.14 | 4.35 / 8.28 | 1.56 / 2.33 | 1.55 / 1.69 | 1.56 / 1.69 |
-| 1.37 mm | 5.42 / 9.41 | 2.10 / 2.17 | 8.20 / 13.82 | 3.75 / 11.28 | 1.45 / 2.19 | 1.52 / 2.21 | 2.12 / 2.21 |
+| Statistic | Mask vs mask | Contour vs mask (AutoSeg) | Contour vs contour |
+| --- | ---: | ---: | ---: |
+| Volume | 6.15 / 11.51 | 5.03 / 7.93 | 0.00 / 0.00 |
+| Dmean | 2.96 / 3.44 | 2.10 / 2.17 | 0.00 / 0.00 |
+| D99 | 20.45 / 29.10 | 12.40 / 15.85 | 2.90 / 3.14 |
+| D95 | 12.92 / 19.98 | 6.45 / 12.46 | 2.32 / 3.31 |
+| D5 | 2.53 / 3.62 | 1.90 / 2.28 | 0.54 / 0.72 |
+| D1 | 3.11 / 3.60 | 2.20 / 2.58 | 0.50 / 0.65 |
+| D0.03cc | 3.13 / 3.61 | 2.49 / 2.57 | 0.46 / 0.65 |
 
-Statistics more than 3 % from the analytic value, from each path, over every test and offset:
-
-| CT pixel | From the contours | From the mask |
-| --- | ---: | ---: |
-| 0.6 mm (Nelms CT) | 21/665 (3.2 %) | 20/665 (3.0 %) |
-| 1.07 mm | 88/2660 (3.3 %) | 237/2660 (8.9 %) |
-| 1.37 mm | 88/2660 (3.3 %) | 261/2660 (9.8 %) |
-
-A test contour against a consensus reference: the error in the measured DVH difference (measured minus true), as % of the reference's analytic value, 95th percentile over the volume and clinical doses. On the 1.37 mm grid, 120 pairs were shifted across the gradient and 60 along it, over the offsets.
-
-| CT pixel | Test contour shifted | Test from contours, reference from mask (AutoSeg) | Both from masks (like for like) | Both from contours (best case) |
-| --- | --- | ---: | ---: | ---: |
-| 1.07 mm | Across the gradient (true difference 0) | 3.70 % | 2.58 % | 0.00 % |
-| 1.07 mm | Along the gradient (true difference 0.5-1.5 Gy) | 4.58 % | 6.71 % | 1.78 % |
-| 1.37 mm | Across the gradient (true difference 0) | 3.75 % | 2.80 % | 0.00 % |
-| 1.37 mm | Along the gradient (true difference 0.5-1.5 Gy) | 5.43 % | 6.41 % | 2.03 % |
+On every grid and every statistic, mask vs mask had the largest error, and contour vs mask fell between it and contour vs contour. The same table for the 0.6 mm (Nelms CT) and 1.07 mm grids is in the full results. For copies shifted across the gradient, which in effect coincide with the reference, the order reverses: over all statistics on 1.37 mm pixels, the 95th-percentile error was 2.80 % for mask vs mask against 3.75 % for contour vs mask.
 
 Given three identical masks, STAPLE returned the mask itself for all 50 structures, so a consensus of agreeing raters is exactly the mask scored here.
 
@@ -132,9 +119,9 @@ Given three identical masks, STAPLE returned the mask itself for all 50 structur
 - **Why dicompyler-core was replaced.** As used in v1-v2 it had 119 and 140 statistics beyond 3 % in Tests 1 and 2, and reported D99 as 0 Gy in 49 of 100 cases. Reading D*x* correctly from its histogram still leaves 83 and 103, because it also samples the dose only once per dose voxel in each contour plane, so correcting it would not have been enough.
 - **Why contour polygons rather than a mask.** On the Nelms data the sub-sampled mask had 0, 10 and 10 statistics beyond 3 % in the three tests, against 0, 10 and 11 for AutoSeg v3; on the disc phantoms its worst error reached 0.64 Gy against 0.11 Gy. A mask includes or leaves out whole voxels where a contour cuts through them, which matters most for small structures; the polygons have no such staircase.
 - **Why the 0.25, 0.5 or 1 mm rule.** 0.25 mm sub-cells were the most accurate tested on Test 2 (10 statistics beyond 3 %, against 14 at 0.5 mm, 35 at 1 mm), but their number grows with a structure's volume. At 0.25 mm throughout, the largest structure (6,220 cc) took 102 s; the rule sampled it at 1 mm in 1.3 s, with a worst dose error equal to a 0.15 mm boundary shift. Every Nelms and disc structure fell within the cap, so the rule sampled each at 0.25 mm and its results there are those of the finest method.
-- **A consensus's DVH carries its mask's error.** For the same structure, the mask's Dmean differed from the contours' by at most 0.12 % on the Nelms CT and 2.17 % on 1.37 mm pixels, where the volume differed by up to 9.4 % and D99 by up to 13.8 %. The share of statistics beyond 3 % rose with the pixel size for the mask (3.0 % → 8.9 % → 9.8 %) but not for the contours (3.2 % → 3.3 % → 3.3 %).
-- **So every contour takes its DVH from its contours, and only a consensus from its mask.** Taking a test contour from its own mask as well (like for like) reduced the error only for copies shifted across the gradient, which in effect coincide with the reference. For copies shifted along the gradient, as a contour that genuinely differs from the consensus is, it was worse on every statistic at both clinical grids. With every contour taken from its contours, the consensus's mask error is the same in every source's DVH difference, and cancels when sources are compared with each other. The price is that a contour identical to the consensus differs from it by up to 2.17 % in Dmean on 1.37 mm pixels.
-- **Limits.** The Nelms structures are 3.6-12.2 cc. A mask's relative error grows as a structure shrinks against its voxels, so for smaller structures, such as a cochlea or the optic chiasm, a consensus's DVH will differ from contours by more than measured here. The shifts tested are rigid; a test contour differing in shape makes the two masks' errors less alike still. A consensus of raters who disagree is validated in Supplementary 5.
+- **A DVH difference against a consensus carries the consensus's mask error.** When a test structure set is compared with a STAPLE consensus, the error expected on 1.37 mm pixels is up to 2.1 % for Dmean and 12.4 % for D99 (95th percentile; 1.3 % and 8.5 % on 1.07 mm pixels). It comes from representing the consensus on the CT voxel grid: a mask includes or excludes whole voxels where a contour passes through them, which can shift its boundary by up to half a voxel.
+- **So every contour takes its DVH from its contours, and only a consensus from its mask.** Computing the test's DVH from a mask as well (mask vs mask) does not cancel the consensus's error but adds a second, independent one: for copies shifted along the gradient, as any contour that genuinely differs from the consensus is, it had the largest error on every grid and statistic. It helped only for copies shifted across the gradient, which in effect coincide with the reference. Because the consensus's error is the same for every source compared with it, it cancels when sources are compared with each other.
+- **Limits.** These values apply to the Nelms structures (3.6-12.2 cc) in a 1 Gy/mm dose gradient. Smaller structures, such as a cochlea or the optic chiasm, and steeper gradients will show larger errors, and larger structures or shallower gradients smaller ones. The shifts tested are rigid; a test contour differing in shape makes the two masks' errors less alike still. A consensus of raters who disagree is validated in Supplementary 5.
 
 ## References
 

@@ -28,15 +28,15 @@ sys.path.insert(0, str(SCRIPTS.parent / "src"))
 import validate_dvh_mask_vs_polygon as part_b  # noqa: E402
 import validate_dvh_methods as part_a  # noqa: E402
 from validate_dvh_mask_vs_polygon import (  # noqa: E402
+    ACROSS,
     ALONG,
     MASK,
     NATIVE,
     PHASES,
     POLYGON,
-    _pair,
-    _relative,
+    _design_errors,
     _shift_pairs,
-    beyond_three_percent,
+    _stats,
     design_summary,
     like_for_like_worse_along,
 )
@@ -84,10 +84,13 @@ METHOD_NAME = {
     "autoseg": "**AutoSeg v3**",
 }
 TEST_LABEL = {"1": "Test 1", "2": "Test 2", "2s": "Test 2, shifted"}
-SHIFT_LABEL = {
-    part_b.ACROSS: "Across the gradient (true difference 0)",
-    ALONG: "Along the gradient (true difference 0.5-1.5 Gy)",
-}
+#: The three ways of taking a test contour's DVH difference from a reference, as
+#: Supplementary 1 names them: (key, label, the test's path, the reference's path).
+COMPARISONS = (
+    ("masks", "Mask vs mask", MASK, MASK),
+    ("mixed", "Contour vs mask (AutoSeg)", POLYGON, MASK),
+    ("contours", "Contour vs contour", POLYGON, POLYGON),
+)
 
 
 # ---- Numbers ---------------------------------------------------------------------
@@ -262,25 +265,32 @@ def write_report(target: Path, a: dict, b: dict) -> None:
     sweep = {s: _sweep(nelms, s, main_mm) for s in (1.0, 0.5, main_mm)}
     big = _large(large)
     rule_fine = _rule_is_fine_everywhere(nelms, discs)
-    pairs = {g: _pair(records) for g, records in by_grid.items()}
-    n_pairs = len(pairs[NATIVE])
-    beyond = {
-        g: {p: beyond_three_percent(records, p) for p in (POLYGON, MASK)}
-        for g, records in by_grid.items()
+    # A test contour shifted along the gradient against its twin as the reference:
+    # per grid, comparison and statistic, the (median, 95th percentile, largest)
+    # error in the DVH difference, as % of the reference's analytic value.
+    along = {g: _shift_pairs(by_grid[g], design.get(g, []))[ALONG] for g in by_grid}
+    along_error = {
+        g: {
+            key: {m: _stats(_design_errors(along[g], m, test, ref)) for m in SUBSET}
+            for key, _label, test, ref in COMPARISONS
+        }
+        for g in by_grid
     }
-    designs = {
-        g: {k: design_summary(by_grid, design, g, k) for k in SHIFT_LABEL} for g in coarse_labels
-    }
-    shift_pairs = {
-        k: len(_shift_pairs(by_grid[coarsest], design.get(coarsest, []))[k]) for k in SHIFT_LABEL
-    }
+    masks_largest = all(
+        along_error[g]["masks"][m][1]
+        > max(along_error[g]["mixed"][m][1], along_error[g]["contours"][m][1])
+        for g in by_grid
+        for m in SUBSET
+    )
+    mixed_between = all(
+        along_error[g]["contours"][m][1] <= along_error[g]["mixed"][m][1]
+        for g in by_grid
+        for m in SUBSET
+    )
+    across = design_summary(by_grid, design, coarsest, ACROSS)
     along_worse = like_for_like_worse_along(by_grid, design)
     staple = b["extra"]["staple"]
     staple_same = sum(c["identical"] for c in staple)
-
-    def relative(g: str, metric: str) -> tuple[float, float]:
-        values = _relative(pairs[g], metric)
-        return float(np.percentile(values, 95)), float(max(values))
 
     v3 = {t: counts["autoseg"][t] for t in TEST_LABEL}
     beats_both = all(v3[t][0] < min(paper[s][t] for s in paper) for t in ("1", "2"))
@@ -303,11 +313,10 @@ def write_report(target: Path, a: dict, b: dict) -> None:
         "1. **Is the v3 method accurate?** It is scored against DVHs whose true values are",
         "   known exactly, beside v1-v2's dicompyler-core, the other methods considered, and",
         "   two commercial systems.",
-        "2. **What does a DVH from a binary mask cost?** A STAPLE consensus [3] exists only as",
-        "   a binary mask, with no contours, so its DVH has to come from its voxels. How far is",
-        "   a mask's DVH from the DVH of the same structure's contours? And when contours are",
-        "   compared with a consensus, should each contour's DVH come from a mask too, so that",
-        "   both are taken the same way?",
+        "2. **What does a consensus's binary mask cost?** A STAPLE consensus [3] exists only as",
+        "   a binary mask, with no contours, so its DVH has to come from its voxels. What error",
+        "   does that add when a test structure set is compared with a consensus? And should",
+        "   the test's DVH be computed from a mask too, so that both are taken the same way?",
         "",
         "## Method",
         "",
@@ -401,29 +410,31 @@ def write_report(target: Path, a: dict, b: dict) -> None:
         f"to {max(x['volume'] for x in big):,.0f} cc, each timed on one machine, to weigh",
         "accuracy against computing time.",
         "",
-        "**Mask against contours.** Every Nelms structure and dose was taken both ways: from",
-        "its contours, and from the binary mask AutoSeg makes from those contours. That mask",
-        "is what a STAPLE consensus of identical raters returns, which was checked. Masks were",
-        "made on the Nelms CT and again with its pixels enlarged to "
+        "**Contours against a consensus mask.** A test structure set compared with a STAPLE",
+        "consensus has its DVH difference taken between a contour and a mask. To measure the",
+        "error this adds, the shifted copies in the Nelms dataset were used: the same shapes",
+        "moved by 0.5, 1 or 1.5 mm, whose analytic values are known. Each shifted copy played",
+        "the test contour, and its unshifted twin the reference, converted to the binary mask a",
+        "STAPLE consensus of identical raters returns (checked below). Both shared the same",
+        "dose grid, CT grid and sub-pixel offset, so the true dose difference between them is",
+        "known exactly, and each way of taking the difference can be scored against it. The",
+        "copies come in two kinds:",
+        "",
+        "- *across the gradient*: copies whose movement does not climb the dose field, so the",
+        "  true difference is 0 Gy;",
+        "- *along the gradient*: copies whose movement climbs the 1 Gy/mm field, so the true",
+        "  difference is 0.5-1.5 Gy, known exactly because the field is linear.",
+        "",
+        "The difference was taken three ways: the test from its contours and the reference from",
+        "its mask (*contour vs mask*, AutoSeg's choice); both from masks (*mask vs mask*); and",
+        "both from contours (*contour vs contour*, the lower limit, which a consensus reference",
+        "does not allow). Masks were made on the Nelms CT (0.6 mm pixels) and again with its",
+        "pixels enlarged to "
         + " and ".join(coarse_labels)
-        + ", keeping the slices. These are the most common and the coarsest in-plane pixel",
-        "sizes among the planning CTs of the authors' clinical cohort. A mask's error depends",
-        "on where a structure falls among the voxels, so each coarser grid was laid at",
+        + ", keeping the slices: the most common and the coarsest in-plane pixel sizes among the",
+        "planning CTs of the authors' clinical cohort. A mask's error depends on where a",
+        "structure falls among the voxels, so each coarser grid was laid at",
         f"{len(PHASES)} sub-pixel offsets.",
-        "",
-        "To decide how a contour should be compared with a consensus, each shifted Nelms copy",
-        "was treated as a test contour and its unshifted twin as the reference, on the same",
-        "dose grid, CT grid and offset. The copies come in two kinds:",
-        "",
-        "- copies shifted across the dose gradient, whose true dose difference from the twin",
-        "  is zero; and",
-        "- copies shifted 0.5-1.5 mm along it, whose true difference is 0.5-1.5 Gy, known",
-        "  exactly because the field is linear.",
-        "",
-        "The DVH difference between test and reference was taken three ways: the test from its",
-        "contours and the reference from its mask (AutoSeg's choice); both from masks (\"like",
-        'for like"); and both from contours, the best case, which only a reference with',
-        "contours allows. Each was scored against the true difference.",
         "",
         "**Criterion.** As in Nelms et al., a statistic fails when it is more than 3 % from",
         "its analytic value. The statistics scored are the volume, Dmean, D99, D95, D5, D1 and",
@@ -537,67 +548,46 @@ def write_report(target: Path, a: dict, b: dict) -> None:
             ],
             "lrrrr",
         ),
-        "### DVH from a mask against DVH from the contours",
+        "### A test contour against a consensus mask",
         "",
-        "For the same structure, the difference between the DVH from its mask and the DVH from",
-        "its contours, as % of the analytic value: 95th percentile / largest, over the",
-        f"{n_pairs} structure and dose combinations and, on the coarser grids, their",
-        f"{len(PHASES)} offsets.",
-        "",
-        *md_table(
-            ["CT pixel", *(LABEL[k] for k in SUBSET)],
-            [
-                [
-                    _grid_name(g),
-                    *("{} / {}".format(*(_f(v) for v in relative(g, k))) for k in SUBSET),
-                ]
-                for g in by_grid
-            ],
-            "l" + "r" * len(SUBSET),
-        ),
-        "Statistics more than 3 % from the analytic value, from each path, over every test",
-        "and offset:",
+        "Error in the DVH difference between a test structure and a reference shifted",
+        "0.5-1.5 mm along the dose gradient (true difference 0.5-1.5 Gy), with each DVH",
+        f"computed from its binary mask or its polygon contours, on {coarsest} pixels",
+        f"({len(along[coarsest])} pairs over {len(PHASES)} offsets): 95th percentile / largest",
+        "error (measured minus true difference), as % of the reference's analytic value.",
         "",
         *md_table(
-            ["CT pixel", "From the contours", "From the mask"],
+            ["Statistic", *(label for _k, label, _t, _r in COMPARISONS)],
             [
                 [
-                    _grid_name(g),
+                    LABEL[m],
                     *(
-                        f"{beyond[g][p][0]}/{beyond[g][p][1]} "
-                        f"({100 * beyond[g][p][0] / beyond[g][p][1]:.1f} %)"
-                        for p in (POLYGON, MASK)
+                        f"{_f(along_error[coarsest][key][m][1])} /"
+                        f" {_f(along_error[coarsest][key][m][2])}"
+                        for key, _l, _t, _r in COMPARISONS
                     ),
                 ]
-                for g in by_grid
+                for m in SUBSET
             ],
-            "lrr",
+            "lrrr",
         ),
-        "A test contour against a consensus reference: the error in the measured DVH",
-        "difference (measured minus true), as % of the reference's analytic value, 95th",
-        "percentile over the volume and clinical doses. On the "
-        f"{coarsest} grid, {shift_pairs[part_b.ACROSS]} pairs were shifted across the",
-        f"gradient and {shift_pairs[ALONG]} along it, over the offsets.",
+        (
+            "On every grid and every statistic, mask vs mask had the largest error"
+            if masks_largest
+            else "Mask vs mask did not have the largest error on every grid and statistic"
+        )
+        + (
+            ", and contour vs mask fell between it and contour vs contour."
+            if mixed_between
+            else "."
+        )
+        + " The same table for the "
+        + " and ".join(_grid_name(g) for g in by_grid if g != coarsest)
+        + " grids is in the full results. For copies shifted across the gradient, which in"
+        " effect coincide with the reference, the order reverses: over all statistics on"
+        f" {coarsest} pixels, the 95th-percentile error was {across['masks']:.2f} % for mask vs"
+        f" mask against {across['mixed']:.2f} % for contour vs mask.",
         "",
-        *md_table(
-            [
-                "CT pixel",
-                "Test contour shifted",
-                "Test from contours, reference from mask (AutoSeg)",
-                "Both from masks (like for like)",
-                "Both from contours (best case)",
-            ],
-            [
-                [
-                    g,
-                    SHIFT_LABEL[k],
-                    *(f"{designs[g][k][d]:.2f} %" for d in ("mixed", "masks", "contours")),
-                ]
-                for g in coarse_labels
-                for k in SHIFT_LABEL
-            ],
-            "llrrr",
-        ),
         "Given three identical masks, STAPLE returned the mask itself for "
         + (
             f"all {len(staple)} structures"
@@ -687,54 +677,42 @@ def write_report(target: Path, a: dict, b: dict) -> None:
         ]
 
     # A consensus DVH, and the design choice.
-    nat_dmean = relative(NATIVE, "dmean")[1]
-    co_dmean, co_volume, co_d99 = (
-        relative(coarsest, "dmean")[1],
-        relative(coarsest, "volume_cc")[1],
-        relative(coarsest, "d99")[1],
-    )
-    rate = {
-        g: {p: 100 * beyond[g][p][0] / beyond[g][p][1] for p in (POLYGON, MASK)} for g in by_grid
-    }
-    grid_order = list(by_grid)
+    other = next(g for g in coarse_labels if g != coarsest)
     lines += [
-        "- **A consensus's DVH carries its mask's error.** For the same structure, the mask's",
-        f"  Dmean differed from the contours' by at most {_f(nat_dmean)} % on the Nelms CT and"
-        f" {_f(co_dmean)} %",
-        f"  on {coarsest} pixels, where the volume differed by up to {_f(co_volume, 1)} % and"
-        f" D99 by up to {_f(co_d99, 1)} %.",
-        "  The share of statistics beyond 3 % rose with the pixel size for the mask ("
-        + " → ".join(f"{rate[g][MASK]:.1f} %" for g in grid_order)
-        + ") but not for the contours ("
-        + " → ".join(f"{rate[g][POLYGON]:.1f} %" for g in grid_order)
-        + ").",
+        "- **A DVH difference against a consensus carries the consensus's mask error.** When",
+        "  a test structure set is compared with a STAPLE consensus, the error expected on"
+        f" {coarsest} pixels is up to {_f(along_error[coarsest]['mixed']['dmean'][1], 1)} % for"
+        f" Dmean and {_f(along_error[coarsest]['mixed']['d99'][1], 1)} % for D99 (95th"
+        f" percentile; {_f(along_error[other]['mixed']['dmean'][1], 1)} % and"
+        f" {_f(along_error[other]['mixed']['d99'][1], 1)} % on {other} pixels). It comes from",
+        "  representing the consensus on the CT voxel grid: a mask includes or excludes whole",
+        "  voxels where a contour passes through them, which can shift its boundary by up to",
+        "  half a voxel.",
     ]
-    if along_worse:
+    if masks_largest and along_worse:
         lines += [
             "- **So every contour takes its DVH from its contours, and only a consensus from",
-            "  its mask.** Taking a test contour from its own mask as well (like for like)",
-            "  reduced the error only for copies shifted across the gradient, which in effect",
-            "  coincide with the reference. For copies shifted along the gradient, as a contour",
-            "  that genuinely differs from the consensus is, it was worse on every statistic at",
-            "  both clinical grids. With every contour taken from its contours, the consensus's",
-            "  mask error is the same in every source's DVH difference, and cancels when sources",
-            "  are compared with each other. The price is that a contour identical to the",
-            f"  consensus differs from it by up to {_f(co_dmean)} % in Dmean on {coarsest} pixels.",
+            "  its mask.** Computing the test's DVH from a mask as well (mask vs mask) does not",
+            "  cancel the consensus's error but adds a second, independent one: for copies",
+            "  shifted along the gradient, as any contour that genuinely differs from the",
+            "  consensus is, it had the largest error on every grid and statistic. It helped only",
+            "  for copies shifted across the gradient, which in effect coincide with the",
+            "  reference. Because the consensus's error is the same for every source compared",
+            "  with it, it cancels when sources are compared with each other.",
         ]
     else:
         lines += [
-            "- **Like for like was not worse on every statistic for contours shifted along the",
-            "  gradient,** so the choice to take every contour's DVH from its contours needs",
-            "  the full results' design tables to be re-read.",
+            "- **Mask vs mask was not worse on every grid and statistic for contours shifted",
+            "  along the gradient,** so the choice to take every contour's DVH from its contours",
+            "  needs the full results' design tables to be re-read.",
         ]
     lines += [
-        f"- **Limits.** The Nelms structures are {min(volumes):.1f}-{max(volumes):.1f} cc. A"
-        " mask's relative error grows as a",
-        "  structure shrinks against its voxels, so for smaller structures, such as a cochlea",
-        "  or the optic chiasm, a consensus's DVH will differ from contours by more than",
-        "  measured here. The shifts tested are rigid; a test contour differing in shape makes",
-        "  the two masks' errors less alike still. A consensus of raters who disagree is",
-        "  validated in Supplementary 5.",
+        f"- **Limits.** These values apply to the Nelms structures ({min(volumes):.1f}-"
+        f"{max(volumes):.1f} cc) in a 1 Gy/mm dose gradient. Smaller structures, such as a",
+        "  cochlea or the optic chiasm, and steeper gradients will show larger errors, and",
+        "  larger structures or shallower gradients smaller ones. The shifts tested are rigid;",
+        "  a test contour differing in shape makes the two masks' errors less alike still. A",
+        "  consensus of raters who disagree is validated in Supplementary 5.",
         "",
         "## References",
         "",
