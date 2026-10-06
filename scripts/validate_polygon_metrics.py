@@ -29,7 +29,7 @@ Usage::
     python scripts/validate_polygon_metrics.py --suite adapter
     python scripts/validate_polygon_metrics.py --suite dicom \\
         --data "<folder with the three Resolution.zip archives>" \\
-        --out docs/POLYGON_VALIDATION_REPORT.md
+        --out docs/archive/POLYGON_VALIDATION_REPORT.md
 """
 
 from __future__ import annotations

@@ -845,7 +845,7 @@ sets the step explicitly rather than inheriting the production one.
 
 Layer 4 needs the original archives, which do not belong in git. It follows the
 existing repo idiom — `scripts/validate_polygon_metrics.py --data <folder> --out
-docs/POLYGON_VALIDATION_REPORT.md`, report committed, data not. A small fixture
+docs/archive/POLYGON_VALIDATION_REPORT.md`, report committed, data not. A small fixture
 subset is committed for CI. v0.2 also ships compact fixtures at 1.7 MB total,
 which may make the in-repo subset unnecessary.
 
@@ -903,7 +903,7 @@ an ROI compared against five sources should be prepared once.
 |---|---|---|
 | 1 | ✅ **Done.** Both engines vendored, integrity tests, 105 supplier tests, acceptance wrapper, CI Linux build step, `shapely` declared | none |
 | 2 | ✅ **Done.** `contour_grid.py`, `polygon_metrics.py`, engine selection + fallback, 30 tests | none |
-| 3 | ✅ **Done.** Four acceptance layers, differential, `docs/POLYGON_VALIDATION_REPORT.md` | none |
+| 3 | ✅ **Done.** Four acceptance layers, differential, `docs/archive/POLYGON_VALIDATION_REPORT.md` | none |
 | 4 | ✅ **Done.** Worker integration, availability, caching, 8 tests | metrics computed |
 | 5 | ✅ **Done.** Tab 5 split, settings round-trip, 6 tests | metrics selectable |
 | 6 | ✅ **Done.** Declared columns, `2D`/`3D` naming, Report families, definitions dialog, optional two-stream sidecar | metrics reportable |

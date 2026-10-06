@@ -24,10 +24,11 @@ apart can they be for the same structure?
 
 Usage::
 
-    python scripts/validate_dvh_mask_vs_polygon.py --nelms <Nelms dataset folder> \\
-        --out docs/DVH_MASK_VS_POLYGON.md
+    python scripts/validate_dvh_mask_vs_polygon.py --nelms <Nelms dataset folder>
 
-It needs the ``validation`` extra (openpyxl). Every input is synthetic.
+It keeps its results (``validation_common.save_results``) and rewrites
+Supplementary 1, which ``supplementary_1_dvh.py`` builds from them and from
+``validate_dvh_methods.py``'s. It needs the ``validation`` extra (openpyxl). Every input is synthetic.
 """
 
 from __future__ import annotations
@@ -37,7 +38,6 @@ import math
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -56,6 +56,7 @@ from validate_dvh_methods import (  # noqa: E402
     NELMS_CT,
     NELMS_DOSE,
     NELMS_GRADIENT,
+    RESULT_TYPES,
     TEST_NAMES,
     Case,
     NelmsRow,
@@ -70,7 +71,7 @@ from validate_dvh_methods import (  # noqa: E402
     read_nelms_rows,
     table,
 )
-from validation_common import git_revision  # noqa: E402
+from validation_common import load_results, run_info, save_results  # noqa: E402
 
 from autoseg_evaluator.core.dvh import DoseGrid, mask_dvh, structure_dvh  # noqa: E402
 from autoseg_evaluator.core.masks import mask_with_reading  # noqa: E402
@@ -495,6 +496,22 @@ def _relative(pairs: list[tuple], metric: str) -> list[float]:
     ]
 
 
+def beyond_three_percent(records: list[dict], path: str) -> tuple[int, int]:
+    """Volume and clinical-dose parameters beyond 3 % of the truth, over every test and offset.
+
+    Counted per offset, then summed: the volume is counted once per structure
+    and dose grid within an offset, and a mask's volume changes with it.
+    """
+    n = total = 0
+    for phase in {r.get("phase") for r in records}:
+        chosen = [r for r in records if r.get("phase") == phase]
+        for t in TESTS:
+            counts = nelms_counts(chosen, t, path)
+            n += sum(counts[k][0] for k in ("volume_cc", *CLINICAL))
+            total += sum(counts[k][1] for k in ("volume_cc", *CLINICAL))
+    return n, total
+
+
 def grid_section(by_grid: dict[str, list[dict]]) -> list[str]:
     """The same comparison with the mask made on coarser in-plane pixels."""
     lines = [
@@ -515,15 +532,7 @@ def grid_section(by_grid: dict[str, list[dict]]) -> list[str]:
     for label, records in by_grid.items():
         cells = [GRID_NAME.get(label, label)]
         for path in PATHS:
-            # Per offset, then summed: the volume is counted once per structure
-            # and dose grid within an offset, and a mask's volume changes with it.
-            n = total = 0
-            for phase in {r.get("phase") for r in records}:
-                chosen = [r for r in records if r.get("phase") == phase]
-                for t in TESTS:
-                    counts = nelms_counts(chosen, t, path)
-                    n += sum(counts[k][0] for k in ("volume_cc", *CLINICAL))
-                    total += sum(counts[k][1] for k in ("volume_cc", *CLINICAL))
+            n, total = beyond_three_percent(records, path)
             cells.append(f"{n}/{total} ({100 * n / total:.1f} %)")
         pairs = _pair(records)
         shift = max(
@@ -627,6 +636,24 @@ def _design_errors(pairs, metric: str, test_path: str, ref_path: str) -> list[fl
     return errors
 
 
+def like_for_like_worse_along(
+    by_grid: dict[str, list[dict]], design: dict[str, list[dict]]
+) -> bool:
+    """Whether taking the test from its mask loses on every statistic at every coarser grid.
+
+    For the copies shifted along the field, at the 95th percentile: the finding
+    the choice of DVH path rests on.
+    """
+    return all(
+        _stats(_design_errors(pairs, metric, MASK, MASK))[1]
+        > _stats(_design_errors(pairs, metric, POLYGON, MASK))[1]
+        for label, records in by_grid.items()
+        if label != NATIVE
+        for pairs in (_shift_pairs(records, design.get(label, []))[ALONG],)
+        for metric in DESIGN_METRICS
+    )
+
+
 def design_section(by_grid: dict[str, list[dict]], design: dict[str, list[dict]]) -> list[str]:
     """Which way of taking a DVH difference against a mask reference is closest to the truth."""
     lines = [
@@ -695,16 +722,7 @@ def design_section(by_grid: dict[str, list[dict]], design: dict[str, list[dict]]
                 + (f", and raises it for {', '.join(worse)}." if worse else "."),
                 "",
             ]
-    # Whether like for like loses on every statistic at every coarser grid when
-    # the shift climbs the field: the finding the conclusion rests on.
-    along_worse = all(
-        _stats(_design_errors(pairs, metric, MASK, MASK))[1]
-        > _stats(_design_errors(pairs, metric, POLYGON, MASK))[1]
-        for label, records in by_grid.items()
-        if label != NATIVE
-        for pairs in (_shift_pairs(records, design.get(label, []))[ALONG],)
-        for metric in DESIGN_METRICS
-    )
+    along_worse = like_for_like_worse_along(by_grid, design)
     lines += [
         "Taking the test from its mask cancels the mask's error only where the two",
         "masks fall among the voxels alike along the dose gradient. The copies",
@@ -751,89 +769,26 @@ def design_summary(
     }
 
 
-def write_report(
-    target: Path, by_grid: dict[str, list[dict]], extra: dict, seconds: float, revision: str
-) -> None:
+#: The name this script's results are cached under (``validation_common``).
+RESULTS_NAME = "dvh_mask_vs_polygon"
+
+
+def load() -> dict:
+    """This script's last results, as :func:`main` kept them."""
+    return load_results(RESULTS_NAME, RESULT_TYPES)
+
+
+def full_results_part(data: dict) -> list[str]:
+    """Every table this script computes, for Supplementary 1's full results."""
+    by_grid, extra = data["by_grid"], data["extra"]
     records = by_grid[NATIVE]
     design = extra.get("design", {})
     pairs = _pair(records)
-    coarse = _pair(by_grid[grid_label(PIXELS_MM[-1])])
     failures = [r for r in records if r["result"].error]
-    clinical_rel = [
-        abs(m.metrics[k] - p.metrics[k]) / row.truth[k] * 100.0
-        for row, p, m in pairs
-        for k in CLINICAL
-        if math.isfinite(m.metrics[k]) and math.isfinite(p.metrics[k])
-    ]
-    dmean_rel = [
-        abs(m.metrics["dmean"] - p.metrics["dmean"]) / row.truth["dmean"] * 100.0
-        for row, p, m in pairs
-    ]
-    volume_rel = [
-        abs(m.metrics["volume_cc"] - p.metrics["volume_cc"]) / row.truth["volume_cc"] * 100.0
-        for row, p, m in pairs
-    ]
-    counts = {
-        p: sum(nelms_counts(records, t, p)[k][0] for t in TESTS for k in ("volume_cc", *CLINICAL))
-        for p in PATHS
-    }
-    total = sum(
-        nelms_counts(records, t, POLYGON)[k][1] for t in TESTS for k in ("volume_cc", *CLINICAL)
-    )
     staple_ok = all(c["identical"] for c in extra["staple"])
 
     lines = [
-        "# DVH from a mask against DVH from the contours",
-        "",
-        "Generated by `scripts/validate_dvh_mask_vs_polygon.py`. Regenerate it rather",
-        "than editing it.",
-        "",
-        f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC · AutoSeg Evaluator, {revision} · "
-        f"{len(pairs)} structure/dose cases from Nelms et al. 2015 · {seconds:.0f} s",
-        "",
-        "## In brief",
-        "",
-        f"- **Against the analytic truth**, the contour path has {counts[POLYGON]} of {total} volume",
-        "  and clinical dose parameters beyond 3 % over Tests 1 and 2 (aligned and shifted); the mask",
-        f"  path {counts[MASK]}. Nelms et al. set Dmin and Dmax aside, as these counts do.",
-        f"- **For the same structure, a mask's Dmean differs from the contours' by at most "
-        f"{_f(max(dmean_rel))} %**",
-        f"  (median {_f(float(np.median(dmean_rel)))} %), its volume by at most {_f(max(volume_rel))} % "
-        f"(median {_f(float(np.median(volume_rel)))} %),",
-        f"  and any clinical dose parameter by at most {_f(max(clinical_rel))} % "
-        f"(95th percentile {_f(float(np.percentile(clinical_rel, 95)))} %).",
-        f"- **On 1.37 mm pixels, the coarsest in this project's cohort,** the differences grow: Dmean up to "
-        f"{_f(max(_relative(coarse, 'dmean')))} % (95th percentile "
-        f"{_f(float(np.percentile(_relative(coarse, 'dmean'), 95)))} %), volume up to "
-        f"{_f(max(_relative(coarse, 'volume_cc')))} % (95th percentile "
-        f"{_f(float(np.percentile(_relative(coarse, 'volume_cc'), 95)))} %),",
-        f"  and any clinical dose parameter up to "
-        f"{_f(max(v for k in CLINICAL for v in _relative(coarse, k)))} % "
-        f"(95th percentile {_f(float(np.percentile([v for k in CLINICAL for v in _relative(coarse, k)], 95)))} %).",
-        "- **Against a mask reference**, the error in a test contour's DVH difference (95th percentile",
-        "  over volume and clinical doses, with the test from its contours → from its mask; both from",
-        "  contours in brackets) is, for a copy shifted across the field (true difference zero), "
-        + "; ".join(
-            f"{GRID_NAME[g].split(' (')[0]}: {v['mixed']:.2f} → {v['masks']:.2f} % ({v['contours']:.2f} %)"
-            for g, v in (
-                (g, design_summary(by_grid, design, g, ACROSS)) for g in by_grid if g != NATIVE
-            )
-        )
-        + "; and for one shifted along it (true difference 0.5-1.5 Gy), "
-        + "; ".join(
-            f"{GRID_NAME[g].split(' (')[0]}: {v['mixed']:.2f} → {v['masks']:.2f} % ({v['contours']:.2f} %)"
-            for g, v in (
-                (g, design_summary(by_grid, design, g, ALONG)) for g in by_grid if g != NATIVE
-            )
-        )
-        + ". So AutoSeg takes every contour from its contours and only a consensus from its mask",
-        "  (see the design section).",
-        "- **A unanimous STAPLE consensus is the raters' own mask** "
-        + (
-            f"voxel for voxel on all {len(extra['staple'])} structures, so the mask path is what a consensus of agreeing raters is scored with."
-            if staple_ok
-            else "on only some structures; see the check below."
-        ),
+        f"{len(pairs)} structure/dose cases from Nelms et al. 2015, each through both paths.",
         "",
         "## The two paths",
         "",
@@ -908,29 +863,16 @@ def write_report(
         "The Nelms structures are 3.6-12 cc. A mask's relative error grows as a",
         "structure shrinks against its voxels, so for smaller structures -- a",
         "cochlea, the optic chiasm -- expect larger differences than these, and for",
-        "large organs smaller. `docs/DVH_METHOD_VALIDATION.md` measures both paths",
-        "on disc phantoms of 2.5-20 mm radius, where the truth is exact for the",
-        "contours as drawn. The design comparison uses rigid shifts of 0.5-1.5 mm;",
-        "a test contour whose shape differs from the reference's is not tested,",
-        "though a difference in shape makes the two masks' errors less alike still.",
-        "Consensus masks of raters who disagree are a different question, answered",
-        "by the STAPLE validation, not this.",
-        "",
-        "## Source",
-        "",
-        "Nelms B, Stambaugh C, Hunt D, Tonner B, Zhang G, Feygelman V. Methods,",
-        "software and datasets to verify DVH calculations against analytical values:",
-        "twenty years late(r). *Med Phys* 2015;42(8):4435-48. doi:10.1118/1.4923175.",
-        "",
-        "Reproduce with:",
-        "",
-        "```",
-        "python scripts/validate_dvh_mask_vs_polygon.py --nelms <Nelms dataset folder> \\",
-        "    --out docs/DVH_MASK_VS_POLYGON.md",
-        "```",
+        "large organs smaller. Part A measures both paths on disc phantoms of",
+        "2.5-20 mm radius, where the truth is exact for the contours as drawn. The",
+        "design comparison uses rigid shifts of 0.5-1.5 mm; a test contour whose",
+        "shape differs from the reference's is not tested, though a difference in",
+        "shape makes the two masks' errors less alike still. Consensus masks of",
+        "raters who disagree are a different question, answered by the STAPLE",
+        "validation (Supplementary 5), not this.",
         "",
     ]
-    target.write_text("\n".join(lines), encoding="utf-8")
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -938,14 +880,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--nelms", type=Path, required=True, help="Folder of the Nelms et al. 2015 dataset."
     )
-    parser.add_argument("--out", type=Path, required=True, help="Write the markdown report here.")
     args = parser.parse_args(argv)
 
     started = time.perf_counter()
+    info = run_info()
     by_grid, extra = run(args.nelms)
-    seconds = time.perf_counter() - started
-    write_report(args.out, by_grid, extra, seconds, git_revision())
-    print(f"wrote {args.out} ({seconds:.0f} s)")
+    data = {
+        "run": info,
+        "seconds": time.perf_counter() - started,
+        "by_grid": by_grid,
+        "extra": extra,
+    }
+    print(f"kept the results in {save_results(RESULTS_NAME, data)}")
+    from supplementary_1_dvh import render  # here: it imports this module
+
+    try:
+        for path in render():
+            print(f"wrote {path}")
+    except FileNotFoundError as missing:
+        print(f"Supplementary 1 not written yet: {missing}")
     return 0
 
 

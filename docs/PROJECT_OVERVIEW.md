@@ -129,7 +129,7 @@ for what each moves):
 - The DVH is integrated over the contours by AutoSeg itself (v3) rather than
   taken from dicompyler-core (v2): measured against analytic truth,
   dicompyler-core's sampling and D{X} lookup were the largest DVH errors
-  (`docs/DVH_METHOD_VALIDATION.md`).
+  (Supplementary 1, `docs/validation/`).
 
 ---
 
@@ -794,7 +794,7 @@ around the perimeter, i.e. a relative volume over-estimate of ~`1.5 / R`
 voxels across. Measured against analytic disc phantoms the continuous backend
 is within ~2 % for R ≥ 10 while legacy is +13.6 %; across 357 HN1 ROIs legacy
 was larger in **every** case. See
-[`docs/RASTERISER_COMPARISON.md`](RASTERISER_COMPARISON.md) and
+[`docs/archive/RASTERISER_COMPARISON.md`](archive/RASTERISER_COMPARISON.md) and
 `scripts/compare_rasterisers.py`.
 
 **Supported contour geometry:** `legacy` accepts only `CLOSED_PLANAR` (judged
@@ -998,7 +998,7 @@ judged on the reported (larger-direction) value (spec D9). A structure set
 whose references name nothing in the loaded data is read from its coordinates
 (spec D8).
 
-**Validation.** [`POLYGON_VALIDATION_REPORT.md`](POLYGON_VALIDATION_REPORT.md):
+**Validation.** [`archive/POLYGON_VALIDATION_REPORT.md`](archive/POLYGON_VALIDATION_REPORT.md):
 the supplier's 150 published pairs and 44 stress cases, then the same pairs
 through this application's adapter and from the DICOM files through its own
 grid and reading, all within the suppliers' thresholds (largest disagreement
@@ -1015,7 +1015,7 @@ Commit `7b6cec1` is the last that computes it.
 ## Dose-volume histogram (DVH)
 
 **File:** [`src/autoseg_evaluator/core/dvh.py`](../src/autoseg_evaluator/core/dvh.py).
-**Validated in** [`DVH_METHOD_VALIDATION.md`](DVH_METHOD_VALIDATION.md)
+**Validated in** [Supplementary 1](validation/Supplementary_1_DVH_Validation_Report.md)
 (`scripts/validate_dvh_methods.py`).
 
 Since v3.0.0 the dose is integrated over the contours themselves; until then
@@ -1056,7 +1056,7 @@ error in a difference is therefore the consensus's own: the same for every
 source, so it cancels between sources, though a contour identical to the
 consensus differs from it by up to about 2 % in Dmean on 1.37 mm pixels.
 Taking each contour from its own mask as well was tried and reverted
-(2026-09-30): `docs/DVH_MASK_VS_POLYGON.md` shows it removes that error only
+(2026-09-30): Supplementary 1 (part B) shows it removes that error only
 for contours that coincide with the consensus, and for a contour shifted even
 half a voxel along the dose gradient adds a second, independent one.
 
@@ -1129,7 +1129,7 @@ IEEE TMI 2004). For each call:
    scan's field of view rather than the contours. It is not needed to stop
    small organs collapsing: on the HN1 sample whole-image STAPLE empties none
    and agrees on 50 of 55 organs; the other five are larger by up to 8 %
-   (`docs/STAPLE_VALIDATION_REPORT.md`, *What the crop changes*). The
+   (Supplementary 5, `docs/validation/`). The
    per-rater specificity reported is therefore relative to the box.
 3. Run STAPLE on the cropped stack with `max_iterations=500` (a safeguard;
    STAPLE runs to convergence) and `confidence_weight=1.0`.
@@ -1515,12 +1515,12 @@ a PHI-safe markdown report under `docs/` and reproducible via a script under
 
 | Engine | Reference | Result | Report |
 |---|---|---|---|
-| `legacy` mask rasterisation | PlatiPy 0.7.2 | 110/110 ROIs voxel-exact | `VALIDATION_REPORT.md` |
-| 5 surface-distance metrics | `surface-distance` | 45/45 comparisons Δ = 0 | `VALIDATION_REPORT.md` (its 63 also covered the since-removed mask APL) |
-| 2D contour metrics | the suppliers' published values | 150/150 pairs through the adapter and from DICOM; largest error ~5e-10 mm; 44 stress cases | `POLYGON_VALIDATION_REPORT.md` |
+| `legacy` mask rasterisation | PlatiPy 0.7.2 | 110/110 ROIs voxel-exact | `archive/VALIDATION_REPORT.md` |
+| 5 surface-distance metrics | `surface-distance` | 45/45 comparisons Δ = 0 | `archive/VALIDATION_REPORT.md`, superseded by Supplementary 4 (its 63 also covered the since-removed mask APL) |
+| 2D contour metrics | the suppliers' published values | 150/150 pairs through the adapter and from DICOM; largest error ~5e-10 mm; 44 stress cases | `archive/POLYGON_VALIDATION_REPORT.md` |
 | Shared contour reading | vendored parser (2D), previous fill (3D) | 5,143/5,143 regions identical; all 22,123 changed voxels edge ties | `scripts/validate_contour_reading.py`, run on the tender cohort (V3_POLYGON_METRICS_SPEC.md, D10) |
-| STAPLE consensus | `SimpleITK.STAPLEImageFilter` | 55/55 consensus runs bit-exact (sens/spec + voxels) | `STAPLE_VALIDATION_REPORT.md` |
-| DVH | Nelms et al. 2015 analytic datasets; analytic disc phantoms | Test 1: 0/260 parameters > 3 % (PlanIQ 5); Test 2: 10/195 (PlanIQ 18); discs: worst 0.11 Gy at 1 Gy/mm | `DVH_METHOD_VALIDATION.md` (v2's dicompyler equivalence: `DVH_VALIDATION_REPORT.md`, historical) |
+| STAPLE consensus | `SimpleITK.STAPLEImageFilter` | 55/55 consensus runs bit-exact (sens/spec + voxels) | Supplementary 5 |
+| DVH | Nelms et al. 2015 analytic datasets; analytic disc phantoms | Test 1: 0/260 parameters > 3 % (PlanIQ 5); Test 2: 10/195 (PlanIQ 18); discs: worst 0.11 Gy at 1 Gy/mm | Supplementary 1 (v2's dicompyler equivalence: `archive/DVH_VALIDATION_REPORT.md`, historical) |
 
 The STAPLE reference library (`SimpleITK`) is a core dependency, so its
 equivalence test runs in CI with no extra install, and the DVH tests need no
@@ -1560,7 +1560,7 @@ At v2.3.2 that was 63/63, including mask APL against PlatiPy; mask APL was
 removed in v3 and its parity checks with it. CI installs `surface-distance`
 so the regression test runs on every push.
 
-**Reviewer-ready validation report** ([`docs/VALIDATION_REPORT.md`](VALIDATION_REPORT.md)):
+**Reviewer-ready validation report** ([`docs/archive/VALIDATION_REPORT.md`](archive/VALIDATION_REPORT.md)):
 generated by [`scripts/validate_against_upstream.py`](../scripts/validate_against_upstream.py),
 it contains the full per-ROI per-metric breakdown on the HN1 cohort
 (110 ROIs of mask comparison, 9 ROIs × 7 metrics at v2.3.2) plus the software

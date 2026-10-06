@@ -1,31 +1,35 @@
-"""AutoSeg's rasteriser in the synthetic RTSTRUCT rasterisation study.
+"""AutoSeg's rasteriser in the authors' synthetic RTSTRUCT rasterisation benchmark.
 
-An independent synthetic study (the "RTSTRUCT rasterization review package")
-asked which binary mask best preserves the polygon an RTSTRUCT actually
-stores. It wrote 108 CT/RTSTRUCT configurations of 14 shape families; converted
-them with six complete converters (dcmrtstruct2nii, Plastimatch, PlatiPy,
-DicomRTTool, PyRaDiSe, RT-Utils) and with direct rasterisers; and scored every
-plane against the exact fraction of each pixel the polygon covers. Its primary
-error is the area a mask gains plus the area it loses, against which the
-majority-coverage mask (a pixel is in when at least half of it is) is the
+The benchmark asks which binary mask best preserves the polygon an RTSTRUCT
+actually stores. It wrote 108 CT/RTSTRUCT configurations of 14 shape families;
+converted them with six complete converters (dcmrtstruct2nii, Plastimatch,
+PlatiPy, DicomRTTool, PyRaDiSe, RT-Utils) and with direct rasterisers; and
+scored every plane against the exact fraction of each pixel the polygon covers.
+Its primary error is the area a mask gains plus the area it loses, against which
+the majority-coverage mask (a pixel is in when at least half of it is) is the
 attainable optimum.
 
-This script puts AutoSeg Evaluator's own rasteriser into that study on equal
-terms. It rasterises the study's own fixtures with ``mask_with_reading`` --
+This script puts AutoSeg Evaluator's own rasteriser into that benchmark on equal
+terms. It rasterises the benchmark's own fixtures with ``mask_with_reading`` --
 both backends: ``continuous``, shipped since v3, and ``legacy``, v1 and v2 --
-maps each mask onto the study's reference grid with the study's own
-``canonicalize``, scores every plane with the study's own ``metrics``, against
-the study's own precomputed references, and aggregates with the study's own
-rules. It then checks the aggregation by reproducing the study's published
-tables from its raw rows. The study's evidence is read, never written.
+maps each mask onto the benchmark's reference grid with its own
+``canonicalize``, scores every plane with its own ``metrics``, against its own
+precomputed references, and aggregates with its own rules. It then checks the
+aggregation by reproducing the benchmark's published tables from its raw rows.
+The benchmark's evidence is read, never written. With ``--clinical`` it also
+compares the two backends on a folder of real structure sets.
+
+It writes Supplementary 2, a short report (aim, method, results, findings), and
+its full results, and keeps what it computed so ``--render-only`` can rewrite
+both without computing again.
 
 Usage::
 
     python scripts/validate_rasterisation_fidelity.py \\
-        --study "<RTSTRUCT_Rasterization_Expert_Review>/project" \\
-        --out docs/RASTERISATION_FIDELITY.md [--work <scratch folder>]
+        --study "<benchmark>/project" [--clinical <CT + RTSTRUCT folder>] \\
+        [--work <scratch folder> --reuse]
 
-The study folder is about 5 GB and does not belong in this repository.
+The benchmark folder is about 5 GB and does not belong in this repository.
 """
 
 from __future__ import annotations
@@ -35,11 +39,11 @@ import hashlib
 import io
 import json
 import math
+import re
 import shutil
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -49,7 +53,16 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
-from validation_common import git_revision, long_path  # noqa: E402
+from validation_common import (  # noqa: E402
+    VALIDATION_DOCS,
+    load_results,
+    long_path,
+    md_table,
+    run_info,
+    save_results,
+    stamp,
+    unwrap,
+)
 
 BACKENDS = ("continuous", "legacy")
 METHOD = {"continuous": "AutoSeg (continuous)", "legacy": "AutoSeg (legacy)"}
@@ -365,7 +378,104 @@ def frame_changes(manifest: dict, study: Path, work: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ---- The benchmark's software versions ------------------------------------------------
+
+#: The converters as the benchmark's lock file names them.
+LOCKED = {
+    "dcmrtstruct2nii": "dcmrtstruct2nii",
+    "DicomRTTool": "dicomrttool",
+    "PlatiPy": "platipy",
+    "PyRaDiSe": "pyradise",
+    "RT-Utils": "rt-utils",
+}
+
+
+def converter_versions(study: Path) -> dict[str, str]:
+    """Each converter's version, from the benchmark's lock file and software audit."""
+    versions: dict[str, str] = {}
+    lock = (study / "requirements.lock").read_text(encoding="utf-8")
+    for name, package in LOCKED.items():
+        found = re.search(rf"^{re.escape(package)}==([^\s\\]+)", lock, re.MULTILINE | re.IGNORECASE)
+        if found:
+            versions[name] = found.group(1)
+    audit = (study / "SOFTWARE_AUDIT.md").read_text(encoding="utf-8")
+    found = re.search(r"Plastimatch (\d+(?:\.\d+)+)", audit)
+    if found:
+        versions["Plastimatch"] = found.group(1)
+    return versions
+
+
+# ---- A clinical structure set: v1-v2's rasteriser against v3's ---------------------------
+
+
+def clinical_comparison(folder: Path) -> dict:
+    """Every structure in a folder of CT + RTSTRUCTs through both backends.
+
+    The structure sets are labelled A, B, ... and only organ names and numbers
+    are kept: no file names, UIDs, dates or patient details.
+    """
+    from compare_rasterisers import COMPARABLE, compare_rtss, find_rtstructs
+
+    from autoseg_evaluator.core.masks import read_dicom_image, read_rtstruct
+
+    image = read_dicom_image(str(folder))
+    rows = []
+    for idx, path in enumerate(find_rtstructs(folder)):
+        label = f"RTSS {chr(ord('A') + idx)}"
+        print(f"  clinical: {label}", flush=True)
+        rows.extend(compare_rtss(label, read_rtstruct(str(path)), image, repeat=1))
+    return {
+        "ct": {"size": list(image.GetSize()), "spacing": list(image.GetSpacing())},
+        "structure_sets": len({r["rtss"] for r in rows}),
+        "rows": [r for r in rows if r["status"] in COMPARABLE],
+        "not_compared": len([r for r in rows if r["status"] not in COMPARABLE]),
+    }
+
+
+#: Size bands for the clinical comparison, by v1-v2's volume (cc).
+SIZE_BANDS = ((0.0, 1.0), (1.0, 10.0), (10.0, 100.0), (100.0, math.inf))
+
+
+def _band(lo: float, hi: float) -> str:
+    if lo == 0:
+        return f"Under {hi:g} cc"
+    if math.isinf(hi):
+        return f"Over {lo:g} cc"
+    return f"{lo:g}-{hi:g} cc"
+
+
+def clinical_bands(clinical: dict) -> list[dict]:
+    out = []
+    for lo, hi in SIZE_BANDS:
+        rows = [r for r in clinical["rows"] if lo <= r["legacy_cc"] < hi and r["legacy_cc"] > 0]
+        if not rows:
+            continue
+        change = [100 * r["delta_cc"] / r["legacy_cc"] for r in rows]
+        out.append(
+            {
+                "label": _band(lo, hi),
+                "n": len(rows),
+                "change": float(np.median(change)),
+                "dice": float(np.median([r["dice"] for r in rows])),
+            }
+        )
+    return out
+
+
 # ---- Report -------------------------------------------------------------------------------
+
+SCRIPT = Path(__file__).name
+TITLE = "Supplementary 2 - Binary Mask Rasteriser Validation Report"
+REPORT = VALIDATION_DOCS / "Supplementary_2_Binary_Mask_Rasteriser_Validation_Report.md"
+FULL_RESULTS = REPORT.with_name(REPORT.stem + "_Full_Results.md")
+#: The name this script's results are cached under (``validation_common``).
+RESULTS_NAME = "rasterisation"
+#: How the reports name each method.
+NAME = {
+    SHIPPED: "AutoSeg v3",
+    METHOD["legacy"]: "AutoSeg v1-v2",
+    BOUND: "Best possible binary mask",
+}
 
 
 def _pct(value: float) -> str:
@@ -376,6 +486,13 @@ def _pct(value: float) -> str:
     )
 
 
+def _signed(value: float) -> str:
+    """A signed number to two decimals, with no sign on a value that rounds to zero."""
+    if math.isnan(value):
+        return "–"
+    return "0.00" if abs(value) < 0.005 else f"{value:+.2f}"
+
+
 def _num(value: float, digits: int = 2) -> str:
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return "–"
@@ -384,12 +501,7 @@ def _num(value: float, digits: int = 2) -> str:
 
 
 def _table(headers: list[str], rows: list[list[str]], numeric: bool = True) -> list[str]:
-    rule = ["---"] + (["---:"] if numeric else ["---"]) * (len(headers) - 1)
-    return [
-        "| " + " | ".join(headers) + " |",
-        "|" + "|".join(rule) + "|",
-        *["| " + " | ".join(r) + " |" for r in rows],
-    ]
+    return md_table(headers, rows, "l" + ("r" if numeric else "l") * (len(headers) - 1))
 
 
 def _summary_rows(summary: pd.DataFrame, methods: list[str], label=lambda m: m) -> list[list[str]]:
@@ -431,114 +543,348 @@ def _label(method: str) -> str:
     }.get(method, method)
 
 
-def write_report(target: Path, context: dict) -> None:
-    rois: pd.DataFrame = context["rois"]
-    everything: pd.DataFrame = context["rows"]
-    manifest = context["manifest"]
-    shipped_rows = everything[everything.method == SHIPPED]
-    capability = (
-        everything.drop_duplicates(["case_id", "family", "method"])
-        .groupby(["method", "status"])
-        .size()
-        .unstack(fill_value=0)
-    )
+def _restrict(rois: pd.DataFrame, methods: list[str], ids) -> pd.DataFrame:
+    return rois[rois.method.isin(methods) & rois.set_index(["case_id", "family"]).index.isin(ids)]
 
+
+def analyse(context: dict) -> dict:
+    """The comparisons both reports draw on, from the per-ROI table."""
+    rois: pd.DataFrame = context["rois"]
     methods7 = BASELINES + [SHIPPED, METHOD["legacy"], BOUND]
-    seven = common(rois, BASELINES + [SHIPPED])
-    seven = rois[
-        rois.method.isin(methods7)
-        & rois.set_index(["case_id", "family"]).index.isin(
-            seven.set_index(["case_id", "family"]).index.unique()
-        )
-    ]
+    seven_ids = common(rois, BASELINES + [SHIPPED]).set_index(["case_id", "family"]).index.unique()
+    seven = _restrict(rois, methods7, seven_ids)
     seven_summary, _ = weighted_summary(seven)
     seven_no_tiny, _ = weighted_summary(seven[seven.family != "tiny"])
 
     non_square = rois[rois.block != "square_companion"]
     five_ids = common(non_square, FOUR + [SHIPPED]).set_index(["case_id", "family"]).index.unique()
-    five = non_square[
-        non_square.method.isin(FOUR + [SHIPPED, METHOD["legacy"], BOUND])
-        & non_square.set_index(["case_id", "family"]).index.isin(five_ids)
-    ]
+    five = _restrict(non_square, FOUR + [SHIPPED, METHOD["legacy"], BOUND], five_ids)
     five_summary, _ = weighted_summary(five)
     five_no_tiny, _ = weighted_summary(five[five.family != "tiny"])
 
     domain_ids = rois[rois.method == SHIPPED].set_index(["case_id", "family"]).index.unique()
-    domain = rois[
-        rois.method.isin(DIRECT + [SHIPPED, METHOD["legacy"]])
-        & rois.set_index(["case_id", "family"]).index.isin(domain_ids)
-    ]
+    domain = _restrict(rois, DIRECT + [SHIPPED, METHOD["legacy"]], domain_ids)
     domain_summary, domain_family = weighted_summary(domain)
     domain_no_tiny, _ = weighted_summary(domain[domain.family != "tiny"])
 
-    ok_shipped = int(capability.loc[SHIPPED].get("success", 0))
-    attempts = int(capability.loc[SHIPPED].sum())
     s = seven_summary
     best_converter = s.loc[[m for m in BASELINES if m in s.index]].normalized_error.idxmin()
     order = s.loc[[m for m in BASELINES + [SHIPPED] if m in s.index]].normalized_error.sort_values()
-    rank = list(order.index).index(SHIPPED) + 1
-    rank_text = "the lowest" if rank == 1 else f"number {rank} from the lowest"
     paired = common(rois, [SHIPPED, best_converter]).pivot_table(
         index=["case_id", "family"], columns="method", values="error_normalized"
     )
     gap = paired[SHIPPED] - paired[best_converter]
-    paired_best = (
-        f"AutoSeg lower on {int((gap < -TIE).sum())}, tied on {int((abs(gap) <= TIE).sum())}, "
-        f"higher on {int((gap > TIE).sum())} of {len(gap)}"
-    )
-    legacy_is_platipy = (
-        abs(s.loc[METHOD["legacy"], "normalized_error"] - s.loc["PlatiPy", "normalized_error"])
-        < 1e-12
-    )
-    shipped_bias = float(
-        domain[(domain.method == SHIPPED) & (domain.family != "tiny")].signed_bias_mm2.mean()
-    )
+    no_tiny = domain[domain.family != "tiny"]
     moved = context["frame_changes"]
-    shipped_moved = int(moved[moved.method == SHIPPED].changed_unambiguous.sum())
+    return {
+        "seven": seven_summary,
+        "seven_no_tiny": seven_no_tiny,
+        "five": five_summary,
+        "five_no_tiny": five_no_tiny,
+        "domain": domain_summary,
+        "domain_family": domain_family,
+        "domain_no_tiny": domain_no_tiny,
+        "no_tiny_rows": no_tiny,
+        "methods7": methods7,
+        "best_converter": best_converter,
+        "rank": list(order.index).index(SHIPPED) + 1,
+        "paired": {
+            "lower": int((gap < -TIE).sum()),
+            "tied": int((abs(gap) <= TIE).sum()),
+            "higher": int((gap > TIE).sum()),
+            "n": len(gap),
+        },
+        "legacy_is_platipy": abs(
+            s.loc[METHOD["legacy"], "normalized_error"] - s.loc["PlatiPy", "normalized_error"]
+        )
+        < 1e-12,
+        "bias": {
+            m: float(no_tiny[no_tiny.method == m].signed_bias_mm2.mean())
+            for m in (SHIPPED, METHOD["legacy"], BOUND)
+            if (no_tiny.method == m).any()
+        },
+        "moved": {
+            block: int(
+                moved[(moved.method == SHIPPED) & (moved.block == block)].changed_unambiguous.sum()
+            )
+            for block in ("oblique", "large")
+        },
+    }
 
+
+def write_report(target: Path, context: dict, a: dict) -> None:
+    """Supplementary 2: what was validated, how, what was found, and what it decided."""
+    manifest = context["manifest"]
+    capability: pd.DataFrame = context["capability"]
+    versions = context["versions"]
+    s, s_nt = a["seven"], a["seven_no_tiny"]
+    best = a["best_converter"]
+    attempts = int(capability.loc[SHIPPED].sum())
+    converted = {
+        m: int(capability.loc[m].get("success", 0))
+        for m in [SHIPPED, METHOD["legacy"], *BASELINES]
+        if m in capability.index
+    }
+    n_cases = int(s.loc[SHIPPED, "roi_cases"])
+    clinical = context.get("clinical")
+
+    def name(method: str) -> str:
+        return NAME.get(method, method + (f" {versions[method]}" if method in versions else ""))
+
+    accuracy_rows = [
+        [
+            ("**" + name(m) + "**") if m == SHIPPED else name(m),
+            _pct(s.loc[m, "normalized_error"]),
+            _pct(s_nt.loc[m, "normalized_error"]),
+        ]
+        for m in s.sort_values("normalized_error").index
+        if m in a["methods7"]
+    ]
     lines = [
-        "# The rasteriser against the polygon it rasterises",
+        f"# {TITLE}",
         "",
-        "Generated by `scripts/validate_rasterisation_fidelity.py`. Regenerate it",
-        "rather than editing it.",
+        f"{stamp(SCRIPT, context['run'])}. Every table behind this report is in its "
+        f"[full results]({FULL_RESULTS.name}).",
         "",
-        f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC · AutoSeg Evaluator, "
-        f"{context['version']} · {len(manifest['configurations'])} configurations, "
-        f"{len(manifest['families'])} shape families",
+        "## Aim",
         "",
-        "## In brief",
+        "AutoSeg Evaluator's 3D metrics (Supplementary 4) and the DVH of a STAPLE consensus",
+        "(Supplementary 1) are computed on binary masks, so they can be no more accurate than",
+        "the conversion of each contour into a mask, its rasterisation. AutoSeg v1 and v2",
+        "rasterised as PlatiPy does, snapping every contour vertex to the nearest voxel before",
+        "filling. Version 3 replaced this with a rasteriser adapted from dcmrtstruct2nii [1],",
+        "which keeps every vertex where it is. This validation asks three questions:",
         "",
-        f"- **AutoSeg's shipped rasteriser converted {ok_shipped} of {attempts} ROI/configurations,** "
-        "every shape family included.",
-        f"- **On the {int(s.loc[SHIPPED, 'roi_cases'])} cases all six converters and AutoSeg share, AutoSeg's area "
-        f"error is {_pct(s.loc[SHIPPED, 'normalized_error'])}**, {rank_text} of the seven; "
-        f"{best_converter}, the study's best converter, has {_pct(s.loc[best_converter, 'normalized_error'])}, "
-        f"and the attainable optimum {_pct(s.loc[BOUND, 'normalized_error'])}. Case by case against "
-        f"{best_converter}, over every case both converted: {paired_best}. Without the tiny-region family: "
-        f"{_pct(seven_no_tiny.loc[SHIPPED, 'normalized_error'])} against "
-        f"{_pct(seven_no_tiny.loc[best_converter, 'normalized_error'])} and "
-        f"{_pct(seven_no_tiny.loc[BOUND, 'normalized_error'])}.",
-        f"- **v1 and v2's legacy rasteriser, on the same cases: "
-        f"{_pct(s.loc[METHOD['legacy'], 'normalized_error'])}** "
-        f"({_pct(seven_no_tiny.loc[METHOD['legacy'], 'normalized_error'])} without tiny regions)"
-        + (
-            ", identical to PlatiPy's, the code it was ported from. That agreement is also a check "
-            "on this harness."
-            if legacy_is_platipy
-            else "."
+        "1. How closely do v3's masks match the contours they come from, compared with six",
+        "   widely used converters, with v1-v2's rasteriser, and with the best any binary mask",
+        "   can do?",
+        "2. Does it convert every kind of contour: holes, nested and overlapping contours, tiny",
+        "   regions, rotated image frames and coordinates far from the origin?",
+        "3. What does the change from v1-v2's rasteriser do to masks of real structures?",
+        "",
+        "## Method",
+        "",
+        "### How AutoSeg v3 rasterises",
+        "",
+        "Each contour vertex is converted to continuous voxel coordinates, so a vertex at",
+        "voxel position 203.78 stays at 203.78 instead of being rounded to 204. Each contour",
+        "is assigned to its nearest CT slice, and each region is filled with a scanline",
+        "algorithm that includes a voxel when its centre lies inside the region. A voxel",
+        "centre lying exactly on a contour edge is assigned to one side only, where",
+        "dcmrtstruct2nii counts it inside on both; away from such ties the two fill identical",
+        "voxels. Contours stored as CLOSEDPLANAR_XOR, which encode holes and overlaps, are read",
+        "through the same contour reader as AutoSeg's 2D metrics (Supplementary 3).",
+        "",
+        "### Data: a synthetic benchmark built by the authors",
+        "",
+        f"{len(manifest['families'])} shape families: sphere and ellipsoid cross-sections, a",
+        "square and a rectangle, a triangle, a concave L, an annulus, nested shells,",
+        "disconnected components, a narrow bridge, a tiny 0.36 mm square, a keyhole, an",
+        "irregular star, and overlapping contours stored as CLOSEDPLANAR_XOR. Each was written",
+        f"as a CT and RTSTRUCT in {len(manifest['configurations'])} configurations that vary",
+        "the sub-pixel position, rotation, anisotropic pixel spacing, size, vertex density,",
+        "feature width, distance from pixel boundaries, an oblique image frame, and",
+        f"coordinates 10⁵ mm from the origin: {attempts:,} structure and configuration cases",
+        "in all. Each was converted by AutoSeg v3, by AutoSeg v1-v2's rasteriser, and by six",
+        "converters: "
+        + ", ".join(name(m) for m in BASELINES)
+        + ". The best possible binary mask was also computed for every case (below).",
+        "",
+        "### Measuring a mask's error",
+        "",
+        "The reference on each plane is the polygon as stored in, and read back from, the",
+        "RTSTRUCT. Each pixel stands for its whole footprint, a fraction *f* of which lies",
+        "inside the polygon. A mask's error is the area it wrongly includes plus the area it",
+        "wrongly leaves out, as a percentage of the polygon's area: the *area error*. The",
+        "mask that includes exactly the pixels at least half covered (*f* ≥ 0.5) has the",
+        "smallest possible error of any binary mask, so it is the best possible binary mask,",
+        "not a competitor. Errors are averaged over a structure's planes, then over the",
+        "configurations within a shape family, then equally over families. The tiny 0.36 mm",
+        "square, smaller than any pixel here, can have errors above 100 % and dominates any",
+        "average that includes it, so results are also given without it.",
+        "",
+    ]
+    if clinical:
+        (nx, ny, nz), (px, py, pz) = clinical["ct"]["size"], clinical["ct"]["spacing"]
+        lines += [
+            "### Clinical comparison",
+            "",
+            "An anonymised head-and-neck case (Human Research Ethics approval RGS4979): a CT of",
+            f"{nx} × {ny} × {nz} voxels of {px:.3f} × {py:.3f} × {pz:.3f} mm, with",
+            f"{clinical['structure_sets']} structure sets. Every structure was rasterised by",
+            f"both v1-v2's rasteriser and v3's ({len(clinical['rows'])} structures), and the",
+            "two masks compared by volume and Dice. Only organ names and numbers appear in this",
+            "report.",
+            "",
+        ]
+    lines += [
+        "## Results",
+        "",
+        f"**Contours converted**, of the {attempts:,} cases:",
+        "",
+        *md_table(
+            ["Method", "Converted"],
+            [[name(m), f"{n:,}"] for m, n in sorted(converted.items(), key=lambda mn: -mn[1])],
+            "lr",
         ),
-        f"- **The shipped rasteriser is unbiased and frame-invariant:** its mean area bias per plane is "
-        f"{_num(shipped_bias)} mm², and neither an oblique frame nor coordinates 10⁵ mm away "
-        f"changed {'a single voxel' if shipped_moved == 0 else f'more than {shipped_moved} voxels'} "
-        "outside the ambiguity band.",
-        "- **No binary mask is the polygon.** Even the optimum mask misses or adds",
-        f"  {_pct(domain_no_tiny.loc[BOUND, 'normalized_error'])} of a structure's area on average over every",
-        "  configuration (tiny regions excluded); that is the price of a voxel grid, and",
-        "  the floor under every mask-based metric.",
+        "dcmrtstruct2nii, Plastimatch and PlatiPy do not support CLOSEDPLANAR_XOR contours, and",
+        "neither does v1-v2's rasteriser. PyRaDiSe and RT-Utils produced masks on a grid the",
+        "benchmark could match only where the pixels are square.",
         "",
-        "## The study",
+        f"**Accuracy**, on the {n_cases} cases all six converters and AutoSeg v3 converted:",
         "",
-        "The question it asked: which binary mask best preserves the continuous planar",
+        *md_table(["Method", "Area error", "Without the tiny square"], accuracy_rows, "lrr"),
+        f"Case by case against {name(best)}, the most accurate converter, over the"
+        f" {a['paired']['n']:,} cases both converted, AutoSeg v3 was more accurate on"
+        f" {a['paired']['lower']:,}, tied on {a['paired']['tied']:,} and less accurate on"
+        f" {a['paired']['higher']:,}.",
+        "",
+        "**Robustness.** Rotating the whole CT and contours to an oblique frame, or moving them",
+        "10⁵ mm from the origin, "
+        + (
+            "changed none of AutoSeg v3's voxels"
+            if not any(a["moved"].values())
+            else f"changed {a['moved']['oblique']:,} and {a['moved']['large']:,} of AutoSeg v3's"
+            " voxels respectively"
+        )
+        + ", apart from pixels whose centre lies exactly on a contour edge.",
+        "",
+    ]
+    if clinical:
+        bands = clinical_bands(clinical)
+        rows = clinical["rows"]
+        smaller = sum(1 for r in rows if r["delta_cc"] < 0)
+        dice = [r["dice"] for r in rows]
+        lines += [
+            f"**Clinical comparison.** v3's mask was smaller than v1-v2's for {smaller} of"
+            f" {len(rows)} structures, and the two agreed with a median Dice of"
+            f" {np.median(dice):.3f} (lowest {min(dice):.3f}). By structure size:",
+            "",
+            *md_table(
+                [
+                    "Volume (v1-v2 mask)",
+                    "Structures",
+                    "Median volume change, v1-v2 to v3",
+                    "Median Dice, v1-v2 against v3",
+                ],
+                [
+                    [b["label"], f"{b['n']}", f"{b['change']:+.1f} %", f"{b['dice']:.3f}"]
+                    for b in bands
+                ],
+                "lrrr",
+            ),
+        ]
+
+    lines += ["## Findings", ""]
+    shipped, plast = s.loc[SHIPPED, "normalized_error"], s.loc[best, "normalized_error"]
+    optimum, optimum_nt = s.loc[BOUND, "normalized_error"], s_nt.loc[BOUND, "normalized_error"]
+    lines += [
+        "- **AutoSeg v3's masks are as close to the contours as the best converter's.** Its"
+        f" area error was {_pct(shipped)}"
+        + (", the lowest of the seven methods," if a["rank"] == 1 else "")
+        + f" against {_pct(plast)} for {name(best)}, the most accurate converter, and"
+        f" {_pct(optimum)} for the best possible binary mask"
+        f" ({_pct(s_nt.loc[SHIPPED, 'normalized_error'])},"
+        f" {_pct(s_nt.loc[best, 'normalized_error'])} and {_pct(optimum_nt)} without the tiny"
+        " square).",
+    ]
+    if converted[SHIPPED] == attempts:
+        lines += [
+            f"- **It converts every kind of contour.** It converted all {attempts:,} cases,"
+            " including the overlapping and nested contours three of the six converters cannot"
+            " read"
+            + (
+                ", and no voxel changed under a rotated frame or distant coordinates."
+                if not any(a["moved"].values())
+                else "."
+            ),
+        ]
+    if "dcmrtstruct2nii" in s.index:
+        dcm = s.loc["dcmrtstruct2nii", "normalized_error"]
+        plastimatch = s.loc["Plastimatch", "normalized_error"]
+        level = abs(dcm - plastimatch) < 0.005  # within half a percentage point
+        lines += [
+            "- **Why dcmrtstruct2nii rather than Plastimatch.** "
+            + ("The two were equally accurate" if level else "Their area errors were")
+            + f" ({_pct(dcm)} and {_pct(plastimatch)}), but dcmrtstruct2nii is a Python library,",
+            "  so it could be built into AutoSeg directly.",
+        ]
+        if shipped < dcm:
+            lines[-1] += (
+                " Assigning a voxel centre on an edge to one side only brought AutoSeg's version"
+                f" from {_pct(dcm)} to {_pct(shipped)}."
+            )
+    legacy = s.loc[METHOD["legacy"], "normalized_error"]
+    legacy_nt = s_nt.loc[METHOD["legacy"], "normalized_error"]
+    lines += [
+        f"- **v1-v2's rasteriser was less accurate:** {_pct(legacy)} area error,"
+        f" {legacy / shipped:.1f} times v3's ({_pct(legacy_nt)} without the tiny square,"
+        f" {legacy_nt / s_nt.loc[SHIPPED, 'normalized_error']:.1f} times)"
+        + (", the same as PlatiPy's, which it followed." if a["legacy_is_platipy"] else ".")
+        + " Snapping vertices to the voxel grid over-fills a structure: its masks were"
+        f" {_signed(a['bias'].get(METHOD['legacy'], math.nan))} mm² per plane too large on"
+        f" average, against {_signed(a['bias'].get(SHIPPED, math.nan))} mm² for v3.",
+    ]
+    if clinical:
+        bands = clinical_bands(clinical)
+        lines += [
+            "- **On real structures the change matters most for small organs.** The median"
+            f" volume change from v1-v2's mask to v3's was {bands[0]['change']:+.1f} % for"
+            f" structures {bands[0]['label'].lower()} and {bands[-1]['change']:+.1f} % for those"
+            f" {bands[-1]['label'].lower()}.",
+        ]
+        if abs(bands[0]["change"]) > 10:
+            lines[-1] += (
+                " Mask-based metrics of small organs computed by v1-v2 are therefore not directly"
+                " comparable with v3's."
+            )
+    lines += [
+        "- **Limits.** No binary mask reproduces a contour exactly: even the best possible mask",
+        f"  missed or added {_pct(optimum_nt)} of a structure's area on these shapes, without the"
+        " tiny square. That",
+        "  error shrinks as structures grow relative to the pixel, and the benchmark's shapes",
+        "  are small, so the percentages here are larger than for most organs; the ranking of",
+        "  the methods is what carries over. AutoSeg's 2D metrics (Supplementary 3) work on the",
+        "  contours themselves and avoid this error altogether.",
+        "",
+        "## References",
+        "",
+        "1. dcmrtstruct2nii: convert DICOM RT-Struct contours to NIfTI masks. GitHub.",
+        "   https://github.com/Sikerdebaard/dcmrtstruct2nii",
+        "",
+        "## Reproduce",
+        "",
+        "```",
+        f"python scripts/{SCRIPT} --study <benchmark>/project --clinical <folder of CT and"
+        " RTSTRUCT files>",
+        "```",
+        "",
+        "The benchmark is about 5 GB and is not stored with AutoSeg; `--clinical` is optional.",
+        f"This run took {context['seconds'] / 60:.0f} minutes"
+        + (", reusing the masks of an earlier run" if context.get("reused") else "")
+        + "; `--work <folder> --reuse` keeps finished configurations between runs, and",
+        "`--render-only` rewrites this report from the last run's results. Regenerate this",
+        "report rather than editing it.",
+        "",
+    ]
+    target.write_text(unwrap(lines), encoding="utf-8")
+
+
+def write_full_results(target: Path, context: dict, a: dict) -> None:
+    """Every table behind Supplementary 2."""
+    manifest = context["manifest"]
+    capability: pd.DataFrame = context["capability"]
+    attempts = int(capability.loc[SHIPPED].sum())
+    lines = [
+        f"# {TITLE}: full results",
+        "",
+        f"{stamp(SCRIPT, context['run'])} · {len(manifest['configurations'])} configurations,"
+        f" {len(manifest['families'])} shape families. The summary is"
+        f" [Supplementary 2]({REPORT.name}). Regenerate this file rather than editing it.",
+        "",
+        "## The benchmark",
+        "",
+        "The question it asks: which binary mask best preserves the continuous planar",
         "region encoded by the polygon actually stored in, and read back from, an",
         "RTSTRUCT? Each pixel stands for its whole footprint; its reference fraction",
         "*f* is the share of that footprint inside the polygon. A mask's error on a",
@@ -550,7 +896,7 @@ def write_report(target: Path, context: dict) -> None:
         "majority-area mask is the attainable optimum, not a competitor. The *area",
         "error* below is E divided by the polygon's area, averaged over a structure's",
         "planes, then over configurations within a shape family, then equally over",
-        "families: the study's primary aggregation. *Beyond the optimum* is the same",
+        "families: the benchmark's primary aggregation. *Beyond the optimum* is the same",
         "for E minus the optimum's E. Tiny regions (0.36 mm squares) can exceed 100 %,",
         "so every table is also given without them.",
         "",
@@ -559,12 +905,14 @@ def write_report(target: Path, context: dict) -> None:
         "narrow bridge, a tiny region, a keyhole, an irregular star and overlapping",
         "XOR contours. The configurations sweep sub-pixel phase, rotation,",
         "anisotropic spacing, size, vertex density, feature width, near-boundary",
-        "offsets, oblique frames and large coordinates.",
+        "offsets, oblique frames and large coordinates. Converter versions: "
+        + ", ".join(f"{k} {v}" for k, v in sorted(context["versions"].items()))
+        + ".",
         "",
         "AutoSeg's masks were made by `mask_with_reading`, as a computation run makes",
-        "them, from the study's own CT and RTSTRUCT files; mapped onto the study's",
+        "them, from the benchmark's own CT and RTSTRUCT files; mapped onto its",
         "reference grid by its own `canonicalize`; and scored by its own `metrics`",
-        "against its own stored references. The aggregation is the study's, and",
+        "against its own stored references. The aggregation is the benchmark's, and",
         "reproduces its published tables from its raw rows:",
         "",
         *_table(
@@ -574,7 +922,6 @@ def write_report(target: Path, context: dict) -> None:
                 for c in context["checks"]
             ],
         ),
-        "",
     ]
 
     # Capability
@@ -594,112 +941,89 @@ def write_report(target: Path, context: dict) -> None:
             + [str(int(capability.loc[method, st])) for st in statuses]
         )
     lines += _table(["Method", *[st.replace("_", " ") for st in statuses]], rows)
-    failures = shipped_rows[shipped_rows.status != "success"].drop_duplicates(["case_id", "family"])
-    lines += [""]
-    if len(failures):
+    if context["shipped_failures"]:
         lines += ["AutoSeg's failures:", ""]
-        for (family, detail), g in failures.groupby(["family", "detail"]):
-            lines.append(f"- {family}: {detail} ({len(g)} configurations)")
-        lines.append("")
+        lines += [f"- {f}: {d} ({n} configurations)" for f, d, n in context["shipped_failures"]]
+        lines += [""]
     lines += [
-        "The study marked dcmrtstruct2nii, PlatiPy and Plastimatch *unsupported* for",
+        "The benchmark marked dcmrtstruct2nii, PlatiPy and Plastimatch *unsupported* for",
         "the three families stored as CLOSEDPLANAR_XOR (annulus, nested, overlap);",
-        "PyRaDiSe and RT-Utils produced grids the study could only match on its",
+        "PyRaDiSe and RT-Utils produced grids the benchmark could only match on its",
         "square-grid companions. AutoSeg reads XOR contours through the same shared",
         "reading as its 2D metrics.",
         "",
     ]
 
-    # Seven-way
+    s = a["seven"]
     lines += [
         "## All six converters and AutoSeg, on the cases they share",
         "",
-        f"{int(s.loc[SHIPPED, 'roi_cases'])} ROI/configurations every one of them converted — the study's",
-        "six-way set, square-grid companions only — with the optimum on the same cases.",
+        f"{int(s.loc[SHIPPED, 'roi_cases'])} ROI/configurations every one of them converted (the",
+        "six-way set, square-grid companions only), with the optimum on the same cases.",
         "",
-        *_table(SUMMARY_HEADERS, _summary_rows(seven_summary, methods7, _label)),
-        "",
+        *_table(SUMMARY_HEADERS, _summary_rows(s, a["methods7"], _label)),
         "Without the tiny-region family:",
         "",
-        *_table(SUMMARY_HEADERS, _summary_rows(seven_no_tiny, methods7, _label)),
-        "",
-    ]
-
-    # Five-way non-square
-    lines += [
+        *_table(SUMMARY_HEADERS, _summary_rows(a["seven_no_tiny"], a["methods7"], _label)),
         "## The four converters with valid non-square grids, and AutoSeg",
         "",
-        "The study's second common set: every configuration but the square-grid",
-        "companions, on the ROI/configurations dcmrtstruct2nii, DicomRTTool,",
-        "Plastimatch, PlatiPy and AutoSeg all converted.",
+        "The second common set: every configuration but the square-grid companions, on the",
+        "ROI/configurations dcmrtstruct2nii, DicomRTTool, Plastimatch, PlatiPy and AutoSeg",
+        "all converted.",
         "",
         *_table(
             SUMMARY_HEADERS,
-            _summary_rows(five_summary, FOUR + [SHIPPED, METHOD["legacy"], BOUND], _label),
+            _summary_rows(a["five"], FOUR + [SHIPPED, METHOD["legacy"], BOUND], _label),
         ),
-        "",
         "Without the tiny-region family:",
         "",
         *_table(
             SUMMARY_HEADERS,
-            _summary_rows(five_no_tiny, FOUR + [SHIPPED, METHOD["legacy"], BOUND], _label),
+            _summary_rows(a["five_no_tiny"], FOUR + [SHIPPED, METHOD["legacy"], BOUND], _label),
         ),
-        "",
-    ]
-
-    # Direct algorithms
-    lines += [
         "## Every configuration: AutoSeg beside the direct rasterisers",
         "",
-        "The study also ran planar rasterisers directly on the read-back polygons, on",
-        f"all {len(manifest['configurations'])} configurations and {len(manifest['families'])} families. AutoSeg is",
-        "compared here on every ROI/configuration it converted.",
+        "The benchmark also ran planar rasterisers directly on the read-back polygons, on",
+        f"all {len(manifest['configurations'])} configurations and {len(manifest['families'])}"
+        " families. AutoSeg is compared here on every ROI/configuration it converted.",
         "",
         *_table(
             SUMMARY_HEADERS,
-            _summary_rows(domain_summary, DIRECT + [SHIPPED, METHOD["legacy"]], _label),
+            _summary_rows(a["domain"], DIRECT + [SHIPPED, METHOD["legacy"]], _label),
         ),
-        "",
         "Without the tiny-region family:",
         "",
         *_table(
             SUMMARY_HEADERS,
-            _summary_rows(domain_no_tiny, DIRECT + [SHIPPED, METHOD["legacy"]], _label),
+            _summary_rows(a["domain_no_tiny"], DIRECT + [SHIPPED, METHOD["legacy"]], _label),
         ),
-        "",
         "`skimage_float` is scikit-image's polygon fill on continuous vertices, the",
         "rule dcmrtstruct2nii and AutoSeg's continuous backend descend from; `opencv_*`",
         "rounds vertices to integers first, as DicomRTTool, PyRaDiSe and RT-Utils do.",
         "",
     ]
 
-    # By family
-    fam = domain_family["normalized_error"].unstack("method")
+    fam = a["domain_family"]["normalized_error"].unstack("method")
     columns = [BOUND, "skimage_float", SHIPPED, METHOD["legacy"]]
-    rows = [
-        [family, *[_pct(fam.loc[family, m]) if m in fam.columns else "–" for m in columns]]
-        for family in manifest["families"]
-        if family in fam.index
-    ]
     lines += [
         "## By shape family",
         "",
         "Area error, averaged over the configurations AutoSeg converted:",
         "",
         *_table(
-            ["Family", "Optimum", "skimage_float", "AutoSeg (continuous)", "AutoSeg (legacy)"], rows
+            ["Family", "Optimum", "skimage_float", "AutoSeg (continuous)", "AutoSeg (legacy)"],
+            [
+                [family, *[_pct(fam.loc[family, m]) if m in fam.columns else "–" for m in columns]]
+                for family in manifest["families"]
+                if family in fam.index
+            ],
         ),
-        "",
         "The tiny region is a 0.36 mm square, smaller than any pixel here. The",
         "optimum drops it (100 % lost); a rule that includes a pixel whose centre",
         "lies inside keeps a whole pixel whenever the square covers a centre, which",
         "is several times its area. Every centre-inclusion rasteriser, AutoSeg's",
         "among them, shares this, and it dominates any average that includes it.",
         "",
-    ]
-
-    # What a mask loses
-    lines += [
         "## What a binary mask loses",
         "",
         "Every configuration AutoSeg converted, tiny regions excluded. *Bias* is the",
@@ -708,7 +1032,7 @@ def write_report(target: Path, context: dict) -> None:
         "0.1 mm along both; *within 0.5 mm* is the share of boundary that close.",
         "",
     ]
-    no_tiny = domain[domain.family != "tiny"]
+    no_tiny = a["no_tiny_rows"]
     rows = []
     for method in [BOUND, "skimage_float", SHIPPED, METHOD["legacy"]]:
         g = no_tiny[no_tiny.method == method]
@@ -738,7 +1062,6 @@ def write_report(target: Path, context: dict) -> None:
         rows,
     )
     lines += [
-        "",
         "Pixel sizes range from 0.5 to 1.3 mm across the configurations, so these",
         "distances are fractions of a pixel. They are the resolution floor under",
         "every mask-based metric AutoSeg reports: Dice, the 3D surface distances and",
@@ -747,21 +1070,16 @@ def write_report(target: Path, context: dict) -> None:
         "",
     ]
 
-    # Robustness
     changes: pd.DataFrame = context["frame_changes"]
-    absent = everything[
-        (everything.status == "success") & ~everything.nonempty_reference.astype(bool)
-    ]
     rows = []
     for method in [SHIPPED, METHOD["legacy"]]:
         g = changes[changes.method == method]
-        a = absent[absent.method == method]
         rows.append(
             [
                 method,
                 str(int(g[g.block == "oblique"].changed_unambiguous.sum())),
                 str(int(g[g.block == "large"].changed_unambiguous.sum())),
-                _num(float(a.error_mm2.sum()), 1),
+                _num(float(context["absent_area"].get(method, 0.0)), 1),
             ]
         )
     lines += [
@@ -770,7 +1088,7 @@ def write_report(target: Path, context: dict) -> None:
         "The oblique configurations rotate the whole CT and contour frame together;",
         "the large ones move it 10⁵ mm away. Neither changes the geometry, so a mask",
         "should not change either, except where a pixel centre sits on the boundary",
-        "(the study's ambiguity band). *Absent planes* are CT planes a structure does",
+        "(the benchmark's ambiguity band). *Absent planes* are CT planes a structure does",
         "not reach, where any area is spurious.",
         "",
         *_table(
@@ -782,18 +1100,16 @@ def write_report(target: Path, context: dict) -> None:
             ],
             rows,
         ),
-        "",
-        "For comparison the study found no unambiguous changes for Plastimatch and",
+        "For comparison the benchmark found no unambiguous changes for Plastimatch and",
         "dcmrtstruct2nii under oblique frames, 4 for Plastimatch under large",
         "coordinates, and 11,072 mm² of spurious area from DicomRTTool.",
         "",
     ]
 
-    # Paired
+    rois = context["rois"]
     rows = []
     for other in BASELINES + [BOUND, "skimage_float", METHOD["legacy"]]:
-        paired = common(rois, [SHIPPED, other])
-        wide = paired.pivot_table(
+        wide = common(rois, [SHIPPED, other]).pivot_table(
             index=["case_id", "family"], columns="method", values="error_normalized"
         )
         if not len(wide):
@@ -813,7 +1129,8 @@ def write_report(target: Path, context: dict) -> None:
         "## Case by case",
         "",
         "AutoSeg (continuous) against each method on the ROI/configurations both",
-        f"converted. A tie is within {TIE:g} in area error, the study's reporting tolerance.",
+        f"converted. A tie is within {TIE:g} in area error, the benchmark's reporting",
+        "tolerance.",
         "",
         *_table(
             [
@@ -826,22 +1143,61 @@ def write_report(target: Path, context: dict) -> None:
             ],
             rows,
         ),
-        "",
     ]
 
-    # Limits & sources
+    clinical = context.get("clinical")
+    if clinical:
+        (nx, ny, nz), (px, py, pz) = clinical["ct"]["size"], clinical["ct"]["spacing"]
+        lines += [
+            "## Clinical comparison: v1-v2's rasteriser against v3's",
+            "",
+            f"An anonymised head-and-neck case: CT {nx} × {ny} × {nz}, voxels {px:.3f} ×"
+            f" {py:.3f} × {pz:.3f} mm; {clinical['structure_sets']} structure sets, labelled"
+            f" A, B, ...; {len(clinical['rows'])} structures compared"
+            + (
+                f", {clinical['not_compared']} not (empty in one backend or both)."
+                if clinical["not_compared"]
+                else "."
+            ),
+            "Only organ names and numbers appear. *Δ* is v3's volume minus v1-v2's.",
+            "",
+            *md_table(
+                ["Volume (v1-v2 mask)", "Structures", "Median volume change", "Median Dice"],
+                [
+                    [b["label"], f"{b['n']}", f"{b['change']:+.1f} %", f"{b['dice']:.3f}"]
+                    for b in clinical_bands(clinical)
+                ],
+                "lrrr",
+            ),
+            *md_table(
+                ["Structure set", "Structure", "v1-v2 (cc)", "v3 (cc)", "Δ (cc)", "Δ (%)", "Dice"],
+                [
+                    [
+                        r["rtss"],
+                        r["roi"],
+                        f"{r['legacy_cc']:.4g}",
+                        f"{r['continuous_cc']:.4g}",
+                        f"{r['delta_cc']:+.4g}",
+                        f"{100 * r['delta_cc'] / r['legacy_cc']:+.1f}" if r["legacy_cc"] else "–",
+                        f"{r['dice']:.4f}",
+                    ]
+                    for r in clinical["rows"]
+                ],
+                "llrrrrr",
+            ),
+        ]
+
     t = pd.DataFrame(context["timings"])
     lines += [
         "## What this does not cover",
         "",
         "The fixtures are synthetic, planar and on regular grids, with deliberately",
         "empty planes between extrusions; no surface is reconstructed between planes,",
-        "which is how both the study and AutoSeg treat a contour stack. Clinical",
-        "structure sets, non-uniform slice spacing and treatment-planning-system",
-        "comparisons are outside the study, as its own report states. AutoSeg's",
-        "timings are not comparable with the study's converter timings, which include",
-        "each converter's file output; for the record, the median AutoSeg rasterisation",
-        "of one ROI took "
+        "which is how both the benchmark and AutoSeg treat a contour stack. Non-uniform",
+        "slice spacing and treatment-planning-system comparisons are outside the",
+        "benchmark. AutoSeg's timings are not comparable with the converter timings,",
+        "which include each converter's file output; for the record, the median AutoSeg",
+        "rasterisation of one ROI took "
         + ", ".join(
             f"{1000 * t[t.backend == b].seconds.median():.1f} ms ({b})"
             for b in BACKENDS
@@ -851,30 +1207,29 @@ def write_report(target: Path, context: dict) -> None:
         "",
         "## Sources",
         "",
-        "Study: *External review: synthetic RTSTRUCT rasterization comparison*,",
-        "review package assembled 26 September 2026 (study software cutoff",
-        "8 September 2026). Its raw per-plane rows, fixtures and references were read",
-        "unmodified. The study code used for scoring, by SHA-256:",
+        "The benchmark's raw per-plane rows, fixtures and references were read unmodified.",
+        "Its scoring code, by SHA-256:",
         "",
         *[f"- `study/{name}` `{digest[:16]}…`" for name, digest in context["code_hashes"].items()],
         "",
-        "Reproduce with:",
-        "",
-        "```",
-        "python scripts/validate_rasterisation_fidelity.py --study <package>/project \\",
-        "    --out docs/RASTERISATION_FIDELITY.md",
-        "```",
-        "",
     ]
-    target.write_text("\n".join(lines), encoding="utf-8")
+    target.write_text(unwrap(lines), encoding="utf-8")
+
+
+def render(context: dict) -> None:
+    analysis = analyse(context)
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
+    write_report(REPORT, context, analysis)
+    write_full_results(FULL_RESULTS, context, analysis)
+    print(f"wrote {REPORT} and {FULL_RESULTS.name}")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--study", type=Path, help="The benchmark's project folder.")
     parser.add_argument(
-        "--study", type=Path, required=True, help="The review package's project folder."
+        "--clinical", type=Path, help="A folder of CT + RTSTRUCTs to compare both backends on."
     )
-    parser.add_argument("--out", type=Path, help="Write the markdown report here.")
     parser.add_argument("--work", type=Path, help="Scratch folder (default: a new temporary one).")
     parser.add_argument(
         "--limit", type=int, help="Only the first N configurations: a trial run, not a report."
@@ -884,8 +1239,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Reuse configurations already finished in --work instead of redoing them.",
     )
+    parser.add_argument(
+        "--render-only",
+        action="store_true",
+        help="Rewrite the reports from the last run's results, without computing.",
+    )
     args = parser.parse_args(argv)
+    if args.render_only:
+        render(load_results(RESULTS_NAME))
+        return 0
+    if args.study is None:
+        parser.error("--study is required unless --render-only")
 
+    info = run_info()
     study = long_path(args.study)
     work = (args.work or Path(tempfile.mkdtemp(prefix="rasterisation-"))).resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -906,30 +1272,53 @@ def main(argv: list[str] | None = None) -> int:
             .mean()
         )
         return 0
-    print("Reading the study's raw rows ...", flush=True)
+    print("Reading the benchmark's raw rows ...", flush=True)
     study_rows = load_study_rows(study)
     columns = [*study_rows.columns, "detail"]
     rows = pd.concat([study_rows, autoseg_rows.reindex(columns=columns)], ignore_index=True)
-    rois = roi_table(rows)
     checks = check_against_published(roi_table(study_rows), study)
     for check in checks:
         print(
             f"  reproduces {check['table']}: largest difference {check['largest_difference']:.1e}"
         )
+    capability = (
+        rows.drop_duplicates(["case_id", "family", "method"])
+        .groupby(["method", "status"])
+        .size()
+        .unstack(fill_value=0)
+    )
+    capability.columns = [str(c) for c in capability.columns]
+    shipped = rows[(rows.method == SHIPPED) & (rows.status != "success")].drop_duplicates(
+        ["case_id", "family"]
+    )
+    absent = rows[(rows.status == "success") & ~rows.nonempty_reference.astype(bool)]
+    clinical = None
+    if args.clinical:
+        print("Comparing both backends on the clinical structure sets ...", flush=True)
+        clinical = clinical_comparison(args.clinical)
     context = {
-        "rows": rows,
-        "rois": rois,
+        "run": info,
+        "rois": roi_table(rows),
+        "capability": capability,
+        "shipped_failures": [
+            [family, detail, len(g)]
+            for (family, detail), g in shipped.groupby(["family", "detail"])
+        ],
+        "absent_area": {
+            m: float(absent[absent.method == m].error_mm2.sum()) for m in METHOD.values()
+        },
         "manifest": manifest,
         "checks": checks,
         "frame_changes": frame_changes(manifest, study, work),
         "timings": extra["timings"],
         "code_hashes": code_hashes,
-        "version": git_revision(),
+        "versions": converter_versions(study),
+        "clinical": clinical,
         "seconds": time.perf_counter() - started,
+        "reused": bool(args.reuse),
     }
-    if args.out:
-        write_report(args.out, context)
-        print(f"wrote {args.out}")
+    print(f"kept the results in {save_results(RESULTS_NAME, context)}")
+    render(context)
     return 0
 
 

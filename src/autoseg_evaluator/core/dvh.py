@@ -26,9 +26,9 @@ outside it has no calculated dose, so it is left out rather than given one,
 and the result says what share of the structure the statistics cover.
 
 Validated against the analytic datasets of Nelms et al. 2015 (Med Phys
-42:4435) and against disc phantoms in ``docs/DVH_METHOD_VALIDATION.md``,
-produced by ``scripts/validate_dvh_methods.py``. Until v3 the DVH came from
-dicompyler-core, which that report also scores.
+42:4435) and against disc phantoms in Supplementary 1 (``docs/validation/``),
+part A of which ``scripts/validate_dvh_methods.py`` produces. Until v3 the DVH
+came from dicompyler-core, which that report also scores.
 """
 
 from __future__ import annotations

@@ -1,0 +1,140 @@
+# Supplementary 5 - STAPLE Implementation: full results
+
+AutoSeg Evaluator 2.6.1, commit 9dc078f · computed 2026-10-02 by `scripts/validate_staple_against_upstream.py`. The summary is [Supplementary 5](Supplementary_5_STAPLE_Implementation.md). Regenerate this file rather than editing it.
+
+**Privacy:** this file contains no PHI. ROI display names (organ names) are shown; no SOPInstanceUIDs, filenames, patient identifiers, dates, or institution metadata are included.
+
+## What is validated
+
+AutoSeg's `compute_staple` wraps `SimpleITK.STAPLEImageFilter` and adds three steps: (1) a union bounding-box crop, so STAPLE estimates in the structure's neighbourhood rather than over the scan's field of view (its effect is measured under *What the crop changes*), (2) a P >= 0.5 threshold of the probabilistic truth into a binary consensus, and (3) a pad-back to the original image extent. The validator reconstructs the same pipeline **independently**, using only NumPy geometry and a fresh `SimpleITK.STAPLEImageFilter` call, and compares:
+
+- **Per-rater sensitivity & specificity**, the EM performance parameters that constitute the STAPLE algorithm (Warfield 2004, Eqs. 7-8). Compared bit-for-bit.
+- **Binary consensus mask**, compared voxel-for-voxel (XOR count).
+- **Consensus volume (cc)** and **mean binary entropy**, AutoSeg's derived uncertainty summaries, recomputed independently and compared.
+
+The only quantity carried across from AutoSeg is the single integer bounding-box padding it selected (a reported diagnostic), so that both paths feed the upstream filter the *identical* prepared input. The STAPLE estimator, threshold, and summaries are all computed afresh on the reference side.
+
+The reconstruction is given AutoSeg's iteration cap, so it checks the wrapper, not the cap. A second comparison runs SimpleITK's filter on the same input with **its own defaults**: no practical iteration limit, so it stops only when its estimates converge, which is STAPLE as published. Agreement there shows that AutoSeg's cap leaves STAPLE to converge as SimpleITK would. The same filter capped at 100 iterations, AutoSeg's default before v3, shows what that cap changed.
+
+## Software environment
+
+| Component | Version |
+| --- | --- |
+| AutoSeg Evaluator | `2.6.1, commit 9dc078f` |
+| Python | `3.12.3` |
+| Operating system | `Windows 10` |
+| SimpleITK | `2.3.1` |
+| pydicom | `2.4.4` |
+| numpy | `1.26.4` |
+
+## Validation input
+
+- **CT volume:** 512 x 512 x 208 voxels, spacing 1.367 x 1.367 x 2.000 mm
+- **RTSTRUCT files (raters) loaded:** 7
+- **Organs contoured by 2+ raters and validated:** 55 (spanning 168 rater contours in total)
+- **STAPLE parameters:** max_iterations = 500, confidence_weight = 1.0, adaptive bbox upper foreground-ratio target = 0.5, padding 2-25 voxels
+
+The validation cohort is a single anonymised head-and-neck patient (HN1) used for development testing, contoured by several independent auto-segmentation systems and manual observers, each treated as a STAPLE rater. STAPLE requires 2+ raters; each organ below was contoured by the stated number of them.
+
+## STAPLE parity vs `SimpleITK.STAPLEImageFilter`
+
+**Headline result:** **55 / 55 consensus computations were bit-for-bit identical**: every per-rater sensitivity and specificity matched to zero absolute difference, every binary consensus mask was voxel-identical (XOR = 0), and consensus volume and mean entropy reproduced to within floating-point round-off.
+
+**Against SimpleITK's own defaults:** 55 / 55 identical in every per-rater sensitivity and specificity and every consensus voxel. STAPLE converged within AutoSeg's cap of 500 iterations on 55 / 55 organs, taking 2-151 iterations; SimpleITK on its own took 2-151.
+
+**Capped at 100 iterations:** 2 / 55 organs stop before converging (ln_neck_viia_l (102), spinalcord (151), iterations needed in brackets); their consensus differs from the converged one by 0 voxels and their estimates by up to 8.066e-06.
+
+### Per-organ results
+
+`sens |Δ|` / `spec |Δ|` are the maximum absolute differences across the organ's raters; `XOR` is the voxel-disagreement count of the binary consensus. `**0**` denotes exact equality. *Iterations* are AutoSeg's / SimpleITK's with its own defaults; *Defaults* says whether AutoSeg's result equals the latter exactly; *Cap 100* gives the consensus voxels that cap changes, where it stops STAPLE early.
+
+| Organ | Raters | sens \|Δ\| | spec \|Δ\| | Consensus voxels | XOR | Volume (cc) | Vol \|Δ\| | Entropy \|Δ\| | Match | Iterations | Defaults | Cap 100 | Padding |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- | ---: | ---: |
+| `brainstem` | 6 | **0** | **0** | 7,874 | 0 | 29.4281 | **0** | **0** | ✅ | 24 / 24 | ✅ | converged | 2 |
+| `cochlea_l` | 5 | **0** | **0** | 55 | 0 | 0.2056 | **0** | **0** | ✅ | 15 / 15 | ✅ | converged | 2 |
+| `cochlea_r` | 5 | **0** | **0** | 102 | 0 | 0.3812 | **0** | **0** | ✅ | 16 / 16 | ✅ | converged | 2 |
+| `lips` | 5 | **0** | **0** | 11,705 | 0 | 43.7460 | **0** | **0** | ✅ | 17 / 17 | ✅ | converged | 2 |
+| `parotid_l` | 5 | **0** | **0** | 10,680 | 0 | 39.9152 | **0** | **0** | ✅ | 38 / 38 | ✅ | converged | 2 |
+| `parotid_r` | 5 | **0** | **0** | 10,759 | 0 | 40.2104 | **0** | **0** | ✅ | 35 / 35 | ✅ | converged | 2 |
+| `brain` | 4 | **0** | **0** | 363,989 | 0 | 1360.3645 | **0** | **0** | ✅ | 30 / 30 | ✅ | converged | 2 |
+| `esophagus` | 4 | **0** | **0** | 11,795 | 0 | 44.0824 | **0** | **0** | ✅ | 8 / 8 | ✅ | converged | 2 |
+| `eye_l` | 4 | **0** | **0** | 2,155 | 0 | 8.0540 | **0** | **0** | ✅ | 13 / 13 | ✅ | converged | 2 |
+| `eye_r` | 4 | **0** | **0** | 2,053 | 0 | 7.6728 | **0** | **0** | ✅ | 10 / 10 | ✅ | converged | 2 |
+| `larynx` | 4 | **0** | **0** | 9,391 | 0 | 35.0977 | **0** | **0** | ✅ | 20 / 20 | ✅ | converged | 2 |
+| `lens_l` | 4 | **0** | **0** | 71 | 0 | 0.2654 | **0** | **0** | ✅ | 8 / 8 | ✅ | converged | 2 |
+| `lens_r` | 4 | **0** | **0** | 73 | 0 | 0.2728 | **0** | **0** | ✅ | 9 / 9 | ✅ | converged | 2 |
+| `body` | 3 | **0** | **0** | 4,870,225 | 0 | 18201.8718 | **0** | **0** | ✅ | 3 / 3 | ✅ | converged | 2 |
+| `bone_mandible` | 3 | **0** | **0** | 17,321 | 0 | 64.7351 | **0** | **0** | ✅ | 7 / 7 | ✅ | converged | 2 |
+| `brachialplex_l` | 3 | **0** | **0** | 3,852 | 0 | 14.3964 | **0** | **0** | ✅ | 24 / 24 | ✅ | converged | 2 |
+| `brachialplex_r` | 3 | **0** | **0** | 4,363 | 0 | 16.3062 | **0** | **0** | ✅ | 22 / 22 | ✅ | converged | 2 |
+| `cavity_oral` | 3 | **0** | **0** | 27,505 | 0 | 102.7966 | **0** | **0** | ✅ | 13 / 13 | ✅ | converged | 2 |
+| `glnd_submand_l` | 3 | **0** | **0** | 2,368 | 0 | 8.8501 | **0** | **0** | ✅ | 10 / 10 | ✅ | converged | 2 |
+| `glnd_submand_r` | 3 | **0** | **0** | 3,145 | 0 | 11.7541 | **0** | **0** | ✅ | 20 / 20 | ✅ | converged | 2 |
+| `glnd_thyroid` | 3 | **0** | **0** | 3,812 | 0 | 14.2469 | **0** | **0** | ✅ | 8 / 8 | ✅ | converged | 2 |
+| `ln_neck_ia` | 3 | **0** | **0** | 387 | 0 | 1.4464 | **0** | **0** | ✅ | 21 / 21 | ✅ | converged | 2 |
+| `ln_neck_ii_l` | 3 | **0** | **0** | 8,568 | 0 | 32.0219 | **0** | **0** | ✅ | 15 / 15 | ✅ | converged | 2 |
+| `ln_neck_ii_r` | 3 | **0** | **0** | 9,693 | 0 | 36.2264 | **0** | **0** | ✅ | 14 / 14 | ✅ | converged | 2 |
+| `ln_neck_iii_l` | 3 | **0** | **0** | 6,521 | 0 | 24.3714 | **0** | **0** | ✅ | 16 / 16 | ✅ | converged | 2 |
+| `ln_neck_iii_r` | 3 | **0** | **0** | 7,288 | 0 | 27.2380 | **0** | **0** | ✅ | 14 / 14 | ✅ | converged | 2 |
+| `ln_neck_viia_l` | 3 | **0** | **0** | 1,571 | 0 | 5.8714 | **0** | **0** | ✅ | 102 / 102 | ✅ | 0 | 2 |
+| `ln_neck_viia_r` | 3 | **0** | **0** | 1,590 | 0 | 5.9424 | **0** | **0** | ✅ | 41 / 41 | ✅ | converged | 2 |
+| `ln_neck_viib_l` | 3 | **0** | **0** | 1,012 | 0 | 3.7822 | **0** | **0** | ✅ | 25 / 25 | ✅ | converged | 2 |
+| `ln_neck_viib_r` | 3 | **0** | **0** | 1,472 | 0 | 5.5014 | **0** | **0** | ✅ | 19 / 19 | ✅ | converged | 2 |
+| `mandible` | 3 | **0** | **0** | 18,519 | 0 | 69.2125 | **0** | **0** | ✅ | 12 / 12 | ✅ | converged | 2 |
+| `musc_constrict` | 3 | **0** | **0** | 5,596 | 0 | 20.9144 | **0** | **0** | ✅ | 23 / 23 | ✅ | converged | 2 |
+| `opticchiasm` | 3 | **0** | **0** | 219 | 0 | 0.8185 | **0** | **0** | ✅ | 71 / 71 | ✅ | converged | 2 |
+| `opticnrv_l` | 3 | **0** | **0** | 145 | 0 | 0.5419 | **0** | **0** | ✅ | 19 / 19 | ✅ | converged | 2 |
+| `opticnrv_r` | 3 | **0** | **0** | 155 | 0 | 0.5793 | **0** | **0** | ✅ | 19 / 19 | ✅ | converged | 2 |
+| `oral_cavity` | 3 | **0** | **0** | 33,428 | 0 | 124.9331 | **0** | **0** | ✅ | 11 / 11 | ✅ | converged | 2 |
+| `spinal_cord` | 3 | **0** | **0** | 7,133 | 0 | 26.6587 | **0** | **0** | ✅ | 30 / 30 | ✅ | converged | 2 |
+| `spinalcord` | 3 | **0** | **0** | 7,411 | 0 | 27.6977 | **0** | **0** | ✅ | 151 / 151 | ✅ | 0 | 2 |
+| `glnd_lacrimal_l` | 2 | **0** | **0** | 53 | 0 | 0.1981 | **0** | **0** | ✅ | 28 / 28 | ✅ | converged | 2 |
+| `glnd_lacrimal_r` | 2 | **0** | **0** | 59 | 0 | 0.2205 | **0** | **0** | ✅ | 34 / 34 | ✅ | converged | 2 |
+| `glottis` | 2 | **0** | **0** | 775 | 0 | 2.8965 | **0** | **0** | ✅ | 48 / 48 | ✅ | converged | 2 |
+| `ln_neck_ib_l` | 2 | **0** | **0** | 5,501 | 0 | 20.5593 | **0** | **0** | ✅ | 49 / 49 | ✅ | converged | 2 |
+| `ln_neck_ib_r` | 2 | **0** | **0** | 6,171 | 0 | 23.0634 | **0** | **0** | ✅ | 50 / 50 | ✅ | converged | 2 |
+| `ln_neck_iva_l` | 2 | **0** | **0** | 3,250 | 0 | 12.1465 | **0** | **0** | ✅ | 45 / 45 | ✅ | converged | 2 |
+| `ln_neck_iva_r` | 2 | **0** | **0** | 3,124 | 0 | 11.6756 | **0** | **0** | ✅ | 40 / 40 | ✅ | converged | 2 |
+| `ln_neck_ivb_l` | 2 | **0** | **0** | 3,573 | 0 | 13.3537 | **0** | **0** | ✅ | 31 / 31 | ✅ | converged | 2 |
+| `ln_neck_ivb_r` | 2 | **0** | **0** | 5,224 | 0 | 19.5241 | **0** | **0** | ✅ | 38 / 38 | ✅ | converged | 2 |
+| `ln_neck_v_l` | 2 | **0** | **0** | 4,102 | 0 | 15.3307 | **0** | **0** | ✅ | 35 / 35 | ✅ | converged | 2 |
+| `ln_neck_v_r` | 2 | **0** | **0** | 4,086 | 0 | 15.2709 | **0** | **0** | ✅ | 41 / 41 | ✅ | converged | 2 |
+| `ln_neck_via` | 2 | **0** | **0** | 6,390 | 0 | 23.8818 | **0** | **0** | ✅ | 43 / 43 | ✅ | converged | 2 |
+| `lung_l` | 2 | **0** | **0** | 223,199 | 0 | 834.1790 | **0** | **0** | ✅ | 2 / 2 | ✅ | converged | 2 |
+| `lung_r` | 2 | **0** | **0** | 261,043 | 0 | 975.6164 | **0** | **0** | ✅ | 3 / 3 | ✅ | converged | 2 |
+| `optic_chiasm` | 2 | **0** | **0** | 37 | 0 | 0.1383 | **0** | **0** | ✅ | 20 / 20 | ✅ | converged | 2 |
+| `pituitary` | 2 | **0** | **0** | 31 | 0 | 0.1159 | **0** | **0** | ✅ | 24 / 24 | ✅ | converged | 2 |
+| `trachea` | 2 | **0** | **0** | 5,974 | 0 | 22.3271 | **0** | **0** | ✅ | 24 / 24 | ✅ | converged | 2 |
+
+## What the crop changes
+
+STAPLE estimates each rater's specificity, and the prior probability of foreground, from every voxel it is given. Over a whole CT those are dominated by background every rater agrees on, and so depend on the scan's field of view. AutoSeg estimates within the raters' union bounding box instead. This compares its consensus with STAPLE run, on SimpleITK's own defaults, over the whole image and over the union box widened by 25 voxels.
+
+- **Same consensus as the whole image:** 50 / 55 organs, voxel for voxel.
+- **Whole-image STAPLE left an organ empty that the crop did not:** 0 / 55; the crop one the whole image did not: 0 / 55.
+- **Padding AutoSeg chose:** 2 voxels.
+- **A 25-voxel box gives the whole image's consensus, voxel for voxel:** 55 / 55 organs.
+- **Time per organ:** median 0.44 s cropped, 7.8 s over the whole image (largest 1.6 s and 60.9 s).
+
+Organs whose consensus differs over the whole image:
+
+| Organ | Raters | AutoSeg voxels | Whole-image voxels | Volume | Dice |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `parotid_l` | 5 | 10,680 | 11,533 | +8.0 % | 0.9616 |
+| `brainstem` | 6 | 7,874 | 8,460 | +7.4 % | 0.9641 |
+| `parotid_r` | 5 | 10,759 | 11,002 | +2.3 % | 0.9888 |
+| `ln_neck_viia_l` | 3 | 1,571 | 1,580 | +0.6 % | 0.9971 |
+| `larynx` | 4 | 9,391 | 9,400 | +0.1 % | 0.9995 |
+
+## Reproducing this report
+
+```
+python scripts/validate_staple_against_upstream.py --data /path/to/DICOM/folder
+```
+
+The script reads every `.dcm` in the folder, identifies the CT series and the RTSTRUCTs, groups ROIs by clinical name, and runs the comparison for every organ contoured by 2+ raters. Exit code is 0 only if every comparison was exact. The equivalence is also locked in CI via `tests/test_staple_equivalence.py`.
+
+## References
+
+1. **STAPLE**: Warfield SK, Zou KH, Wells WM. *Simultaneous truth and performance level estimation (STAPLE): an algorithm for the validation of image segmentation.* IEEE Transactions on Medical Imaging, 23(7):903-921, 2004.
+2. **SimpleITK**: Lowekamp BC, Chen DT, Ibáñez L, Blezek D. *The Design of SimpleITK.* Frontiers in Neuroinformatics, 7:45, 2013. `STAPLEImageFilter` wraps the ITK implementation of the algorithm above.

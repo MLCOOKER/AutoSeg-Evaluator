@@ -88,7 +88,7 @@ _MODE_GENERIC_STAPLE_NO_GT = "Generic STAPLE no GT"
 #: contour; a boundary even half a voxel away along the dose gradient carries an
 #: independent error, and on the Nelms benchmark the 95th-percentile error in a
 #: Dmean difference rose from 2.1 % to 3.0 % on 1.37 mm pixels, and every dose
-#: statistic's with it (docs/DVH_MASK_VS_POLYGON.md). The cost of the choice: a
+#: statistic's with it (Supplementary 1, docs/validation/). The cost of the choice: a
 #: contour identical to the consensus differs from it by the mask's error, up to
 #: 2.2 % in Dmean there.
 DVH_FROM_CONTOURS = "contours"

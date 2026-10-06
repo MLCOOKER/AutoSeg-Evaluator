@@ -13,7 +13,7 @@ Usage::
 
     python scripts/compare_rasterisers.py \\
         --data /path/to/folder/containing/CT/and/RTSS/files \\
-        --out docs/RASTERISER_COMPARISON.md
+        --out docs/archive/RASTERISER_COMPARISON.md
 """
 
 from __future__ import annotations

@@ -274,15 +274,14 @@ reference implementation or published values:
   voxel-identical to PlatiPy 0.7.2's `transform_point_set_from_dicom_struct`;
   it snaps contour vertices to the voxel grid before filling and therefore
   over-estimates volume by roughly `1.5 / R` (R = structure radius in voxels)
-  — ~3 % for large organs, >50 % for structures one to two voxels across; see
-  [`docs/RASTERISER_COMPARISON.md`](docs/RASTERISER_COMPARISON.md).
-  Scored in an independent synthetic study of six converters (108
+  — ~3 % for large organs, >50 % for structures one to two voxels across.
+  Scored in the authors' synthetic benchmark beside six converters (108
   configurations, 14 shape families, error = area gained plus area lost
   against the stored polygon), the default backend converts all 1,512 cases,
   XOR contours included, and on the 176 cases every converter shares its error
   is 22.46 %, level with the best converter (Plastimatch, 22.47 %) and against
   19.12 % for the attainable optimum; see
-  [`docs/RASTERISATION_FIDELITY.md`](docs/RASTERISATION_FIDELITY.md).
+  [Supplementary 2](docs/validation/Supplementary_2_Binary_Mask_Rasteriser_Validation_Report.md).
 - **3D mask metrics** — Dice, HD100, HD95, Surface Dice @ 3 mm and mean
   surface distance produce zero absolute difference vs
   `google-deepmind/surface-distance` (Nikolov et al. 2018) on every
@@ -291,18 +290,18 @@ reference implementation or published values:
   the embedded port and the application's whole metric path are identical to
   the package bit for bit: every per-element distance and area, Hausdorff at
   five percentiles, both directional means and Surface Dice at six tolerances;
-  see [`docs/SURFACE_DISTANCE_EQUIVALENCE.md`](docs/SURFACE_DISTANCE_EQUIVALENCE.md).
+  see [Supplementary 4](docs/validation/Supplementary_4_Google-deepmind_surface-distance_Implementation.md).
 - **2D contour metrics** — both engines reproduce the published values of
   Boukerroui et al. (2023) on all 150 synthetic pairs through this
   application's own call path, and the default compiled engine does so from
   the DICOM files themselves too, with a largest error of ~5e-10 mm against a
   0.001 mm threshold; 44 stress cases behave as specified. See
-  [`docs/POLYGON_VALIDATION_REPORT.md`](docs/POLYGON_VALIDATION_REPORT.md).
+  [`docs/archive/POLYGON_VALIDATION_REPORT.md`](docs/archive/POLYGON_VALIDATION_REPORT.md).
   Against the ideal analytical shapes themselves, distances differ by at most
   0.058 mm on the coarse grid and 0.008 mm on the fine one, all of it the
   stored circles' own polygonal approximation; against the authors' own
   software, by at most 0.013 mm, inside its sampling step. See
-  [`docs/POLYGON_ANALYTIC_VALIDATION.md`](docs/POLYGON_ANALYTIC_VALIDATION.md).
+  [Supplementary 3](docs/validation/Supplementary_3_2D_Polygon_Metric_Validation_Report.md).
 - **Contour reading** — on a 70-structure-set head-and-neck cohort (5,166
   structures), the shared reading gave regions identical to the 2D engine
   supplier's own parser on all 5,143 structures both read, and every one of
@@ -313,7 +312,8 @@ reference implementation or published values:
   (Warfield et al. 2004): every per-rater sensitivity/specificity matched
   to zero, every binary consensus voxel-identical. All 55 are also identical
   to SimpleITK run on its own defaults, which set no iteration limit: STAPLE
-  converges in 2–151 iterations, inside the application's cap of 500.
+  converges in 2–151 iterations, inside the application's cap of 500. See
+  [Supplementary 5](docs/validation/Supplementary_5_STAPLE_Implementation.md).
 - **DVH** — against the analytic datasets of Nelms et al. (Med Phys 2015,
   42:4435), no dose-volume parameter is more than 3 % off with contours every
   0.2 mm (0 / 260) and 10 / 195 are with 1–3 mm contours and dose grids,
@@ -328,34 +328,25 @@ reference implementation or published values:
   their contours: the consensus's mask error is then common to every source and
   cancels between them, while taking each contour from its own mask too adds an
   independent error for any contour that does not coincide with the consensus.
-  See [`docs/DVH_MASK_VS_POLYGON.md`](docs/DVH_MASK_VS_POLYGON.md).
+  See [Supplementary 1](docs/validation/Supplementary_1_DVH_Validation_Report.md).
 
-The full per-ROI breakdowns are in
-[`docs/VALIDATION_REPORT.md`](docs/VALIDATION_REPORT.md) (masks + 3D metrics;
-generated at v2.3.2, when it also covered the since-removed mask APL),
-[`docs/SURFACE_DISTANCE_EQUIVALENCE.md`](docs/SURFACE_DISTANCE_EQUIVALENCE.md),
-[`docs/POLYGON_VALIDATION_REPORT.md`](docs/POLYGON_VALIDATION_REPORT.md),
-[`docs/POLYGON_ANALYTIC_VALIDATION.md`](docs/POLYGON_ANALYTIC_VALIDATION.md),
-[`docs/RASTERISATION_FIDELITY.md`](docs/RASTERISATION_FIDELITY.md),
-[`docs/STAPLE_VALIDATION_REPORT.md`](docs/STAPLE_VALIDATION_REPORT.md),
-[`docs/DVH_METHOD_VALIDATION.md`](docs/DVH_METHOD_VALIDATION.md), and
-[`docs/DVH_MASK_VS_POLYGON.md`](docs/DVH_MASK_VS_POLYGON.md). Each report
-is auto-generated by a script under [`scripts/`](scripts/) and contains no
-PHI (no DICOM UIDs, filenames, patient identifiers, dates, or institution
-metadata — only anonymised ROI display names and numeric values). Anyone can
-re-run the validators against their own data to verify the parity claims
-independently:
+The supplementary validation reports, each a short report with a full-results
+file holding every table behind it, are listed in
+[`docs/validation`](docs/validation/README.md). Reports from earlier
+versions are in [`docs/archive`](docs/archive/README.md). Each report is
+auto-generated by a script under [`scripts/`](scripts/) and contains no PHI (no
+DICOM UIDs, filenames, patient identifiers, dates, or institution metadata —
+only anonymised ROI display names and numeric values). Anyone can re-run the
+validators against their own data to verify the parity claims independently:
 
 ```bash
-python scripts/validate_against_upstream.py        --data <CT+RTSS folder>          --out docs/VALIDATION_REPORT.md
-python scripts/validate_surface_distance_equivalence.py                             --out docs/SURFACE_DISTANCE_EQUIVALENCE.md
-python scripts/validate_polygon_metrics.py         --data <published archives>      --out docs/POLYGON_VALIDATION_REPORT.md
-python scripts/validate_polygon_analytic.py        --package <review package>       --out docs/POLYGON_ANALYTIC_VALIDATION.md
-python scripts/validate_rasterisation_fidelity.py  --study <study>/project          --out docs/RASTERISATION_FIDELITY.md
+python scripts/validate_dvh_methods.py             --nelms <Nelms et al. data>      # Supplementary 1, part A
+python scripts/validate_dvh_mask_vs_polygon.py     --nelms <Nelms et al. data>      # Supplementary 1, part B
+python scripts/validate_rasterisation_fidelity.py  --study <benchmark>/project --clinical <CT+RTSS folder>  # Supplementary 2
+python scripts/validate_polygon_analytic.py        --data <Boukerroui et al. data>  # Supplementary 3
+python scripts/validate_surface_distance_equivalence.py                             # Supplementary 4
+python scripts/validate_staple_against_upstream.py --data <CT+multi-RTSS folder>    # Supplementary 5
 python scripts/validate_contour_reading.py         <folder of CT+RTSS>
-python scripts/validate_staple_against_upstream.py --data <CT+multi-RTSS folder>    --out docs/STAPLE_VALIDATION_REPORT.md
-python scripts/validate_dvh_methods.py             --nelms <Nelms et al. data>      --out docs/DVH_METHOD_VALIDATION.md
-python scripts/validate_dvh_mask_vs_polygon.py     --nelms <Nelms et al. data>      --out docs/DVH_MASK_VS_POLYGON.md
 ```
 
 The DVH benchmark needs the `validation` extra (`pip install .[validation]`)

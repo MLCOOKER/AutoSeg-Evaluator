@@ -53,7 +53,12 @@ forced where the method names one.
 Usage::
 
     python scripts/validate_dvh_methods.py --nelms <Nelms dataset folder> \\
-        --out docs/DVH_METHOD_VALIDATION.md [--csv results.csv]
+        [--csv results.csv]
+
+It keeps its results (``validation_common.save_results``) and rewrites
+Supplementary 1, which ``supplementary_1_dvh.py`` builds from them and from
+``validate_dvh_mask_vs_polygon.py``'s. The run takes about 40 minutes; run it on
+an idle machine, because the full results quote timings.
 
 Every input is synthetic; nothing here comes from a patient.
 """
@@ -62,12 +67,10 @@ from __future__ import annotations
 
 import argparse
 import csv
-import datetime
 import importlib.metadata
 import math
 import os
 import platform
-import subprocess
 import sys
 import tempfile
 import time
@@ -84,8 +87,8 @@ import SimpleITK as sitk
 from pydicom.dataset import Dataset, FileDataset
 from pydicom.uid import ExplicitVRLittleEndian, RTDoseStorage, RTStructureSetStorage, generate_uid
 from scipy import optimize
+from validation_common import load_results, run_info, save_results
 
-from autoseg_evaluator import __version__ as autoseg_version
 from autoseg_evaluator.core.dvh import (
     SLIVER,
     DoseGrid,
@@ -1654,41 +1657,26 @@ def _version(package: str) -> str:
         return "not installed"
 
 
-def _commit() -> str:
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=Path(__file__).parent,
-            check=True,
-        )
-        return out.stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "unknown"
+#: The name this script's results are cached under (``validation_common``).
+RESULTS_NAME = "dvh_methods"
+#: How the cache rebuilds the records' dataclasses.
+RESULT_TYPES = {"NelmsRow": NelmsRow, "Result": lambda **fields: Result(volume_at=None, **fields)}
 
 
-def write_report(
-    target: Path,
-    nelms: list[dict],
-    discs: list[dict],
-    large: list[dict],
-    checks: dict[str, str],
-    args: argparse.Namespace,
-) -> None:
+def load() -> dict:
+    """This script's last results, as :func:`main` kept them."""
+    return load_results(RESULTS_NAME, RESULT_TYPES)
+
+
+def full_results_part(data: dict) -> list[str]:
+    """Every table this script computes, for Supplementary 1's full results."""
+    nelms, discs, large = data["nelms"], data["discs"], data["large"]
+    checks, settings = data["checks"], data["settings"]
     lines = [
-        "# DVH method validation",
-        "",
-        f"Generated {datetime.date.today().isoformat()} by `scripts/validate_dvh_methods.py` "
-        f"(AutoSeg {autoseg_version}, commit {_commit()}). Regenerate with "
-        "`python scripts/validate_dvh_methods.py --nelms <folder> --out "
-        "docs/DVH_METHOD_VALIDATION.md`.",
-        "",
-        "Roadmap item #7. Until v3.0.0 AutoSeg took structure-set DVHs from "
-        "dicompyler-core; since v3.0.0 it integrates the dose over the contours "
-        "themselves (**autoseg** below). That method, v2's, and every alternative "
-        "considered are scored here against DVHs whose true values are known exactly. "
-        "The decision and its reasons are recorded in `docs/V3_RELEASE_STATUS.md`.",
+        "Until v3.0.0 AutoSeg took structure-set DVHs from dicompyler-core; since v3.0.0 it "
+        "integrates the dose over the contours themselves (**autoseg** below). That method, "
+        "v2's, and every alternative considered are scored here against DVHs whose true "
+        "values are known exactly.",
         "",
         "## Methods",
         "",
@@ -1718,13 +1706,13 @@ def write_report(
             [
                 "mask-ss",
                 "the same mask",
-                f"sub-samples ≤ {args.subsample_mm:g} mm apart in every CT voxel, trilinear",
+                f"sub-samples ≤ {settings['subsample_mm']:g} mm apart in every CT voxel, trilinear",
                 "an equal share of its voxel",
             ],
             [
                 "polygon",
                 "the shared reading's regions, no voxels",
-                f"sub-cells ≤ {args.subsample_mm:g} mm apart, trilinear, each at the "
+                f"sub-cells ≤ {settings['subsample_mm']:g} mm apart, trilinear, each at the "
                 "centroid of the part covered",
                 "the exact area of the region in its sub-cell × its share of the slice",
             ],
@@ -1780,9 +1768,9 @@ def write_report(
         lines += ["Not run: no Nelms data were given.", ""]
 
     if discs:
-        lines += discs_section(discs, args.placements)
+        lines += discs_section(discs, settings["placements"])
     if nelms:
-        lines += sweep_section(nelms, args.subsample_mm)
+        lines += sweep_section(nelms, settings["subsample_mm"])
     if large:
         lines += large_section(large)
 
@@ -1810,19 +1798,25 @@ def write_report(
         "",
         "## Environment",
         "",
+        f"{data['environment']}. Sub-sample spacing {settings['subsample_mm']:g} mm; "
+        f"{settings['placements']} placements per disc phantom; seed {settings['seed']}.",
+        "",
+    ]
+    if nelms:
+        lines += ["## Test 3 by dataset", "", "Lowest to highest volume error (%)."]
+        lines += [""] + nelms_test3_detail(nelms)
+    return lines
+
+
+def environment() -> str:
+    """The machine and packages a run's timings and values came from."""
+    return (
         f"{platform.processor() or platform.machine()}, {os.cpu_count()} logical cores; "
         f"Python {platform.python_version()} on {platform.system()} {platform.release()}; "
         f"numpy {_version('numpy')}, scipy {_version('scipy')}, shapely {_version('shapely')}, "
         f"SimpleITK {_version('SimpleITK')}, pydicom {_version('pydicom')}, dicompyler-core "
-        f"{_version('dicompyler-core')}. Sub-sample spacing {args.subsample_mm:g} mm; "
-        f"{args.placements} placements per disc phantom; seed {args.seed}.",
-        "",
-    ]
-    if nelms:
-        lines += ["## Appendix: Test 3 by dataset", "", "Lowest to highest volume error (%)."]
-        lines += [""] + nelms_test3_detail(nelms)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines), encoding="utf-8")
+        f"{_version('dicompyler-core')}"
+    )
 
 
 def write_csv(target: Path, nelms: list[dict], discs: list[dict], large: list[dict]) -> None:
@@ -1915,7 +1909,6 @@ def write_csv(target: Path, nelms: list[dict], discs: list[dict], large: list[di
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--nelms", type=Path, help="Folder of the Nelms et al. 2015 dataset.")
-    parser.add_argument("--out", type=Path, required=True, help="Write the markdown report here.")
     parser.add_argument("--csv", type=Path, help="Also write every value, long format.")
     parser.add_argument("--subsample-mm", type=float, default=0.25)
     parser.add_argument("--placements", type=int, default=8, help="Placements per disc phantom.")
@@ -1924,6 +1917,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-large", action="store_true")
     args = parser.parse_args(argv)
 
+    started = time.perf_counter()
+    info = run_info()
     checks = {
         "truth": check_truth(args.seed),
         "sampler": check_sampler(args.nelms),
@@ -1937,10 +1932,30 @@ def main(argv: list[str] | None = None) -> int:
         nelms = run_nelms(args.nelms, args.subsample_mm, variants)
     discs = [] if args.skip_discs else run_discs(args.subsample_mm, args.placements, args.seed)
     large = [] if args.skip_large else run_large(args.seed)
-    write_report(args.out, nelms, discs, large, checks, args)
     if args.csv:
         write_csv(args.csv, nelms, discs, large)
-    print(f"wrote {args.out}")
+    data = {
+        "run": info,
+        "seconds": time.perf_counter() - started,
+        "environment": environment(),
+        "settings": {
+            "subsample_mm": args.subsample_mm,
+            "placements": args.placements,
+            "seed": args.seed,
+        },
+        "checks": checks,
+        "nelms": nelms,
+        "discs": discs,
+        "large": large,
+    }
+    print(f"kept the results in {save_results(RESULTS_NAME, data)}")
+    from supplementary_1_dvh import render  # here: it imports this module
+
+    try:
+        for path in render():
+            print(f"wrote {path}")
+    except FileNotFoundError as missing:
+        print(f"Supplementary 1 not written yet: {missing}")
     return 0
 
 

@@ -4,7 +4,7 @@ Every structure with contours takes its dose statistics from them, whatever it
 is compared against; a consensus, which exists only as a mask, is sampled over
 its voxels. So against a consensus the one mask error in a difference is the
 consensus's own, the same for every source, and it cancels between sources
-(docs/DVH_MASK_VS_POLYGON.md has why the test is not taken from its mask too).
+(Supplementary 1, docs/validation/, has why the test is not taken from its mask too).
 Within a drawer the dose and the CT are the ground truth's, so a structure's
 DVH is computed once, and a failure keeps its wording.
 """

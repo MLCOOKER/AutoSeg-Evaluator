@@ -3,12 +3,12 @@
 Boukerroui, Vasquez Osorio, Brunenberg and Gooding (Phys Imaging Radiat Oncol
 2023;26:100436) published 150 contour pairs whose metrics are known in closed
 form: squares against circles, centred and offset, at three CT resolutions,
-and two cuboids. ``validate_polygon_metrics.py`` checks this application
-against audited values for the polygons *as stored*. This script asks the
-question a reader of a paper asks instead: how close does AutoSeg Evaluator,
-as it runs, come to the ideal shapes, and to the authors' own software?
+and two cuboids. This script asks how close AutoSeg Evaluator, as it runs,
+comes to the ideal shapes, to the contours as stored, and to the authors' own
+software, and writes Supplementary 3: a short report (aim, method, results,
+findings) and its full results.
 
-Four references, kept apart because agreement with each means something else:
+Four sets of values, kept apart because agreement with each means something else:
 
 analytic
     The ideal shapes' closed-form values: the supplement's MATLAB tables for
@@ -16,9 +16,9 @@ analytic
     cuboids. A stored circle is a polygon, so a metric computed exactly on it
     still differs from the ideal circle's by the polygon's own deviation.
 audited
-    High-precision values for the stored polygons (``golden_metrics.json``,
-    from the metric suppliers' review package). The difference from these is
-    the computation's own error.
+    High-precision values for the stored polygons (``golden_metrics.json``),
+    computed in decimal arithmetic by a separate implementation. The difference
+    from these is the computation's own error.
 authors
     The authors' published empirical results, from their sampled
     implementation (0.05 mm boundary sampling, buffered-polygon APL).
@@ -26,13 +26,14 @@ AutoSeg
     This application: the published DICOM files, read by our grid builder and
     parser, measured by the engine the application selects.
 
-Every value below is recomputed from the files on each run.
+Every value is recomputed from the files on each run, and kept so that
+``--render-only`` can rewrite the reports without computing again.
 
 Usage::
 
     python scripts/validate_polygon_analytic.py \\
-        --package "<Native_Polygon_Metrics_Gooding_Expert_Review folder>" \\
-        --out docs/POLYGON_ANALYTIC_VALIDATION.md [--csv pairs.csv]
+        --data "<folder holding the DICOM archives and the authors' repository>" \\
+        [--csv pairs.csv]
 """
 
 from __future__ import annotations
@@ -45,7 +46,6 @@ import sys
 import tempfile
 import time
 import zipfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +54,17 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS.parent / "src"))
 
 from validate_polygon_metrics import _golden, _series_grid  # noqa: E402
-from validation_common import git_revision, long_path  # noqa: E402
+from validation_common import (  # noqa: E402
+    VALIDATION_DOCS,
+    load_results,
+    long_path,
+    md_table,
+    run_info,
+    save_results,
+    sci,
+    stamp,
+    unwrap,
+)
 
 #: The published benchmark is stated at these two tolerances.
 TOLERANCES_MM = (1.0, 2.0)
@@ -201,7 +211,7 @@ def author_values(case: dict[str, Any], tables) -> dict[str, float]:
 
 
 def author_reruns(package: Path) -> dict[tuple[str, str, int], float]:
-    """The authors' APL code, re-run by the review package: reference → test, 1 mm.
+    """The authors' APL code, re-run by the present authors: reference → test, 1 mm.
 
     From ``historical_validation/overlap_apl/comparison.csv``: their published
     function with three mechanical Shapely 2 edits, run on current libraries
@@ -335,7 +345,18 @@ def measure_all(archives: Path, engine_name: str | None) -> tuple[list[dict[str,
     return records, engine.label
 
 
-# ---- Report -------------------------------------------------------------------
+# ---- Reports ------------------------------------------------------------------
+
+SCRIPT = Path(__file__).name
+TITLE = "Supplementary 3 - 2D Polygon Metric Validation Report"
+REPORT = VALIDATION_DOCS / "Supplementary_3_2D_Polygon_Metric_Validation_Report.md"
+FULL_RESULTS = REPORT.with_name(REPORT.stem + "_Full_Results.md")
+#: The name this script's results are cached under (``validation_common``).
+RESULTS_NAME = "polygon_analytic"
+REPOSITORY = "https://github.com/Vitruvian-phantom-for-RadOnc/VitruvianPhantomPy"
+GRIDS = (
+    "fine (0.5 mm pixels, 0.5 mm planes), typical (0.96 mm, 1 mm) and coarse (1.8 × 2.2 mm, 3 mm)"
+)
 
 
 def _fmt(value: float, digits: int = 4) -> str:
@@ -350,10 +371,7 @@ def _fmt(value: float, digits: int = 4) -> str:
 
 def _table(headers: list[str], rows: list[list[str]], *, numeric: bool = True) -> list[str]:
     """A markdown table; ``numeric`` right-aligns every column after the first."""
-    rule = ["---"] + (["---:"] if numeric else ["---"]) * (len(headers) - 1)
-    lines = ["| " + " | ".join(headers) + " |", "|" + "|".join(rule) + "|"]
-    lines += ["| " + " | ".join(row) + " |" for row in rows]
-    return lines
+    return md_table(headers, rows, "l" + ("r" if numeric else "l") * (len(headers) - 1))
 
 
 def _errors(records, key: str, against: str, where) -> list[float]:
@@ -368,7 +386,7 @@ def _errors(records, key: str, against: str, where) -> list[float]:
 
 
 def _reference_errors(records, key: str, where) -> list[float]:
-    """The stored polygon's own departure from the ideal shape, by the audited values."""
+    """The stored polygon's own departure from the ideal shape, by the high-precision values."""
     return [
         record["audited"][key] - record["analytic"][key]
         for record in records
@@ -380,87 +398,379 @@ def _max_abs(values: list[float]) -> float:
     return max((abs(v) for v in values), default=float("nan"))
 
 
-def write_report(target: Path, records, engine: str, package: Path, seconds: float) -> None:
+def _square_circle_at(resolution: str):
+    def where(case: dict) -> bool:
+        return case["resolution"] == resolution and case["family"] in SQUARE_CIRCLE
+
+    return where
+
+
+def _everywhere(_case: dict) -> bool:
+    return True
+
+
+#: Every APL and NAPL the high-precision values give, both directions, both tolerances.
+OVERLAPS = tuple(
+    (f"{kind}_{side}_{tau:g}", f"{kind.upper()} {arrow} @ {tau:g} mm", unit)
+    for tau in TOLERANCES_MM
+    for side, arrow in (("a", "reference → test"), ("b", "test → reference"))
+    for kind, unit in (("apl", "mm"), ("napl", ""))
+)
+
+
+def headline(records) -> dict[str, Any]:
+    """The numbers both reports state, each computed from the records."""
     square = [r for r in records if r["case"]["family"] in SQUARE_CIRCLE]
+    sparse = [r for r in records if r["case"]["family"] == "cuboid_sparse"]
+    apl_gaps = [abs(r["autoseg"]["apl_a_1"] - r["authors"]["apl_a_1"]) for r in records]
+    disagreements = apl_disagreements(records)
+    distances = [key for key, _l, _u in DISTANCES]
+    # Whether AutoSeg's departure from the ideal shapes is the stored polygon's own, to
+    # the four decimals the reports print, for every quantity and grid.
+    same_as_stored = all(
+        _fmt(_max_abs(_errors(records, key, "analytic", _square_circle_at(res))))
+        == _fmt(_max_abs(_reference_errors(records, key, _square_circle_at(res))))
+        for key, _l, _u in DISTANCES + NAPLS
+        for res in RESOLUTIONS
+    )
+    return {
+        "computation_distance": max(
+            _max_abs(_errors(records, k, "audited", _everywhere)) for k in distances
+        ),
+        "computation_apl": max(
+            _max_abs(_errors(records, k, "audited", _everywhere))
+            for k, _l, unit in OVERLAPS
+            if unit == "mm"
+        ),
+        "computation_napl": max(
+            _max_abs(_errors(records, k, "audited", _everywhere))
+            for k, _l, unit in OVERLAPS
+            if unit == ""
+        ),
+        "shape": {
+            res: max(
+                _max_abs(_errors(records, k, "analytic", _square_circle_at(res))) for k in distances
+            )
+            for res in RESOLUTIONS
+        },
+        "same_as_stored": same_as_stored,
+        "sparse_distance": max(
+            abs(r["autoseg"][k] - r["analytic"][k]) for r in sparse for k in distances
+        ),
+        "sparse_apl": max(
+            abs(r["autoseg"][f"apl_a_{tau:g}"] - r["analytic"][f"apl_a_{tau:g}"])
+            for r in sparse
+            for tau in TOLERANCES_MM
+        ),
+        "authors_distance": max(
+            _max_abs(_errors(records, k, "authors", _everywhere)) for k in distances
+        ),
+        "apl_agree": sum(g <= 1e-3 for g in apl_gaps),
+        "apl_pairs": len(apl_gaps),
+        "apl_worst": max(apl_gaps),
+        "apl_relative": max(
+            (abs(d["ours"] - d["published"]) / d["ours"] * 100 for d in disagreements),
+            default=0.0,
+        ),
+        "apl_exact": max(
+            (abs(d["ours"] - d["exact"]) for d in disagreements),
+            default=0.0,
+        ),
+        "by_method": sum(d["why"] == "their method" for d in disagreements),
+        "not_reproduced": sum(d["why"] == "not reproduced" for d in disagreements),
+        "disagreements": disagreements,
+        "medians": max(
+            abs(r["authors"]["median"] - r["authors"]["median_chapter15"]) for r in records
+        ),
+        "relative": {
+            key: {
+                res: max(
+                    (
+                        abs(r["autoseg"][key] - r["analytic"][key]) / r["analytic"][key] * 100
+                        for r in square
+                        if r["case"]["resolution"] == res and r["analytic"][key]
+                    ),
+                    default=0.0,
+                )
+                for res in RESOLUTIONS
+            }
+            for key in distances
+        },
+    }
+
+
+#: How each metric's two directions are combined: (metric, per direction, reported as, planes).
+CONVENTIONS = [
+    [
+        "Hausdorff 100 %",
+        "The largest distance from one boundary to the other",
+        "The larger of the two directions",
+        "Planes both structures have",
+    ],
+    [
+        "Hausdorff 95 %",
+        "The 95th percentile of distance, weighted by boundary length",
+        "The larger of the two directions",
+        "Planes both structures have",
+    ],
+    [
+        "Median distance",
+        "The 50th percentile of distance, weighted by boundary length",
+        "The larger of the two directions",
+        "Planes both structures have",
+    ],
+    [
+        "Mean distance",
+        "The average distance, weighted by boundary length",
+        "The average of the two directions",
+        "Planes both structures have",
+    ],
+    [
+        "APL",
+        "The length of one boundary farther than τ from the other; a point exactly τ away"
+        " counts as matched",
+        "Reference → test, in mm; test → reference as a separate column",
+        "Every plane of the boundary measured; planes the other structure lacks count in full",
+    ],
+    [
+        "NAPL",
+        "APL as a fraction of that boundary's length",
+        "Total APL ÷ total boundary length over all planes; each direction separately",
+        "As APL",
+    ],
+]
+
+
+def write_report(target: Path, data: dict) -> None:
+    """Supplementary 3: what was validated, how, what was found, and what it decided."""
+    records = data["records"]
+    h = headline(records)
+    n = len(records)
+    per_grid = n // len(RESOLUTIONS)
+    n_square = sum(1 for r in records if r["case"]["family"] in SQUARE_CIRCLE) // len(RESOLUTIONS)
+    sparse = sorted(
+        (r for r in records if r["case"]["family"] == "cuboid_sparse"),
+        key=lambda r: RESOLUTIONS.index(r["case"]["resolution"]),
+    )
     lines = [
-        "# Native polygon metrics against the analytical shapes",
+        f"# {TITLE}",
         "",
-        "Generated by `scripts/validate_polygon_analytic.py`. Regenerate it rather",
-        "than editing it.",
+        f"{stamp(SCRIPT, data['run'])}. Every table behind this report is in its "
+        f"[full results]({FULL_RESULTS.name}).",
         "",
-        f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC · AutoSeg Evaluator, {git_revision()} · engine {engine} · "
-        f"{len(records)} pairs from the published DICOM files · {seconds:.0f} s",
+        "## Aim",
+        "",
+        "AutoSeg Evaluator v3 computes a second set of metrics directly on the contours stored",
+        "in the RTSTRUCT, plane by plane, without converting them to a binary mask: the",
+        "Hausdorff distance (100 % and 95 %), the mean and median contour distance, and the",
+        "added path length (APL) with its normalised form (NAPL). The authors implemented them",
+        "from the mathematical definitions of Boukerroui et al. [1] (Supplement A), as a",
+        "compiled engine with a pure-Python engine of the same definitions as its fallback.",
+        "This validation asks three questions:",
+        "",
+        "1. Does AutoSeg compute these metrics exactly as defined, on the contours as stored?",
+        "2. How close are its results to the exact values for the ideal shapes, and to the",
+        "   results of Boukerroui et al.'s own software, on the same data?",
+        "3. Does it combine the two directions of each metric as the paper does?",
+        "",
+        "## Method",
+        "",
+        "**Data.** The synthetic shapes Boukerroui et al. published with the paper [2], as",
+        f"DICOM RTSTRUCT files. {per_grid}"
+        f" pairs of a reference and a test shape: {n_square} pairs of a square and a circle",
+        "(16 centred, 16 rotated by 45° and 16 offset, varying in size and in the ratio of",
+        f"circle to square) and {per_grid - n_square} pairs of cuboids. Each was",
+        f"provided on three CT grids, {GRIDS}: {n} pairs in all. AutoSeg read every file with",
+        "its own DICOM reader and measured it with the engine it selects, exactly as in a",
+        "computation run.",
+        "",
+        "**References.** Three, because agreement with each shows something different:",
+        "",
+        *_table(
+            ["Reference", "What it is", "What agreement shows"],
+            [
+                [
+                    "Exact values for the ideal shapes",
+                    "The closed-form values published with the dataset [3], and Supplement"
+                    " Tables D.8 and D.11 for the cuboids",
+                    "How close AutoSeg comes to the ideal shape, including the error of storing"
+                    " a circle as a polygon",
+                ],
+                [
+                    "High-precision values for the stored contours",
+                    "The metrics of the contours exactly as stored in the files, computed by the"
+                    " authors with a separate implementation in high-precision decimal arithmetic",
+                    "That the computation itself is right",
+                ],
+                [
+                    "Boukerroui et al.'s software",
+                    "The paper's published empirical results, from the authors' own scoring"
+                    " code [3]",
+                    "Agreement with the implementation the paper validated",
+                ],
+            ],
+            numeric=False,
+        ),
+        "**Quantities.** HD100, HD95, mean and median distance; APL and NAPL at τ = 1 and 2 mm,",
+        "in both directions.",
+        "",
+        "**What AutoSeg reports.** Each metric is measured in two directions, from the",
+        "reference boundary to the test and from the test to the reference, and combined as",
+        "follows:",
+        "",
+        *_table(
+            ["Metric", "Measured in each direction as", "Reported as", "Planes used"],
+            CONVENTIONS,
+            numeric=False,
+        ),
+        "## Results",
+        "",
+        "**The computation.** Largest difference from the high-precision values for the stored",
+        f"contours, over all {n} pairs: {sci(h['computation_distance'])} mm for any distance,",
+        f"{sci(h['computation_apl'])} mm for any APL and {sci(h['computation_napl'])}"
+        " for any NAPL.",
+        "",
+        f"**The ideal squares and circles.** Largest difference from the exact values, over the"
+        f" {n_square} square and circle pairs on each grid:",
+        "",
+        *_table(
+            [
+                "Grid",
+                "HD100 (mm)",
+                "HD95 (mm)",
+                "Mean (mm)",
+                "Median (mm)",
+                *(
+                    label.replace("reference → test", "ref→test").replace(
+                        "test → reference", "test→ref"
+                    )
+                    for _k, label, _u in NAPLS
+                ),
+            ],
+            [
+                [
+                    res,
+                    *(
+                        _fmt(_max_abs(_errors(records, key, "analytic", _square_circle_at(res))))
+                        for key, _l, _u in DISTANCES + NAPLS
+                    ),
+                ]
+                for res in RESOLUTIONS
+            ],
+        ),
+    ]
+    if h["same_as_stored"]:
+        lines += [
+            "For every quantity on every grid, the high-precision values for the stored contours",
+            "differ from the exact values by the same amount, to the four decimals shown.",
+            "",
+        ]
+    lines += [
+        "**The cuboids.** The sparse test cuboid is stored exactly, plane by plane. AutoSeg's",
+        "values, with their difference from the exact values in brackets (mm):",
+        "",
+        *_table(
+            ["Grid", "HD100", "HD95", "Mean", "Median", "APL @ 1 mm", "APL @ 2 mm"],
+            [
+                [
+                    r["case"]["resolution"],
+                    *(
+                        f"{_fmt(r['autoseg'][key], 3)} ({_fmt(r['autoseg'][key] - r['analytic'][key], 2)})"
+                        for key in ("hd100", "hd95", "mean", "median", "apl_a_1", "apl_a_2")
+                    ),
+                ]
+                for r in sparse
+            ],
+        ),
+        "**Boukerroui et al.'s software.** Their published distances differ from AutoSeg's by at",
+        f"most {_fmt(h['authors_distance'], 3)} mm over all {n} pairs. Their APL at 1 mm agrees"
+        f" with AutoSeg's to within 0.001 mm on {h['apl_agree']} of {h['apl_pairs']} pairs; the"
+        f" other {len(h['disagreements'])} differ by at most {_fmt(h['apl_worst'], 3)} mm, or"
+        f" {h['apl_relative']:.3f} % of the pair's APL.",
+        "",
+        "## Findings",
+        "",
+        "- **AutoSeg computes the 2D metrics exactly as defined.** On the contours as stored, it"
+        f" agrees with the high-precision values to within {sci(h['computation_distance'])}"
+        " mm.",
+    ]
+    fine = h["shape"]["Fine"]
+    coarse = h["shape"]["Coarse"]
+    if h["same_as_stored"]:
+        lines += [
+            "- **Its differences from the ideal shapes belong to the shapes as stored.** They reach"
+            f" {_fmt(coarse, 4)} mm on the coarse grid and {_fmt(fine, 4)} mm on the fine one, and",
+            "  each equals the difference between the stored contour and the ideal shape. A",
+            "  circle stored in an RTSTRUCT is a polygon: its corners lie on the circle and its",
+            "  straight edges cut slightly inside it, so its metrics differ from the ideal",
+            "  circle's by an amount that shrinks with the pixel size. A box can be stored",
+            f"  exactly, and on the sparse cuboid AutoSeg's distances are within"
+            f" {sci(h['sparse_distance'])} mm of the exact values, inside the precision the",
+            "  supplement prints" + (", and its APL is exact." if h["sparse_apl"] < 1e-6 else "."),
+        ]
+    lines += [
+        "- **It agrees with Boukerroui et al.'s own software within that software's sampling.**"
+        " Their code measures distances from points taken every 0.05 mm along each contour, so"
+        " differences of hundredths of a millimetre are expected. Their APL is an approximation"
+        " of the paper's definition: on"
+        f" {h['by_method']} of the {len(h['disagreements'])} pairs where it differs, re-running"
+        " their code gives their published value, which differs from the exact one; on"
+        f" {h['not_reproduced']}, their code no longer reproduces its published value. On every"
+        f" one, AutoSeg matches the exact value to {sci(h['apl_exact'])} mm.",
+        "- **It combines the two directions as the paper does.** The larger direction for the",
+        "  Hausdorff distances and the median, the average for the mean, and each APL direction",
+        "  on its own; these are also the conventions of AutoSeg's 3D metrics (Supplementary 4).",
+        "  Boukerroui et al.'s published scoring code averages the two directional medians",
+        f"  instead of taking the larger; on these pairs the two differ by up to {h['medians']:.2f}"
+        " mm, and AutoSeg follows the paper.",
+        "- **Two details of the published data.** Supplement Table D.8 prints the cuboid's",
+        f"  reverse mean as {D8_MEAN_B_AS_PRINTED} mm, which is the symmetric mean; the reverse",
+        f"  directional mean is {D8_MEAN_B_CORRECTED} mm, as the authors' own empirical result"
+        " confirms. And the",
+        "  rotated family rotates the circle's polygon by 45 radians rather than 45 degrees,",
+        "  which for a centred circle moves only its vertices, so the family does not test",
+        "  rotation invariance.",
+        "- **Why metrics on the contours.** They measure the contours themselves, so they carry",
+        "  none of the error of converting a contour to a binary mask (Supplementary 2), which",
+        "  matters most for small structures.",
+        "- **Limits.** The shapes are convex, single contours on regular grids; holes, nested and",
+        "  overlapping contours, missing planes and uneven slice spacing are covered by unit",
+        "  tests on cases taken from real structure sets. The high-precision values come from",
+        "  the same authors as AutoSeg's engines, so they verify the arithmetic; agreement with",
+        "  the exact values for the ideal shapes, and with Boukerroui et al.'s software, verifies",
+        "  the definitions.",
+        "",
+        "## References",
+        "",
+        "1. Boukerroui D, Vasquez Osorio E, Brunenberg E, Gooding MJ. Analytic calculations and",
+        "   synthetic shapes for validation of quantitative contour comparison software. Phys",
+        "   Imaging Radiat Oncol. 2023;26:100436. doi:10.1016/j.phro.2023.100436",
+        "2. The synthetic shapes of [1]. Mendeley Data. doi:10.17632/9xjyrftzth.1 (CC BY 4.0)",
+        f"3. VitruvianPhantomPy: the code and results of [1]. GitHub. {REPOSITORY}",
+        "",
+        "## Reproduce",
+        "",
+        "```",
+        f"python scripts/{SCRIPT} --data <folder holding the dataset and the authors' repository>",
+        "```",
+        "",
+        f"The run took {data['seconds']:.0f} s; `--render-only` rewrites this report from the last",
+        "run's results. Regenerate this report rather than editing it.",
         "",
     ]
+    target.write_text(unwrap(lines), encoding="utf-8")
 
-    # --- Headline, every figure computed below ---
-    computation = max(
-        _max_abs(_errors(records, key, "audited", lambda c: True)) for key, _l, _u in DISTANCES
-    )
-    shape_worst, shape_where = max(
-        (abs(r["autoseg"][key] - r["analytic"][key]), r["case"]["resolution"])
-        for r in square
-        for key, _l, _u in DISTANCES
-    )
-    fine_worst = max(
-        _max_abs(
-            _errors(
-                records,
-                key,
-                "analytic",
-                lambda c: c["resolution"] == "Fine" and c["family"] in SQUARE_CIRCLE,
-            )
-        )
-        for key, _l, _u in DISTANCES
-    )
-    authors_worst = max(
-        _max_abs(_errors(records, key, "authors", lambda c: True)) for key, _l, _u in DISTANCES
-    )
-    apl_gaps = [abs(r["autoseg"]["apl_a_1"] - r["authors"]["apl_a_1"]) for r in records]
-    # Where AutoSeg and the authors differ on APL, how far AutoSeg is from the
-    # audited value: the claim below is made only if it holds.
-    apl_audited = max(
-        (
-            abs(r["autoseg"]["apl_a_1"] - r["audited"]["apl_a_1"])
-            for r, gap in zip(records, apl_gaps)
-            if gap > 1e-3
-        ),
-        default=0.0,
-    )
-    apl_side = (
-        f"and on every one AutoSeg matches the audited exact value to {_fmt(apl_audited, 2)} mm."
-        if apl_audited < 1e-6
-        else f"and there AutoSeg is up to {_fmt(apl_audited, 3)} mm from the audited values."
-    )
-    disagreements = apl_disagreements(records)
-    by_method = sum(d["why"] == "their method" for d in disagreements)
-    not_reproduced = sum(d["why"] == "not reproduced" for d in disagreements)
-    apl_relative = max(
-        (abs(d["ours"] - d["published"]) / d["ours"] * 100 for d in disagreements), default=0.0
-    )
-    sparse = [r for r in records if r["case"]["family"] == "cuboid_sparse"]
-    sparse_worst = max(
-        abs(r["autoseg"][key] - r["analytic"][key]) for r in sparse for key, _l, _u in DISTANCES
-    )
-    lines += [
-        "## In brief",
+
+def write_full_results(target: Path, data: dict) -> None:
+    """Every table behind Supplementary 3."""
+    records = data["records"]
+    h = headline(records)
+    lines = [
+        f"# {TITLE}: full results",
         "",
-        f"- **The computation is exact to {_fmt(computation, 2)} mm.** No distance of the 150",
-        "  pairs differs by more from high-precision values for the polygons as stored.",
-        f"- **Against the ideal squares and circles, distances differ by at most {_fmt(shape_worst, 3)} mm**",
-        f"  ({shape_where.lower()} grid; {_fmt(fine_worst, 4)} mm on the fine grid). All of it is the",
-        "  stored circle's: a circle stored as a polygon is not the circle, and the",
-        "  audited values for the stored polygons differ from the ideal shapes by the",
-        "  same amounts, to the four decimals tabulated.",
-        f"- **Against the sparse cuboid, stored exactly, distances agree to {_fmt(sparse_worst, 2)} mm**, inside",
-        "  the three decimals the supplement prints, and APL exactly.",
-        f"- **Against the authors' software, distances agree to {_fmt(authors_worst, 3)} mm**, inside its",
-        f"  0.05 mm sampling step. APL at 1 mm agrees on {sum(g <= 1e-3 for g in apl_gaps)} of {len(apl_gaps)} pairs;",
-        f"  the other {len(disagreements)} differ by at most {_fmt(max(apl_gaps), 3)} mm "
-        f"({apl_relative:.3f} % of the pair's APL), {apl_side}",
-        f"  On {by_method} of them the authors' code, re-run, gives its published value, so the",
-        f"  difference is its method's approximation; on {not_reproduced} it does not reproduce its own",
-        "  published value.",
+        f"{stamp(SCRIPT, data['run'])} · engine {data['engine']} · {len(records)} pairs from"
+        f" the published DICOM files · {data['seconds']:.0f} s. The summary is"
+        f" [Supplementary 3]({REPORT.name}). Regenerate this file rather than editing it.",
         "",
         "## What is compared",
         "",
@@ -469,24 +779,27 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
             [
                 [
                     "Analytical",
-                    "Closed-form values for ideal squares, circles and cuboids (the supplement's tables)",
-                    "How far a result is from the ideal shape, including the polygon's own departure from it",
+                    "Closed-form values for ideal squares, circles and cuboids (the supplement's"
+                    " tables)",
+                    "How far a result is from the ideal shape, including the polygon's own"
+                    " departure from it",
                 ],
                 [
-                    "Audited polygons",
-                    "High-precision values for the contours as stored in the RTSTRUCTs",
+                    "High-precision",
+                    "Values for the contours as stored in the RTSTRUCTs, computed in"
+                    " high-precision decimal arithmetic",
                     "That the computation itself is right",
                 ],
                 [
                     "Authors' software",
-                    "The paper's empirical results, from the authors' scoring code (VitruvianPhantomPy "
-                    "`score_autocontours_lib.py`, adapted from Gooding's Chapter 15 code)",
+                    "The paper's empirical results, from the authors' scoring code"
+                    " (VitruvianPhantomPy `score_autocontours_lib.py`, adapted from Gooding's"
+                    " Chapter 15 code)",
                     "Agreement with the implementation the paper validated",
                 ],
             ],
             numeric=False,
         ),
-        "",
         "AutoSeg's values come from the published DICOM archives, read by this",
         "application's grid builder and structure parser, and measured by the engine",
         "it selects, exactly as a computation run does. The 150 pairs are 16 centred",
@@ -494,14 +807,10 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
         "three resolutions: coarse (1.8 × 2.2 mm, 3 mm planes), typical (0.96 mm, 1 mm)",
         "and fine (0.5 mm, 0.5 mm).",
         "",
-    ]
-
-    # --- Against the analytical values, square/circle ---
-    lines += [
         "## Against the ideal shapes: squares and circles",
         "",
         "Largest absolute difference over the 16 pairs of each family, AutoSeg",
-        "against the analytical value. Beside it, the same for the audited values",
+        "against the analytical value. Beside it, the same for the high-precision values",
         "of the stored polygons: where the two agree, the whole difference is the",
         "stored polygon's, not the computation's.",
         "",
@@ -509,18 +818,13 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
     rows = []
     for key, label, unit in DISTANCES + NAPLS:
         for resolution in RESOLUTIONS:
-
-            def where(c, resolution=resolution):
-                return c["resolution"] == resolution and c["family"] in SQUARE_CIRCLE
-
-            ours = _max_abs(_errors(records, key, "analytic", where))
-            stored = _max_abs(_reference_errors(records, key, where))
+            where = _square_circle_at(resolution)
             rows.append(
                 [
                     label if resolution == "Coarse" else "",
                     resolution,
-                    _fmt(ours),
-                    _fmt(stored),
+                    _fmt(_max_abs(_errors(records, key, "analytic", where))),
+                    _fmt(_max_abs(_reference_errors(records, key, where))),
                     unit or "fraction",
                 ]
             )
@@ -528,45 +832,37 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
         ["Quantity", "Grid", "AutoSeg − analytic", "Stored polygon − analytic", "Unit"], rows
     )
     lines += [
-        "",
         "Largest *relative* difference in each distance over the square/circle",
         "pairs, as a percentage of the analytical value:",
         "",
-    ]
-    rows = []
-    for key, label, _unit in DISTANCES:
-        per = []
-        for resolution in RESOLUTIONS:
-            worst = 0.0
-            for record in square:
-                if record["case"]["resolution"] != resolution:
-                    continue
-                truth = record["analytic"][key]
-                if truth:
-                    worst = max(worst, abs(record["autoseg"][key] - truth) / truth * 100)
-            per.append(f"{worst:.2f} %")
-        rows.append([label, *per])
-    lines += _table(["Quantity", *RESOLUTIONS], rows)
-    lines += [
-        "",
+        *_table(
+            ["Quantity", *RESOLUTIONS],
+            [
+                [label, *(f"{h['relative'][key][res]:.2f} %" for res in RESOLUTIONS)]
+                for key, label, _u in DISTANCES
+            ],
+        ),
         "By family, largest absolute distance difference from the analytical value (mm):",
         "",
-    ]
-    rows = []
-    for family in SQUARE_CIRCLE:
-        cells = []
-        for key, _label, _unit in DISTANCES:
-            cells.append(
-                _fmt(
-                    _max_abs(
-                        _errors(records, key, "analytic", lambda c, f=family: c["family"] == f)
-                    )
-                )
-            )
-        rows.append([FAMILY_LABEL[family], *cells])
-    lines += _table(["Family", *[label for _k, label, _u in DISTANCES]], rows)
-    lines += [
-        "",
+        *_table(
+            ["Family", *[label for _k, label, _u in DISTANCES]],
+            [
+                [
+                    FAMILY_LABEL[family],
+                    *(
+                        _fmt(
+                            _max_abs(
+                                _errors(
+                                    records, key, "analytic", lambda c, f=family: c["family"] == f
+                                )
+                            )
+                        )
+                        for key, _l, _u in DISTANCES
+                    ),
+                ]
+                for family in SQUARE_CIRCLE
+            ],
+        ),
         "The rotated family does not test rotation invariance: the published files",
         "rotate the square by 45 degrees but the circle's polygon by 45 radians. For a",
         "centred circle this moves only its vertices, so the analytical values of the",
@@ -574,8 +870,10 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
         "",
     ]
 
-    # --- Cuboids ---
-    cuboids = [r for r in records if r["case"]["family"].startswith("cuboid")]
+    cuboids = sorted(
+        (r for r in records if r["case"]["family"].startswith("cuboid")),
+        key=lambda r: (RESOLUTIONS.index(r["case"]["resolution"]), r["case"]["family"]),
+    )
     lines += [
         "## Against the ideal shapes: the cuboids",
         "",
@@ -585,38 +883,31 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
         "is sampled at pixel boundaries, which clips its corners; the supplement notes",
         "its analytical values are not attainable.",
         "",
-    ]
-    rows = []
-    for record in sorted(
-        cuboids, key=lambda r: (RESOLUTIONS.index(r["case"]["resolution"]), r["case"]["family"])
-    ):
-        case = record["case"]
-        cells = [case["resolution"], FAMILY_LABEL[case["family"]]]
-        for key in ("hd100", "hd95", "mean", "median", "apl_a_1", "apl_a_2"):
-            cells.append(
-                f"{_fmt(record['autoseg'][key], 3)} ({_fmt(record['autoseg'][key] - record['analytic'][key], 3)})"
-            )
-        rows.append(cells)
-    lines += _table(
-        ["Grid", "Pair", "HD100", "HD95", "Mean", "Median", "APL @ 1 mm", "APL @ 2 mm"], rows
-    )
-    lines += [
-        "",
+        *_table(
+            ["Grid", "Pair", "HD100", "HD95", "Mean", "Median", "APL @ 1 mm", "APL @ 2 mm"],
+            [
+                [
+                    r["case"]["resolution"],
+                    FAMILY_LABEL[r["case"]["family"]],
+                    *(
+                        f"{_fmt(r['autoseg'][key], 3)} ({_fmt(r['autoseg'][key] - r['analytic'][key], 3)})"
+                        for key in ("hd100", "hd95", "mean", "median", "apl_a_1", "apl_a_2")
+                    ),
+                ]
+                for r in cuboids
+            ],
+        ),
         "Each cell: AutoSeg's value in mm, and in brackets its difference from the",
         "analytical value. Analytical: HD100 40.665, HD95 34.223 (the larger",
         "direction), median 26.2, symmetric mean 23.4995 mm; APL from Table D.11.",
         "",
         f"Table D.8 prints the reverse mean as {D8_MEAN_B_AS_PRINTED}, which is the symmetric",
-        f"mean; the reverse directional mean is {D8_MEAN_B_CORRECTED} mm (the suppliers'",
-        "high-precision calculation, a separate quadrature, and the authors' own",
-        "empirical result of 24.085231). The symmetric mean compared here does not",
-        "depend on which is read: taking the printed value as a direction would",
-        f"give {0.5 * (D8_MEAN_A + D8_MEAN_B_AS_PRINTED):.4f} mm instead.",
+        f"mean; the reverse directional mean is {D8_MEAN_B_CORRECTED} mm (the high-precision",
+        "values, a separate quadrature, and the authors' own empirical result of 24.085231).",
+        "The symmetric mean compared here does not depend on which is read: taking the",
+        f"printed value as a direction would give {0.5 * (D8_MEAN_A + D8_MEAN_B_AS_PRINTED):.4f}"
+        " mm instead.",
         "",
-    ]
-
-    # --- Against the authors' software ---
-    lines += [
         "## Against the authors' software",
         "",
         "The paper's *empirical* results come from the authors' own scoring code:",
@@ -624,63 +915,56 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
         "and Gooding, Mirada Medical), adapted in 2022 from Gooding's",
         "`score_autocontours.py` for Chapter 15 of *Auto-segmentation for Radiation",
         "Oncology*. The repository publishes those results as `results/*_empirical.csv`,",
-        "and they are compared here as published; nothing of theirs was re-run for this",
-        "report. For distances the code takes a point every 0.05 mm along each contour,",
-        "from its start, measures each point's distance to the other contour, and reads",
-        "HD95 and the median as NumPy percentiles of those points and the mean as their",
-        "average. Differences of a few hundredths of a millimetre are that sampling,",
-        "not an error on either side.",
+        "and they are compared here as published. For distances the code takes a point",
+        "every 0.05 mm along each contour, from its start, measures each point's distance",
+        "to the other contour, and reads HD95 and the median as NumPy percentiles of those",
+        "points and the mean as their average. Differences of a few hundredths of a",
+        "millimetre are that sampling, not an error on either side.",
         "",
         "Largest absolute difference from their published results, over all 150 pairs:",
         "",
     ]
     rows = []
     for key, label, _unit in DISTANCES:
-        diffs = _errors(records, key, "authors", lambda c: True)
+        diffs = _errors(records, key, "authors", _everywhere)
         rows.append(
             [label, _fmt(_max_abs(diffs)), _fmt(sorted(abs(d) for d in diffs)[len(diffs) // 2])]
         )
     lines += _table(["Quantity", "Largest difference (mm)", "Median difference (mm)"], rows)
-    apl = []
-    for record in records:
-        ours, theirs = record["autoseg"]["apl_a_1"], record["authors"]["apl_a_1"]
-        apl.append((abs(ours - theirs), record, ours, theirs))
-    agreeing = sum(1 for d, *_ in apl if d <= 1e-3)
-    lines += [
-        "",
-        f"**APL at 1 mm** (reference → test, summed over planes): {agreeing} of {len(apl)} pairs",
-        "agree with the authors' value to within 0.001 mm. The others:",
-        "",
-    ]
     why_label = {
         "their method": "their method",
         "not reproduced": "not reproduced by their code",
         "no re-run": "–",
     }
-    rows = [
-        [
-            d["record"]["case"]["id"],
-            _fmt(d["ours"], 4),
-            _fmt(d["published"], 4),
-            _fmt(d["rerun"], 4) if d["rerun"] is not None else "–",
-            _fmt(d["ours"] - d["published"], 4),
-            _fmt(d["exact"] - d["ours"], 2),
-            why_label[d["why"]],
-        ]
-        for d in disagreements
+    disagreements = h["disagreements"]
+    lines += [
+        f"**APL at 1 mm** (reference → test, summed over planes): {h['apl_agree']} of"
+        f" {h['apl_pairs']} pairs agree with the authors' value to within 0.001 mm. The others:",
+        "",
+        *_table(
+            [
+                "Pair",
+                "AutoSeg (mm)",
+                "Published (mm)",
+                "Their code, re-run (mm)",
+                "AutoSeg − published (mm)",
+                "Exact − AutoSeg (mm)",
+                "Difference due to",
+            ],
+            [
+                [
+                    d["record"]["case"]["id"],
+                    _fmt(d["ours"], 4),
+                    _fmt(d["published"], 4),
+                    _fmt(d["rerun"], 4) if d["rerun"] is not None else "–",
+                    _fmt(d["ours"] - d["published"], 4),
+                    _fmt(d["exact"] - d["ours"], 2),
+                    why_label[d["why"]],
+                ]
+                for d in disagreements
+            ],
+        ),
     ]
-    lines += _table(
-        [
-            "Pair",
-            "AutoSeg (mm)",
-            "Published (mm)",
-            "Their code, re-run (mm)",
-            "AutoSeg − published (mm)",
-            "Exact − AutoSeg (mm)",
-            "Difference due to",
-        ],
-        rows,
-    )
     closer = [
         d
         for d in disagreements
@@ -692,12 +976,10 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
         default=0.0,
     )
     lines += [
-        "",
-        "*Exact* is the audited high-precision value for the stored polygons; AutoSeg",
-        f"is within {_fmt(apl_audited, 2)} mm of it on every one of these pairs. *Their code, re-run* is the",
-        "metric suppliers' review package re-running the authors' APL function",
-        "(`historical_validation/overlap_apl`, with three mechanical edits for",
-        "Shapely 2, on current libraries rather than the 2022 environment).",
+        "*Exact* is the high-precision value for the stored polygons; AutoSeg is within",
+        f"{_fmt(h['apl_exact'], 2)} mm of it on every one of these pairs. *Their code, re-run* is",
+        "the authors' APL function re-run by the present authors (with three mechanical",
+        "edits for Shapely 2, on current libraries rather than the 2022 environment).",
         "",
         "Their APL is an approximation of the paper's definition. It widens the test",
         "contour by τ and shrinks it by τ, cuts the reference contour where it crosses",
@@ -710,14 +992,13 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
         "0.0001 mm and the cut retried. AutoSeg computes the paper's definition on",
         "the stored contours exactly.",
         "",
-        f"- **{by_method} of these pairs are their method's approximation.** Re-running their code",
-        "  gives exactly their published value, and that value differs from the exact",
-        f"  one, by at most {_fmt(method_worst, 3)} mm.",
-        f"- **{not_reproduced} are published values their own code no longer reproduces.** On "
-        f"{'all' if len(closer) == not_reproduced else len(closer)} of them",
-        "  the re-run lands closer to the exact value than the published figure. The",
-        "  review package did not isolate why; different library versions and the",
-        "  random retry are both possible.",
+        f"- **{h['by_method']} of these pairs are their method's approximation.** Re-running their"
+        " code gives exactly their published value, and that value differs from the exact one,"
+        f" by at most {_fmt(method_worst, 3)} mm.",
+        f"- **{h['not_reproduced']} are published values their own code no longer reproduces.**"
+        f" On {'all' if len(closer) == h['not_reproduced'] else len(closer)} of them the re-run"
+        " lands closer to the exact value than the published figure. Different library versions"
+        " and the random retry are both possible causes.",
         "",
         "In a degenerate case the difference is large. An axis-aligned square",
         "[-5, 5]² against [-3, 3]² at τ = 2 mm has 16 mm of reference boundary",
@@ -725,96 +1006,40 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
         "returns 40 mm, because the reference's straight edges lie exactly on the",
         "widened outline and count as unmatched. None of the published pairs is",
         "degenerate like this, and on them the differences are at most",
-        f"{apl_relative:.3f} % of a pair's APL, which is summed over every plane.",
+        f"{h['apl_relative']:.3f} % of a pair's APL, which is summed over every plane.",
         "",
-    ]
-    medians = [abs(r["authors"]["median"] - r["authors"]["median_chapter15"]) for r in records]
-    lines += [
         "The authors' published Chapter 15 code combines the two directional medians",
-        "by averaging them; the paper, the audited values and AutoSeg take the",
-        f"larger. On these pairs the two conventions differ by up to {max(medians):.3f} mm, so",
+        "by averaging them; the paper, the high-precision values and AutoSeg take the",
+        f"larger. On these pairs the two conventions differ by up to {h['medians']:.3f} mm, so",
         "the comparison above composes the authors' directional medians the paper's",
         "way.",
         "",
-    ]
-
-    # --- Computation ---
-    lines += [
         "## The computation itself",
         "",
-        "Largest absolute difference from the audited high-precision values for the",
-        "stored polygons, over all 150 pairs and both directions of APL:",
+        "Largest absolute difference from the high-precision values for the stored",
+        "polygons, over all 150 pairs and both directions of APL:",
         "",
-    ]
-    rows = []
-    for key, label, _unit in DISTANCES:
-        rows.append(
-            [label, _fmt(_max_abs(_errors(records, key, "audited", lambda c: True)), 2), "mm"]
-        )
-    for tau in TOLERANCES_MM:
-        for side, arrow in (("a", "reference → test"), ("b", "test → reference")):
-            rows.append(
-                [
-                    f"APL {arrow} @ {tau:g} mm",
-                    _fmt(
-                        _max_abs(
-                            _errors(records, f"apl_{side}_{tau:g}", "audited", lambda c: True)
-                        ),
-                        2,
-                    ),
-                    "mm",
-                ]
-            )
-            rows.append(
-                [
-                    f"NAPL {arrow} @ {tau:g} mm",
-                    _fmt(
-                        _max_abs(
-                            _errors(records, f"napl_{side}_{tau:g}", "audited", lambda c: True)
-                        ),
-                        2,
-                    ),
-                    "",
-                ]
-            )
-    lines += _table(["Quantity", "Largest difference", "Unit"], rows)
-    lines += [
+        *_table(
+            ["Quantity", "Largest difference", "Unit"],
+            [
+                [label, _fmt(_max_abs(_errors(records, key, "audited", _everywhere)), 2), unit]
+                for key, label, unit in DISTANCES + OVERLAPS
+            ],
+        ),
+        "`scripts/validate_polygon_metrics.py` checks both engines against the same values,",
+        "and against 44 geometric edge cases, on every release.",
         "",
-        "`validate_polygon_metrics.py` holds these to the suppliers' thresholds on every release.",
-        "",
-    ]
-
-    # --- Conventions ---
-    lines += [
         "## Conventions",
         "",
         *_table(
-            ["Quantity", "How AutoSeg reports it"],
-            [
-                [
-                    "Distance",
-                    "From each point of one boundary to the nearest point of the other's boundary on the same plane",
-                ],
-                [
-                    "Planes",
-                    "Distances over planes both structures have; APL over every plane of its source",
-                ],
-                ["HD100", "The larger of the two directional maxima"],
-                [
-                    "HD95, median",
-                    "The larger of the two directional percentiles (lower generalised inverse)",
-                ],
-                ["Mean", "The average of the two directional arc-length means"],
-                [
-                    "APL, NAPL",
-                    "Both directions, as separate columns; closed tolerance (a point exactly at τ is matched)",
-                ],
-            ],
+            ["Metric", "Measured in each direction as", "Reported as", "Planes used"],
+            CONVENTIONS,
             numeric=False,
         ),
-        "",
         "These are the paper's definitions (Supplement A). Points are weighted by",
         "arc length, not by vertex, so adding vertices along an edge changes nothing.",
+        "Percentiles are the lower generalised inverse of the length-weighted",
+        "distribution.",
         "",
         "## What this does not cover",
         "",
@@ -832,20 +1057,18 @@ def write_report(target: Path, records, engine: str, package: Path, seconds: flo
         "doi:10.1016/j.phro.2023.100436. Dataset: doi:10.17632/9xjyrftzth.1 (CC BY 4.0).",
         "",
         "Analytical values: `VitruvianPhantomPy/mlab/*_theory_results.csv` (commit",
-        "`cc4106a`) and Supplement Tables D.8 and D.11. Audited values:",
-        "`third_party/native_contour_metrics/v0.2/data/golden_metrics.json`.",
-        "",
-        "Reproduce with:",
-        "",
-        "```",
-        "python scripts/validate_polygon_analytic.py --package <review package folder> \\",
-        "    --out docs/POLYGON_ANALYTIC_VALIDATION.md",
-        "```",
-        "",
-        f"The review package read for this run: `{package.name}`.",
+        f"`cc4106a`, {REPOSITORY}) and Supplement Tables D.8 and D.11. High-precision",
+        "values: `third_party/native_contour_metrics/v0.2/data/golden_metrics.json`.",
         "",
     ]
-    target.write_text("\n".join(lines), encoding="utf-8")
+    target.write_text(unwrap(lines), encoding="utf-8")
+
+
+def render(data: dict) -> None:
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
+    write_report(REPORT, data)
+    write_full_results(FULL_RESULTS, data)
+    print(f"wrote {REPORT} and {FULL_RESULTS.name}")
 
 
 def write_csv(target: Path, records) -> None:
@@ -876,23 +1099,33 @@ def write_csv(target: Path, records) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
+        "--data",
         "--package",
         type=Path,
-        required=True,
-        help="The Native_Polygon_Metrics_Gooding_Expert_Review folder.",
+        help="The folder holding the published DICOM archives and the authors' repository.",
     )
-    parser.add_argument("--out", type=Path, help="Write the markdown report here.")
     parser.add_argument("--csv", type=Path, help="Write every pair's values here.")
     parser.add_argument("--engine", help="Force 'fast' or 'reference'.")
+    parser.add_argument(
+        "--render-only",
+        action="store_true",
+        help="Rewrite the reports from the last run's results, without computing.",
+    )
     args = parser.parse_args(argv)
+    if args.render_only:
+        render(load_results(RESULTS_NAME))
+        return 0
+    if args.data is None:
+        parser.error("--data is required unless --render-only")
 
-    reference = long_path(args.package) / "reference_v0_1"
+    info = run_info()
+    reference = long_path(args.data) / "reference_v0_1"
     upstream = reference / "upstream"
     started = time.perf_counter()
     records, engine = measure_all(reference / "data" / "original", args.engine)
     analytic = analytic_tables(upstream)
     authors = author_tables(upstream)
-    reruns = author_reruns(long_path(args.package))
+    reruns = author_reruns(long_path(args.data))
     for record in records:
         case = record["case"]
         record["analytic"] = analytic_values(case, analytic)
@@ -903,9 +1136,9 @@ def main(argv: list[str] | None = None) -> int:
         record["audited"] = audited_values(case)
     elapsed = time.perf_counter() - started
     print(f"{len(records)} pairs in {elapsed:.0f} s through {engine}")
-    if args.out:
-        write_report(args.out, records, engine, args.package, elapsed)
-        print(f"wrote {args.out}")
+    data = {"run": info, "seconds": elapsed, "engine": engine, "records": records}
+    print(f"kept the results in {save_results(RESULTS_NAME, data)}")
+    render(data)
     if args.csv:
         write_csv(args.csv, records)
         print(f"wrote {args.csv}")

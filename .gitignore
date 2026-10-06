@@ -59,3 +59,6 @@ src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/macos-*/
 
 # Intermediate objects from a local native-library build.
 src/autoseg_evaluator/vendor/build/
+
+# Validation runs keep their results here, to rewrite reports without recomputing
+.validation_cache/

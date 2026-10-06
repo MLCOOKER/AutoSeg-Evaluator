@@ -17,7 +17,7 @@ For each ``compute_staple`` call we:
    spirit of STAPLE's consensus-region variants (Asman & Landman 2011), not a
    rescue: on the HN1 sample whole-image STAPLE leaves no organ empty, the
    cochleae included, and gives the same consensus for 50 of 55 organs; the
-   other five are larger by up to 8 % (docs/STAPLE_VALIDATION_REPORT.md).
+   other five are larger by up to 8 % (Supplementary 5, docs/validation/).
 2. Run STAPLE on the cropped stack and read back per-rater
    sensitivity / specificity and the probabilistic truth.
 3. Threshold the probability map at 0.5 → binary consensus mask.
@@ -94,7 +94,7 @@ class StapleConfig:
       literature. On the HN1 sample the union's own box is already below it
       for every organ, so the padding stays at its 2-voxel minimum; a
       25-voxel margin instead gives whole-image STAPLE's consensus on the five
-      organs where that differs (docs/STAPLE_VALIDATION_REPORT.md).
+      organs where that differs (Supplementary 5, docs/validation/).
     * ``bbox_padding_min_voxels=2`` — always include this much boundary
       headroom regardless of ratio, so STAPLE has room to estimate the
       probabilistic edge.

@@ -277,14 +277,14 @@ row. Against a consensus, then, the only voxel error in a difference is the
 consensus's own. It is the same for every contour compared with that consensus,
 so it cancels when two sources are compared with each other, but it means a
 contour identical to the consensus differs from it by that error: up to about
-2% in Dmean on 1.37 mm pixels (<code>docs/DVH_MASK_VS_POLYGON.md</code>). Taking
+2% in Dmean on 1.37 mm pixels (Supplementary 1, <code>docs/validation/</code>). Taking
 each contour from its own mask as well would remove that error only for
 contours that coincide with the consensus, and adds a second, independent one
 for contours that do not.</p>
 <p>Validated against the analytic datasets of Nelms et al., <i>Methods, software
 and datasets to verify DVH calculations against analytical values</i>, Medical
 Physics 42 (2015) 4435, and against analytic disc phantoms
-(<code>docs/DVH_METHOD_VALIDATION.md</code>). Versions before 3.0 used
+(Supplementary 1, <code>docs/validation/</code>). Versions before 3.0 used
 dicompyler-core, which that report scores alongside.</p>
 
 <h2>What is reported when a metric cannot be computed</h2>

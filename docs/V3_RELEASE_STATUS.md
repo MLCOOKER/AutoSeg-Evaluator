@@ -62,7 +62,7 @@ Decisions taken with the fixes, which change how the application is used:
 
 ### 2 — Rasteriser validation, and the default flip
 
-`scripts/compare_rasterisers.py` and `docs/RASTERISER_COMPARISON.md` quantify
+`scripts/compare_rasterisers.py` and `docs/archive/RASTERISER_COMPARISON.md` quantify
 per-ROI agreement and runtime between the two backends on a real cohort. The
 sub-voxel (`continuous`) backend is now the default, which **moves every
 mask-derived number**; the old path survives as the opt-in `legacy` backend and
@@ -225,7 +225,7 @@ The measurements below were made before the decision; the report now
 includes the shipped rule itself.
 
 `scripts/validate_dvh_methods.py` scores the candidate DVH methods against
-analytic truth and writes `docs/DVH_METHOD_VALIDATION.md`. The benchmarks:
+analytic truth and writes Supplementary 1 (`docs/validation/`). The benchmarks:
 
 - **Nelms et al. 2015** (Med Phys 42:4435), Tests 1–3, beside the paper's own
   Pinnacle3 and PlanIQ results.
@@ -288,7 +288,7 @@ Three defects in today's DVH path, all in dicompyler-core 0.5.6:
   dicompyler is the outlier.
 
 **Mask against contours, quantified (2026-09-26).**
-`docs/DVH_MASK_VS_POLYGON.md` measures what separates a STAPLE consensus's
+Supplementary 1 (part B) measures what separates a STAPLE consensus's
 dose row (sampled over its mask) from a contour's (integrated over its
 polygons) for the same Nelms structure. On the dataset's 0.6 mm CT, Dmean is
 within 0.12 %; on 1.37 mm pixels, the tender cohort's coarsest (1.07 mm is its
@@ -314,10 +314,10 @@ consensus's error is then common to every source and cancels between them. The
 
 ### 8 — Validation report for the Stream B metrics
 
-Partly done. `docs/POLYGON_VALIDATION_REPORT.md` covers the published synthetic
+Partly done. `docs/archive/POLYGON_VALIDATION_REPORT.md` covers the published synthetic
 pairs, the stress cases, the adapter and the DICOM path, and
 `scripts/validate_contour_reading.py` checks the shared reading on a real
-cohort. `docs/POLYGON_ANALYTIC_VALIDATION.md` (2026-09-26) compares the
+cohort. Supplementary 3 (`docs/validation/`) compares the
 application, from the DICOM files, with the ideal analytical shapes, the
 authors' own software and the audited polygons: distances within 0.058 mm of
 the ideal shapes, all of it the stored polygons' own. The report on this
@@ -335,12 +335,12 @@ now describe v3: seven tabs, both metric streams, the shared contour reading
 and half-open fill, organ grouping and the Report tab, the audit record, and
 mask APL's removal with what it means for v1 values. `NOTICE` records the new
 changes to the code adapted from dcmrtstruct2nii.
-`docs/POLYGON_VALIDATION_REPORT.md` was regenerated through the shared reading.
+`docs/archive/POLYGON_VALIDATION_REPORT.md` was regenerated through the shared reading.
 
 **Still to do, outside this repository:** the manuscript Methods text describes
 mask APL and needs the matching change.
 
-**Stale by design:** `docs/VALIDATION_REPORT.md` was generated at v2.3.2 and
+**Archived:** `docs/archive/VALIDATION_REPORT.md` was generated at v2.3.2 and
 includes the since-removed mask APL rows. Regenerating it needs the HN1 data;
 the README and overview say what it covers.
 

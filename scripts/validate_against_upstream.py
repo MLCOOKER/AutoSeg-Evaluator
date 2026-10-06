@@ -26,7 +26,7 @@ Usage::
 
     python scripts/validate_against_upstream.py \\
         --data /path/to/folder/containing/CT/and/RTSS/files \\
-        --out docs/VALIDATION_REPORT.md
+        --out docs/archive/VALIDATION_REPORT.md
 """
 
 from __future__ import annotations
@@ -365,7 +365,7 @@ def write_report(
     lines.append("# 2. Run the validator against any folder of CT + RTSS files")
     lines.append("python scripts/validate_against_upstream.py \\")
     lines.append("    --data /path/to/DICOM/folder \\")
-    lines.append("    --out docs/VALIDATION_REPORT.md")
+    lines.append("    --out docs/archive/VALIDATION_REPORT.md")
     lines.append("```")
     lines.append("")
     lines.append(
