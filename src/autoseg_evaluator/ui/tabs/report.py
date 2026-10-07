@@ -287,11 +287,23 @@ COVERAGE_COLUMNS: list[tuple[str, str]] = [
             "Shown only when PTV overlap was computed. <b>—</b>: not measured for this organ and source, as with a consensus ground truth.",
         ),
     ),
+    (
+        "Contour Discontinuity",
+        _tip(
+            "How many of this source's contours of this organ skip a slice — a slice between the contour's first and last with no contour on it — out of the contours checked.",
+            "Only whole slices count: separate pieces on one slice are not a discontinuity. The whole contour is checked, never the truncated one, and the ground truth is not checked.",
+            "Shown only when the check was run.",
+        ),
+    ),
 ]
 
-#: Where the coverage table holds the PTV overlap count, hidden when no case had
-#: its overlap measured.
-COVERAGE_PTV_COLUMN = len(COVERAGE_COLUMNS) - 1
+#: Where the coverage table holds its two counts, each hidden when nothing fed it.
+COVERAGE_PTV_COLUMN = [title for title, _tip_text in COVERAGE_COLUMNS].index(
+    "Test-only PTV overlap"
+)
+COVERAGE_DISCONTINUITY_COLUMN = [title for title, _tip_text in COVERAGE_COLUMNS].index(
+    "Contour Discontinuity"
+)
 
 DESCRIPTIVE_COLUMNS: list[tuple[str, str]] = [
     (
@@ -1287,8 +1299,10 @@ class ReportTab(QWidget):
                 cut = _TRUNCATION_TEXT[self._model.truncation(organ)] if first else ""
                 counted = self._model.ptv_only_overlap(organ, source)
                 ptv = f"{counted[0]} of {counted[1]}" if counted else "—"
+                broken = self._model.discontinuity(organ, source)
+                gaps = f"{broken[0]} of {broken[1]}" if broken else "—"
                 for column, text in enumerate(
-                    [organ if first else "", source, cell.summary(), cut, ptv]
+                    [organ if first else "", source, cell.summary(), cut, ptv, gaps]
                 ):
                     item = QTableWidgetItem(text)
                     item.setData(ORGAN_ROLE, organ)
@@ -1303,6 +1317,9 @@ class ReportTab(QWidget):
         # Only where the overlap was computed: a column of dashes would suggest
         # a measurement that was never asked for.
         table.setColumnHidden(COVERAGE_PTV_COLUMN, not self._model.measured_ptv_overlap())
+        table.setColumnHidden(
+            COVERAGE_DISCONTINUITY_COLUMN, not self._model.checked_discontinuity()
+        )
         self._fit_table(table)
 
     def _fill_descriptive(self, metric: str, organs: list[str]) -> None:

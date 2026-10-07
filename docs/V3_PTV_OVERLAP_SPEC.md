@@ -162,9 +162,12 @@ the second draft's in D5 and D10.
 
 ## 7. The Compute tab
 
-A **PTV overlap** checkbox under the 3D mask metrics, unticked by default like
-the rest. No other setting: there is no threshold (D1) and the source of the
-PTV is fixed (D5).
+No checkbox, and no setting: there is no threshold (D1) and the source of the
+PTV is fixed (D5). It is not a metric of agreement, so it is not offered among the metrics: it is
+recorded on every run, for every test contour compared with a ground truth,
+whatever is ticked (decided 2026-10-07). A note on the Compute tab says so.
+Counting the overlap only inside the PTV's bounding box keeps the cost to about
+1.5 s per patient on the head-and-neck cohort, most of it filling the PTVs once.
 
 ## 8. Report tab and PDF
 
@@ -199,5 +202,5 @@ PTV is fixed (D5).
 | PTV selection (by type) | `core/organ_groups.py`, next to `TARGET_TYPES` |
 | Overlap of two masks | `core/metrics.py`, beside `volume_cc` |
 | PTV masks, union and cache; the columns | `workers/metrics_worker.py` |
-| Checkbox | `ui/tabs/compute.py` |
+| The note saying it runs on every run | `ui/tabs/compute.py` |
 | Metric family, direction and the D9 count | `data/report.py`, `ui/tabs/report.py` |

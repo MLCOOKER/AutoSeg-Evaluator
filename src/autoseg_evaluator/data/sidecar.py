@@ -75,7 +75,7 @@ def build(rows: Iterable[Mapping[str, Any]], *, settings: Mapping[str, Any] | No
                 "slices_removed": row.get("truncated_slices"),
                 "extent_removed_mm": row.get("truncated_extent_mm"),
             }
-        for stream in ("mask", "polygon", "dvh", "ptv"):
+        for stream in ("mask", "polygon", "dvh", "ptv", "discontinuity"):
             if detail.get(stream):
                 record[stream] = detail[stream]
         if row.get("error"):
@@ -134,6 +134,13 @@ def build(rows: Iterable[Mapping[str, Any]], *, settings: Mapping[str, Any] | No
                 "truth, which has no structure set of its own; a PTV that could "
                 "not be rasterised). Measured on the masks, the test one truncated "
                 "when the drawer truncates."
+            ),
+            "discontinuity": (
+                "Contour Discontinuity, for test contours only. skipped_slices_mm: the z "
+                "of every CT slice between the contour's first and last that holds no "
+                "contour, read from the contours as stored (never truncated). Separate "
+                "pieces on one slice are not counted. status: checked, or why the "
+                "contour could not be read."
             ),
         },
         "records": records,

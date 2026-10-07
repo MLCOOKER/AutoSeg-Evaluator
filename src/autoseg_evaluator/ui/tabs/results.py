@@ -62,7 +62,8 @@ _GROUP_BANDS: dict[str, tuple[str, QColor]] = {
     "overlap": ("Volumetric overlap", QColor("#00ACC1")),  # cyan
     "surface": ("Surface distances", QColor("#FB8C00")),  # orange
     "polygon": ("2D contour metrics", QColor("#26A69A")),  # teal
-    "volume": ("Volume, COM + PTV overlap", QColor("#43A047")),  # green
+    "volume": ("Volume + COM", QColor("#43A047")),  # green
+    "checks": ("Contour checks", QColor("#78909C")),  # blue-grey
     "staple": ("STAPLE consensus", QColor("#EC407A")),  # pink
     "dvh": ("Dose-volume histogram", QColor("#8E24AA")),  # purple
     "qualitative": ("Qualitative (Likert)", QColor("#795548")),  # brown
@@ -124,8 +125,11 @@ def _band_for_metric_key(key: str) -> str:
     # a reader needs to tell apart, not the metric family within it.
     if key.startswith("poly_"):
         return "polygon"
-    if key.startswith("volume_") or key.startswith("com_") or "ptv_overlap" in key:
+    if key.startswith("volume_") or key.startswith("com_"):
         return "volume"
+    # Checks recorded on every run, rather than metrics chosen for it.
+    if "ptv_overlap" in key or key == "contour_discontinuity":
+        return "checks"
     if key.startswith("staple_") or key in (
         "consensus_volume_cc",
         "rater_disagreement_cc",

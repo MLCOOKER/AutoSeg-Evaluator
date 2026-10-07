@@ -468,6 +468,28 @@ def mask_with_reading(
     raises :class:`MaskConversionError` saying why, instead of returning
     ``None``: the reason is what a results row should show.
     """
+    contours = _roi_contours(rtstruct_ds, roi_number)
+    if (backend or _default_rasteriser) == RASTERISER_CONTINUOUS:
+        try:
+            volume, reading = _fill_structure(dicom_image, contours)
+        except ContourReadingError as exc:
+            raise MaskConversionError(str(exc)) from exc
+        notes = reading.notes
+    else:
+        volume = _rasterise_roi_legacy(dicom_image, contours)
+        if volume is None:
+            raise MaskConversionError(
+                "the legacy rasteriser converts only planar CLOSED_PLANAR structures"
+            )
+        notes = ("legacy rasteriser: loops combined by exclusive-or, not by the shared reading",)
+
+    image = sitk.GetImageFromArray(volume.astype(np.uint8))
+    image.CopyInformation(dicom_image)
+    return sitk.Cast(image, sitk.sitkUInt8), notes
+
+
+def _roi_contours(rtstruct_ds: pydicom.Dataset, roi_number: int) -> pydicom.Dataset:
+    """The ``ROIContourSequence`` item holding one ROI's contours, or why there is none."""
     number = int(roi_number)
     listed = [
         s
@@ -483,24 +505,41 @@ def mask_with_reading(
     ]
     if not items or not getattr(items[0], "ContourSequence", None):
         raise MaskConversionError("no contours are stored for this structure")
+    return items[0]
 
-    if (backend or _default_rasteriser) == RASTERISER_CONTINUOUS:
-        try:
-            volume, reading = _fill_structure(dicom_image, items[0])
-        except ContourReadingError as exc:
-            raise MaskConversionError(str(exc)) from exc
-        notes = reading.notes
-    else:
-        volume = _rasterise_roi_legacy(dicom_image, items[0])
-        if volume is None:
-            raise MaskConversionError(
-                "the legacy rasteriser converts only planar CLOSED_PLANAR structures"
-            )
-        notes = ("legacy rasteriser: loops combined by exclusive-or, not by the shared reading",)
 
-    image = sitk.GetImageFromArray(volume.astype(np.uint8))
-    image.CopyInformation(dicom_image)
-    return sitk.Cast(image, sitk.sitkUInt8), notes
+def skipped_slices(reading: ContourReading) -> list[int]:
+    """Slices strictly between a structure's first and last that hold no region.
+
+    Whole slices only: how many pieces a slice holds is not looked at. Slices
+    above the first contour or below the last are outside the structure, not
+    gaps in it, so a structure on one slice skips none.
+    """
+    held = sorted(reading.regions)
+    if len(held) < 2:
+        return []
+    present = set(held)
+    return [z for z in range(held[0] + 1, held[-1]) if z not in present]
+
+
+def skipped_slice_positions(
+    dicom_image: sitk.Image, rtstruct_ds: pydicom.Dataset, roi_number: int
+) -> list[float]:
+    """Where one ROI skips a slice of ``dicom_image``: each skipped slice's z, in mm.
+
+    Taken from the contour reading, not from a mask. A contour too small to
+    enclose a voxel centre leaves its mask slice empty, which a mask would count
+    as a gap; the reading still has it. The contours are read as stored, never
+    truncated. Raises :class:`MaskConversionError` when they cannot be read.
+    """
+    try:
+        reading = read_structure(dicom_image, _roi_contours(rtstruct_ds, roi_number))
+    except ContourReadingError as exc:
+        raise MaskConversionError(str(exc)) from exc
+    return [
+        round(float(dicom_image.TransformIndexToPhysicalPoint((0, 0, int(z)))[2]), 3)
+        for z in skipped_slices(reading)
+    ]
 
 
 def truncate_to_gt_z_extent(

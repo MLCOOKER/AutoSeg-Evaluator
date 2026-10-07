@@ -476,12 +476,19 @@ tolerance field is not taken to mean 3 mm.
   two columns), Surface Dice, 3D Hausdorff 100% and 95%, Mean Surface Distance,
   Volume, COM offset. **Surface Dice τ (mm)** (3 mm is usual; Nikolov 2018)
   takes a list — "1, 2, 3" — and each tolerance fills its own column; the
-  surface distances are computed once. **PTV overlap** adds three columns:
+  surface distances are computed once.
+- **Recorded on every run**, whatever is ticked, because they are checks rather
+  than metrics (a note on the tab says so). **PTV overlap** adds three columns:
   the ground truth's and the test contour's volume inside the PTV (cc) and the
   difference, test − GT. The PTV is every structure typed PTV in the ground
   truth's own structure set, combined; names are not read. Blank for a
   consensus ground truth and for a structure set with no structure typed PTV;
   [`V3_PTV_OVERLAP_SPEC.md`](V3_PTV_OVERLAP_SPEC.md) has the decisions.
+  **Contour discontinuity** adds a yes/no column, *Contour Discontinuity*: yes
+  when the test contour skips a slice between its first and last, read from the
+  contours as stored and never truncated. Pieces on one slice are ignored, and
+  the ground truth is not checked;
+  [`V3_SKIPPED_SLICE_SPEC.md`](V3_SKIPPED_SLICE_SPEC.md).
 - **2D contour metrics (native RTSS polygons)** — APL, NAPL, 2D Hausdorff 100%
   and 95%, 2D mean and median contour distance. **APL τ (mm)** also takes a
   list; both 2D engines measure every tolerance in one call. A note states which 2D engine
@@ -1326,7 +1333,8 @@ The acquisition summary reads only an allowlist of non-identifying tags
 coverage table says, per organ, whether its test contours were truncated to the
 ground truth's extent (*yes*, *no*, or *partly* where pooled drawers differ),
 and, where PTV overlap was computed, how many of each source's contours overlap
-the PTV where the ground truth's does not (*k of n*).
+the PTV where the ground truth's does not (*k of n*); where the discontinuity
+check was run, how many of them skip a slice (*k of n*).
 
 The PDF export writes the page as a clinical report on A4 landscape. It is laid
 out on the PDF writer itself, so type prints at its stated size (tables 9 pt,

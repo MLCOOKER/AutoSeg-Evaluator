@@ -444,6 +444,12 @@ class ReportModel:
 
     Recorded for every case where both overlaps were measured, so a count has
     its denominator."""
+    _discontinuity: dict[tuple[str, str, str], dict[tuple[str, str], bool]] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
+    """``(organ, source, reference) -> {case: the test contour skips a slice}``.
+
+    Recorded for every case that was checked, so a count has its denominator."""
     _truncation: dict[tuple[str, str], set[bool]] = field(default_factory=lambda: defaultdict(set))
     """``(organ, reference) -> {truncated?}`` over that organ's rows.
 
@@ -511,6 +517,14 @@ class ReportModel:
                 dict,
                 {key: dict(cases) for key, cases in self._ptv_only.items() if key[2] == reference},
             ),
+            _discontinuity=defaultdict(
+                dict,
+                {
+                    key: dict(cases)
+                    for key, cases in self._discontinuity.items()
+                    if key[2] == reference
+                },
+            ),
             _by_reference=self._by_reference,
         )
 
@@ -534,6 +548,23 @@ class ReportModel:
             if name == organ:
                 flags |= seen
         return next(iter(flags)) if len(flags) == 1 else None
+
+    def checked_discontinuity(self) -> bool:
+        """Whether any test contour was checked for a skipped slice."""
+        return any(self._discontinuity.values())
+
+    def discontinuity(self, organ: str, source: str) -> tuple[int, int] | None:
+        """``(k, n)``: of ``n`` test contours checked, ``k`` skip a slice.
+
+        ``None`` when none of this organ and source was checked.
+        """
+        flags = [
+            flag
+            for (name, label, _reference), cases in self._discontinuity.items()
+            if name == organ and label == source
+            for flag in cases.values()
+        ]
+        return (sum(flags), len(flags)) if flags else None
 
     def measured_ptv_overlap(self) -> bool:
         """Whether any case has its overlap with the PTV measured."""
@@ -1008,6 +1039,10 @@ def build_report_model(
         per_organ[organ].add(patient)
 
         metrics = row.get("metrics") or {}
+        if isinstance(metrics.get("contour_discontinuity"), bool):
+            model._discontinuity[(organ, source, reference)][(patient, linkage)] = metrics[
+                "contour_discontinuity"
+            ]
         test_ptv, gt_ptv = metrics.get("test_ptv_overlap_cc"), metrics.get("gt_ptv_overlap_cc")
         if _finite(test_ptv) and _finite(gt_ptv):
             model._ptv_only[(organ, source, reference)][(patient, linkage)] = bool(

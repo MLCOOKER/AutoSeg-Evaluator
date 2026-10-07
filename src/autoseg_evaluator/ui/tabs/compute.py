@@ -130,16 +130,6 @@ _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
         "coordinates (mm), with signed Δx / Δy / Δz components. Detects "
         "positional shifts that high-overlap metrics can hide.",
     ),
-    (
-        "ptv_overlap",
-        "PTV overlap",
-        "Volume of the GT and of the test contour inside the PTV (cc), and the "
-        "difference, test − GT. Any overlap counts; 0 means none. The PTV is every "
-        "structure typed PTV in the GT's structure set, combined — the name is "
-        "not read. Blank when that structure set has none, and for a consensus "
-        "GT, which has no structure set of its own. The test contour is the "
-        "truncated one when the drawer truncates.",
-    ),
 )
 
 
@@ -326,6 +316,16 @@ class ComputeTab(QWidget):
 
         # STAPLE settings (only meaningful when ≥1 drawer has STAPLE mode on)
         outer.addWidget(self._build_staple_group())
+
+        # Not metrics, so not among them: two checks on every test contour,
+        # recorded on every run whatever is ticked above.
+        outer.addWidget(
+            _method_note(
+                "Recorded on every run, for each test contour: its overlap with the "
+                "ground truth's PTV (every structure typed PTV in the GT's structure "
+                "set), and Contour Discontinuity, whether it skips a slice."
+            )
+        )
 
         # Run button, with the definitions alongside it. Placed on the action
         # row rather than inside either metric group, because it describes both

@@ -40,9 +40,11 @@ from autoseg_evaluator.core.masks import (
     mask_with_reading,
     read_image_series,
     read_rtstruct,
+    skipped_slice_positions,
     truncate_to_gt_z_extent,
 )
 from autoseg_evaluator.core.metrics import (
+    bounding_box,
     compute_geometric_metrics,
     geometric_metrics_with_audit,
     overlap_cc,
@@ -144,13 +146,16 @@ class MetricsWorker(QObject):
         self._dvh_config = DVHConfig.from_dict(self._config.get("dvh", {}) or {})
         self._staple_config = StapleConfig.from_dict(self._config.get("staple", {}) or {})
         self._polygon_config = PolygonConfig.from_dict(self._config.get("polygon", {}))
-        # Overlap with the PTV: asked for as one of the 3D mask metrics, though
-        # computed here, because it needs the PTV and the metric functions are
-        # given only the two contours. See docs/V3_PTV_OVERLAP_SPEC.md.
-        self._ptv_enabled = bool((self._config.get("geometric") or {}).get("ptv_overlap"))
-        # Per patient and structure set: the PTVs combined, as a boolean array
-        # on the CT, the names combined, and the status the audit records.
+        # Overlap with the PTV, recorded on every run for every test contour
+        # against a ground truth. See docs/V3_PTV_OVERLAP_SPEC.md. Per patient
+        # and structure set: the PTVs combined, cut to their bounding box, the
+        # names combined, and the status the audit records.
         self._ptv_cache: dict[tuple[str, str], tuple[Any, list[str], str]] = {}
+        # Contour Discontinuity: whether a test contour skips a slice, checked
+        # on every run on the contour as stored. See
+        # docs/V3_SKIPPED_SLICE_SPEC.md. Per structure, ``(flag, skipped slices
+        # in mm)`` or why it was not checked.
+        self._discontinuity_cache: dict[tuple[str, str, int], Any] = {}
         # Audit detail cannot be reconstructed from a finished table, so whether
         # to keep it is decided before computing rather than at export time.
         self._audit = bool((self._config.get("audit") or {}).get("sidecar", False))
@@ -448,8 +453,8 @@ class MetricsWorker(QObject):
             return self._error_rows_for_group(group, error_text)
 
         # The PTV is rasterised on the CT, so it is taken now, before the CT can
-        # be released below.
-        ptv = self._ptv_basis(group, ct, gt_rtss, gt_mask)
+        # be released below. Only the comparisons with the ground truth use it.
+        ptv = self._ptv_basis(group, ct, gt_rtss, gt_mask) if group["gt_comparison"] else None
 
         # Per-rater mask loads. Each may fail independently; failed raters
         # get a stub error row and are dropped from the STAPLE pool.
@@ -499,6 +504,15 @@ class MetricsWorker(QObject):
                     self._make_test_error_row(group, test, f"{type(exc).__name__}: {exc}")
                 )
                 continue
+            # Checked on the contour as stored, so before truncation and
+            # whatever truncation does.
+            discontinuity = self._contour_discontinuity(
+                group["patient_id"],
+                test["rtstruct_sop_uid"],
+                test["roi_number"],
+                ct,
+                test_rtss,
+            )
             # Truncation applies before STAPLE (per user spec) — store both forms
             if group["truncate"]:
                 truncated_mask, extent_info = truncate_to_gt_z_extent(test_mask, gt_mask)
@@ -511,6 +525,7 @@ class MetricsWorker(QObject):
                     "rtss": test_rtss,
                     "mask": truncated_mask,
                     "extent_info": extent_info,
+                    "discontinuity": discontinuity,
                 }
             )
 
@@ -598,7 +613,7 @@ class MetricsWorker(QObject):
         """One row: a single test vs the designated GT.
 
         ``ptv`` is the group's PTV and the ground truth's overlap with it
-        (:meth:`_ptv_basis`), or ``None`` when the overlap was not asked for.
+        (:meth:`_ptv_basis`).
 
         ``gt_dvh`` carries the GT contour's own dose statistics (computed once
         per group); when present, each DVH metric also gets a ``{key}_diff``
@@ -637,6 +652,7 @@ class MetricsWorker(QObject):
                 geometric = compute_geometric_metrics(gt_mask, record["mask"], self._config)
             row["metrics"].update(geometric)
             self._ptv_into_row(row, ptv, record["mask"])
+            self._discontinuity_into_row(row, record.get("discontinuity"))
             # When the GT is a multi-observer STAPLE consensus, also report each
             # test's sensitivity / specificity against that consensus (treating
             # the consensus as truth) — alongside the geometric metrics.
@@ -718,10 +734,11 @@ class MetricsWorker(QObject):
 
         Every structure typed PTV (D10: the name is not read), rasterised on the
         CT and combined, so a voxel inside two PTVs counts once. ``region`` is
-        ``None`` when there is no PTV, or when one cannot be rasterised: a union
-        missing a PTV would understate the overlap, which is worse than giving
-        no value. Cached per patient and structure set, so every organ of the
-        patient reuses one union.
+        the union cut to its bounding box, with the box: ``(cropped, box)``, for
+        :func:`overlap_cc`. It is ``None`` when there is no PTV, or when one
+        cannot be rasterised: a union missing a PTV would understate the
+        overlap, which is worse than giving no value. Cached per patient and
+        structure set, so every organ of the patient reuses one union.
         """
         key = (patient_id, sop_uid)
         if key in self._ptv_cache:
@@ -744,6 +761,9 @@ class MetricsWorker(QObject):
                 break
             filled = sitk.GetArrayFromImage(mask).astype(bool)
             region = filled if region is None else np.logical_or(region, filled, out=region)
+        if region is not None:
+            box = bounding_box(region)
+            region = (region[box].copy(), box)  # the full-size union is let go
         result = (region, names, status)
         self._ptv_cache[key] = result
         return result
@@ -752,19 +772,16 @@ class MetricsWorker(QObject):
         """What each test row of a group is measured against.
 
         The PTV region, the ground truth's overlap with it, and the account the
-        audit records; ``None`` when the overlap was not asked for. Only the
-        ground truth's own structure set supplies a PTV (D5), so a consensus
-        ground truth, which has none, gets no value.
+        audit records. Only the ground truth's own structure set supplies a PTV
+        (D5), so a consensus ground truth, which has none, gets no value.
         """
-        if not self._ptv_enabled:
-            return None
         if group.get("_gt_synthetic"):
             return {"region": None, "structures": [], "status": PTV_STATUS_CONSENSUS}
         region, names, status = self._ptv_region(group["patient_id"], group["gt_sop"], ct, gt_rtss)
         basis: dict[str, Any] = {"region": region, "structures": names, "status": status}
         if region is not None:
             try:
-                basis["gt_cc"] = overlap_cc(gt_mask, region)
+                basis["gt_cc"] = overlap_cc(gt_mask, *region)
             except ValueError as exc:
                 basis.update(region=None, status=f"not measured: {exc}")
         return basis
@@ -779,7 +796,7 @@ class MetricsWorker(QObject):
         if basis is None:
             return
         if basis["region"] is not None:
-            test_cc = overlap_cc(test_mask, basis["region"])
+            test_cc = overlap_cc(test_mask, *basis["region"])
             row["metrics"]["gt_ptv_overlap_cc"] = basis["gt_cc"]
             row["metrics"]["test_ptv_overlap_cc"] = test_cc
             row["metrics"]["ptv_overlap_diff_cc"] = test_cc - basis["gt_cc"]
@@ -787,6 +804,42 @@ class MetricsWorker(QObject):
             row.setdefault("audit", {})["ptv"] = {
                 "status": basis["status"],
                 "structures": list(basis["structures"]),
+            }
+
+    # ---- Contour Discontinuity ---------------------------------------------
+
+    def _contour_discontinuity(
+        self, patient_id: str, sop_uid: str, roi_number: int, ct: Any, rtss: Any
+    ) -> Any:
+        """Whether a test contour skips a slice: ``(flag, skipped z in mm)``.
+
+        Or, as a string, why it could not be checked. The contour as stored,
+        never truncated, and the test contour only; the ground truth is not
+        checked. Cached per structure.
+        """
+        key = (patient_id, sop_uid, int(roi_number))
+        if key not in self._discontinuity_cache:
+            try:
+                skipped = skipped_slice_positions(ct, rtss, roi_number)
+                self._discontinuity_cache[key] = (bool(skipped), skipped)
+            except MaskConversionError as exc:
+                self._discontinuity_cache[key] = f"not checked: {exc}"
+        return self._discontinuity_cache[key]
+
+    def _discontinuity_into_row(self, row: dict[str, Any], result: Any) -> None:
+        """The Contour Discontinuity column, and the skipped slices for the audit."""
+        if result is None:
+            return
+        if isinstance(result, str):
+            if self._audit:
+                row.setdefault("audit", {})["discontinuity"] = {"status": result}
+            return
+        flag, skipped = result
+        row["metrics"]["contour_discontinuity"] = flag
+        if self._audit:
+            row.setdefault("audit", {})["discontinuity"] = {
+                "status": "checked",
+                "skipped_slices_mm": list(skipped),
             }
 
     # ---- Polygon stream ---------------------------------------------------
@@ -1027,6 +1080,7 @@ class MetricsWorker(QObject):
                     "rtstruct_sop_uid": t["rtstruct_sop_uid"],
                     "rtss": rec["rtss"],
                     "mask": rec["mask"],
+                    "discontinuity": rec.get("discontinuity"),
                     "was_designated_gt": False,
                     "similarity": t["similarity"],
                     "in_pool": True,
@@ -1107,6 +1161,8 @@ class MetricsWorker(QObject):
                 row["metrics"].update(
                     compute_geometric_metrics(consensus_mask, rater["mask"], self._config)
                 )
+                # Test raters only: the ground truth is never checked.
+                self._discontinuity_into_row(row, rater.get("discontinuity"))
                 pool_idx = pool_idx_by_id.get(id(rater))
                 if pool_idx is not None:
                     row["metrics"]["staple_sensitivity"] = float(result.sensitivities[pool_idx])
@@ -1706,8 +1762,9 @@ class MetricsWorker(QObject):
                     for rtss in ctx.rtstructs:
                         self._rtstruct_cache.pop(rtss.sop_instance_uid, None)
         # The PTV union is a full CT volume, like a mask.
-        for key in [k for k in self._ptv_cache if k[0] == patient_id]:
-            self._ptv_cache.pop(key, None)
+        for cache in (self._ptv_cache, self._discontinuity_cache):
+            for key in [k for k in cache if k[0] == patient_id]:
+                cache.pop(key, None)
         # The polygon caches key on the same patient, and a prepared structure
         # holds its edge arrays; dropping them here keeps peak memory tied to
         # one patient rather than to the whole cohort.

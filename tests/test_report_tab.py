@@ -185,7 +185,14 @@ def test_coverage_separates_a_declined_organ_from_an_unrun_patient(tab):
         tab._coverage_table.horizontalHeaderItem(c).text()
         for c in range(tab._coverage_table.columnCount())
     ]
-    assert headers == ["Organ", "Source", "Coverage", "Truncated", "Test-only PTV overlap"]
+    assert headers == [
+        "Organ",
+        "Source",
+        "Coverage",
+        "Truncated",
+        "Test-only PTV overlap",
+        "Contour Discontinuity",
+    ]
 
 
 def test_a_comparison_reports_how_much_the_pairing_discarded(tab):

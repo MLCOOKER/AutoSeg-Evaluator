@@ -6,8 +6,22 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — Contour Discontinuity, October 2026
+- **Contour discontinuity**, a check recorded on every run (no checkbox: it is
+  not a metric), adds a yes/no column, *Contour Discontinuity*: yes when the test
+  contour skips a slice, a CT slice between its first and last contoured slices
+  with no contour on it. Read from the contours as stored rather than from the
+  mask, so a contour too small to fill a voxel still counts as present; the
+  whole contour, never the truncated one. Separate pieces on one slice are not a
+  discontinuity. The ground truth is not checked. The audit sidecar lists the
+  skipped slices' positions.
+- **The coverage table counts discontinuous contours**: per organ and source,
+  *k of n*, on the Report tab and in the PDF.
+- Design and decisions: `docs/V3_SKIPPED_SLICE_SPEC.md`.
+
 ### Added — overlap with the PTV, October 2026
-- **PTV overlap**, a new 3D mask metric on the Compute tab, adds three columns:
+- **PTV overlap**, recorded on every run for every comparison with a ground
+  truth (no checkbox: it is not a metric), adds three columns:
   the ground truth's volume inside the PTV, the test contour's, and the
   difference, test − GT, in cc. Any overlap counts; 0 means none. The PTV is
   every structure whose type (RTROIInterpretedType) is PTV in the ground truth's

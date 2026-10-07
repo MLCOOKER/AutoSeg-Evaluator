@@ -109,14 +109,34 @@ def volume_cc(mask: sitk.Image) -> float:
     return float(int(arr.sum()) * _voxel_volume_cc(mask))
 
 
-def overlap_cc(mask: sitk.Image, region: np.ndarray) -> float:
+def bounding_box(region: np.ndarray) -> tuple[slice, ...]:
+    """The smallest box holding every true voxel of ``region``; empty if none is."""
+    box = []
+    for axis in range(region.ndim):
+        others = tuple(other for other in range(region.ndim) if other != axis)
+        hit = np.flatnonzero(np.any(region, axis=others))
+        if not hit.size:
+            return tuple(slice(0, 0) for _ in range(region.ndim))
+        box.append(slice(int(hit[0]), int(hit[-1]) + 1))
+    return tuple(box)
+
+
+def overlap_cc(mask: sitk.Image, region: np.ndarray, box: tuple[slice, ...] | None = None) -> float:
     """Volume of ``mask`` inside ``region``, in cubic centimetres.
 
     ``region`` is a boolean array on the mask's own grid, in its (z, y, x)
     order: the PTV, rasterised on the same CT. Counted as ``volume_cc`` counts,
     so the two are comparable.
+
+    ``box``, from :func:`bounding_box`, says where in the grid ``region`` was
+    cut from. Nothing outside it can overlap, and counting only inside it
+    reads a fraction of a CT-sized volume for each contour instead of all of
+    it: across the whole volume, the count was most of what the PTV overlap
+    added to a run.
     """
     arr = sitk.GetArrayViewFromImage(mask)
+    if box is not None:
+        arr = arr[box]
     if arr.shape != region.shape:
         raise ValueError(
             f"the mask ({arr.shape}) and the region ({region.shape}) are not on the same grid"

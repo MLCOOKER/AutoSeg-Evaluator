@@ -106,11 +106,8 @@ GT_IN_PTV_CC = (20 + 100 + 20) * VOXEL_CC
 TEST_IN_PTV_CC = (60 + 100 + 60) * VOXEL_CC
 
 
-def _worker(*, enabled=True, audit=True, types=GT_TYPES, rois=GT_ROIS):
-    config = {"geometric": {"ptv_overlap": enabled}}
-    if audit:
-        config["audit"] = {"sidecar": True}
-    worker = MetricsWorker(None, [], config)
+def _worker(*, audit=True, types=GT_TYPES, rois=GT_ROIS):
+    worker = MetricsWorker(None, [], {"audit": {"sidecar": True}} if audit else {})
     entry = SimpleNamespace(
         organs=[
             OrganEntry(roi_number=n, roi_name=name, interpreted_type=types.get(n, ""))
@@ -205,16 +202,73 @@ def test_the_union_is_built_once_per_structure_set():
     assert worker._ptv_cache == {}
 
 
-def test_nothing_is_measured_unless_asked_for():
-    row, basis = _measure(_worker(enabled=False))
-    assert basis is None
-    assert row == {"metrics": {}}
+def test_both_checks_are_recorded_whatever_is_ticked(qapp, monkeypatch):
+    """Only Dice is asked for. The PTV overlap and Contour Discontinuity come
+    anyway, through the worker's own pass over one organ."""
+    from autoseg_evaluator.workers import metrics_worker as module
+
+    worker = MetricsWorker(None, [], {"geometric": {"dice": True}})
+    # The test reaches 4 mm into the boost and skips the slice at z = 2 mm.
+    test_planes = {z: _box(-1.5, 8.5) for z in (-2.0, 0.0, 4.0)}
+    datasets = {
+        "gt.1": _structure_set(GT_ROIS),
+        "test.1": _structure_set({1: ("Parotid_L", test_planes)}),
+    }
+    entries = {
+        "gt.1": SimpleNamespace(
+            organs=[
+                OrganEntry(roi_number=n, roi_name=name, interpreted_type=GT_TYPES[n])
+                for n, (name, _planes) in GT_ROIS.items()
+            ],
+            is_synthetic_consensus=False,
+            linkage_id="",
+        ),
+        "test.1": SimpleNamespace(organs=[], is_synthetic_consensus=False, linkage_id=""),
+    }
+    monkeypatch.setattr(worker, "_find_rtstruct_entry", lambda _patient, sop: entries.get(sop))
+    monkeypatch.setattr(worker, "_load_ct", lambda *_: _image())
+    monkeypatch.setattr(worker, "_load_rtstruct", lambda _patient, sop: datasets[sop])
+    monkeypatch.setattr(module, "planning_series_uid", lambda *_: None)
+    group = {
+        "organ_name": "Parotid_L",
+        "truncate": False,
+        "gt_comparison": True,
+        "staple_consensus": False,
+        "staple_include_gt": True,
+        "patient_id": "P1",
+        "gt_sop": "gt.1",
+        "gt_filename": "",
+        "gt_source": "Manual",
+        "gt_roi_number": 1,
+        "gt_roi_name": "Parotid_L",
+        "tests": [
+            {
+                "rtstruct_sop_uid": "test.1",
+                "source_label": "VendorA",
+                "organ_name": "Parotid_L",
+                "roi_number": 1,
+                "similarity": 1.0,
+            }
+        ],
+    }
+
+    rows = worker._compute_group(
+        group, {"patient": "", "drawer": "", "test": "", "metric": ""}, 0, 1
+    )
+
+    (row,) = [r for r in rows if r.get("test_source_label") == "VendorA"]
+    assert row["error"] == ""
+    assert "dice" in row["metrics"]
+    assert row["metrics"]["gt_ptv_overlap_cc"] == pytest.approx(GT_IN_PTV_CC)
+    # 60 + 100 voxels on the two slices the boost reaches; none at z = 4 mm.
+    assert row["metrics"]["test_ptv_overlap_cc"] == pytest.approx(160 * VOXEL_CC)
+    assert row["metrics"]["contour_discontinuity"] is True
 
 
 # ---- Table, report and audit ----------------------------------------------------
 
 
-def test_the_columns_have_their_names_and_sit_with_volume():
+def test_the_columns_have_their_names_and_sit_with_the_checks():
     from autoseg_evaluator.data.results import CANONICAL_METRIC_COLUMNS, metric_display_label
     from autoseg_evaluator.ui.tabs.results import _band_for_metric_key
 
@@ -226,7 +280,7 @@ def test_the_columns_have_their_names_and_sit_with_volume():
     for key, label in labels.items():
         assert key in CANONICAL_METRIC_COLUMNS
         assert metric_display_label(key) == label
-        assert _band_for_metric_key(key) == "volume"
+        assert _band_for_metric_key(key) == "checks"
 
 
 def test_the_report_compares_the_test_overlap_and_the_difference_only():
@@ -329,14 +383,15 @@ def test_the_audit_sidecar_carries_the_ptv_record():
     assert "ptv" in document["notes"]
 
 
-def test_the_compute_tab_offers_it_and_it_counts_as_a_metric(qapp):
+def test_the_compute_tab_has_no_switch_for_it_and_says_so(qapp):
+    """A check on every run, not a metric to choose."""
+    from PySide6.QtWidgets import QLabel
+
     from autoseg_evaluator.ui.tabs.compute import ComputeTab
 
     tab = ComputeTab()
-    assert not tab._geom_checks["ptv_overlap"].isChecked()  # nothing selected at launch
-    tab._geom_checks["ptv_overlap"].setChecked(True)
-    received: list[dict] = []
-    tab.computeRequested.connect(received.append)
-    tab._on_compute_clicked()
-    assert received and received[0]["geometric"]["ptv_overlap"] is True
+    assert "ptv_overlap" not in tab._geom_checks
+    assert "ptv_overlap" not in tab.config()["geometric"]
+    notes = " ".join(label.text() for label in tab.findChildren(QLabel))
+    assert "Recorded on every run" in notes and "PTV" in notes
     tab.deleteLater()

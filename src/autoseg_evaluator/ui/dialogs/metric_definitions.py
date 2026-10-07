@@ -165,18 +165,6 @@ extreme. The centre-of-mass offset is the distance between the two centroids in
 patient coordinates, with signed components, and catches a positional shift that
 a high overlap score can hide.</p>
 
-<h3>PTV overlap</h3>
-<p>The volume of the ground truth, and of the test contour, inside the PTV, and
-the difference, test &minus; ground truth, all in cc. Any overlap counts: 0 means
-none. The PTV is every structure in the ground truth's own structure set whose
-structure type (RTROIInterpretedType) is PTV, combined into one region so that a
-voxel inside two PTVs counts once; names are not read. Each volume is a voxel
-count multiplied by the voxel volume, on the same masks as Dice. The test contour
-is the truncated one when the drawer truncates. The columns are blank when the
-ground truth's structure set has no structure typed PTV, and for a consensus
-ground truth, which has no structure set of its own. A positive difference means
-the test contour reaches further into the PTV than the ground truth does.</p>
-
 <h3>Rasterisation</h3>
 <p>How each structure becomes a mask, adapted from dcmrtstruct2nii:</p>
 <ol>
@@ -254,6 +242,30 @@ and the two combined by taking the <b>larger</b>.</p>
 <p>The loops are read by the rules in <i>Reading the contours</i> above, the same
 reading the 3D fill uses. The 2D metrics are then measured along the outlines of
 the regions it produces.</p>
+
+<h2>Checks recorded on every run</h2>
+
+<p>Two checks on every test contour, made whatever metrics are ticked. They are not metrics of agreement, so they are not among them.</p>
+
+<h3>PTV overlap</h3>
+<p>The volume of the ground truth, and of the test contour, inside the PTV, and
+the difference, test &minus; ground truth, all in cc. Any overlap counts: 0 means
+none. The PTV is every structure in the ground truth's own structure set whose
+structure type (RTROIInterpretedType) is PTV, combined into one region so that a
+voxel inside two PTVs counts once; names are not read. Each volume is a voxel
+count multiplied by the voxel volume, on the same masks as Dice. The test contour
+is the truncated one when the drawer truncates. The columns are blank when the
+ground truth's structure set has no structure typed PTV, and for a consensus
+ground truth, which has no structure set of its own. A positive difference means
+the test contour reaches further into the PTV than the ground truth does.</p>
+
+<h3>Contour Discontinuity</h3>
+<p>Yes when the test contour skips a slice: a CT slice between its first and last
+contoured slices with no contour on it. Only whole slices count — separate pieces
+on one slice are not a discontinuity. It is read from the contours as stored, not
+from the mask, so a contour too small to fill a voxel still counts as present;
+and it is the whole contour, never the truncated one. The ground truth is not
+checked.</p>
 
 <h2>Dose-volume statistics</h2>
 
