@@ -42,7 +42,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from PySide6.QtCore import QRect, QSizeF, Qt
+from PySide6.QtCore import QRect, QSize, QSizeF, Qt
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -61,12 +61,12 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
@@ -97,6 +97,7 @@ from autoseg_evaluator.ui.widgets.stat_plots import (
     DistributionCanvas,
     ForestCanvas,
     PairedCanvas,
+    SidewaysScroll,
 )
 
 _ALPHA = 0.05
@@ -114,6 +115,17 @@ _FIGURE_PAGE_SHARE = 0.46
 
 #: Where the packaged artwork lives.
 _ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
+
+#: What the paired comparison is, in two sentences above its table. The methods
+#: paragraph at the foot of the tab says it in full; this is for the reader who
+#: looks at the table first.
+PAIRED_TEST_NOTE = (
+    "Each row is an exact, two-sided Wilcoxon signed-rank test on the per-patient "
+    "differences (challenger minus reference), using the patients where both "
+    "sources produced the organ. The difference shown is the Hodges–Lehmann "
+    "estimate with its 95% confidence interval, an exact sign test is given "
+    "alongside, and p-values are not adjusted for multiple comparisons."
+)
 
 #: Rows a section shows before it starts scrolling. Below this a table sizes to
 #: its contents, so a four-row table costs four rows of page rather than a fixed
@@ -155,6 +167,69 @@ class _GroupRuleDelegate(QStyledItemDelegate):
         rect = QRect(option.rect)
         painter.drawLine(rect.topLeft(), rect.topRight())
         painter.restore()
+
+
+#: Room added to each column beyond its widest entry, so a number does not sit
+#: against the next column's rule.
+COLUMN_PADDING = 14
+
+
+class _CompactTable(QTableWidget):
+    """A table only as wide as its columns, each as wide as its widest entry.
+
+    Stretched across the window, a table with a few short columns spread its
+    numbers so far apart that a row no longer read as one row. In a window
+    narrower than the table it scrolls sideways within itself, and grows by the
+    scroll bar's height while it does, so the bottom row is not hidden.
+
+    Its preferred size comes from its contents only, never from its current
+    size, so a layout sizing it from that cannot feed back into it.
+    """
+
+    def __init__(self, rows: int, columns: int, parent: QWidget | None = None) -> None:
+        super().__init__(rows, columns, parent)
+        self._fitted = QSize()
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.horizontalScrollBar().rangeChanged.connect(self._apply_height)
+
+    def fit(self, max_rows: int) -> None:
+        """Size to the contents: every row up to ``max_rows``, then scroll.
+
+        A fixed height wastes the page on a four-row table and hides rows on a
+        forty-row one.
+        """
+        self.resizeColumnsToContents()
+        header = self.horizontalHeader()
+        for column in range(self.columnCount()):
+            header.resizeSection(column, header.sectionSize(column) + COLUMN_PADDING)
+
+        rows = self.rowCount()
+        row_height = self.rowHeight(0) if rows else self.verticalHeader().defaultSectionSize()
+        visible = min(rows, max_rows) if rows else 0
+        # Two pixels of frame, and half a row of headroom when scrolling so the
+        # cut-off row reads as "there is more" rather than as the end.
+        height = header.height() + visible * row_height + 4
+        if rows > max_rows:
+            height += row_height // 2
+        height = max(height, header.height() + row_height + 4)
+
+        width = header.length() + 2 * self.frameWidth()
+        if rows > max_rows:
+            width += self.verticalScrollBar().sizeHint().width()
+        self._fitted = QSize(width, height)
+        self.updateGeometry()
+        self._apply_height()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 — Qt override
+        return self._fitted if self._fitted.isValid() else super().sizeHint()
+
+    def _apply_height(self) -> None:
+        if not self._fitted.isValid():
+            return
+        height = self._fitted.height()
+        if self.horizontalScrollBar().maximum() > 0:
+            height += self.horizontalScrollBar().sizeHint().height()
+        self.setFixedHeight(height)
 
 
 # ---- Column help ----------------------------------------------------------
@@ -572,14 +647,26 @@ class ReportTab(QWidget):
         self._descriptive_note.setWordWrap(True)
         self._descriptive_note.setStyleSheet("color:#777; font-size:11px;")
         descriptive_layout.addWidget(self._descriptive_note)
-        descriptive_layout.addWidget(self._descriptive_table)
+        descriptive_layout.addWidget(self._descriptive_table, alignment=Qt.AlignmentFlag.AlignLeft)
         outer.addWidget(descriptive_box)
 
         self._comparison_table = self._make_table(COMPARISON_COLUMNS)
-        outer.addWidget(self._wrap("Paired comparison", self._comparison_table))
+        comparison_box = QGroupBox("Paired comparison", self)
+        comparison_layout = QVBoxLayout(comparison_box)
+        comparison_layout.setContentsMargins(6, 6, 6, 6)
+        self._comparison_note = QLabel(PAIRED_TEST_NOTE, self)
+        self._comparison_note.setWordWrap(True)
+        self._comparison_note.setStyleSheet("color:#777; font-size:11px;")
+        comparison_layout.addWidget(self._comparison_note)
+        comparison_layout.addWidget(self._comparison_table, alignment=Qt.AlignmentFlag.AlignLeft)
+        outer.addWidget(comparison_box)
 
+        # Each figure scrolls sideways inside its own section. The distributions
+        # widen with the organ count, and placed straight in the tab that width
+        # became the tab's, stretching every table and caption to match it.
         self._distribution = DistributionCanvas()
-        outer.addWidget(self._wrap("Distributions", self._distribution))
+        self._distribution_scroll = SidewaysScroll(self._distribution, self)
+        outer.addWidget(self._wrap("Distributions", self._distribution_scroll))
         paired_box = QGroupBox("Paired differences", self)
         paired_layout = QVBoxLayout(paired_box)
         paired_layout.setContentsMargins(6, 6, 6, 6)
@@ -602,7 +689,8 @@ class ReportTab(QWidget):
         paired_controls.addWidget(self._paired_combo, stretch=1)
         paired_layout.addLayout(paired_controls)
         self._paired = PairedCanvas()
-        paired_layout.addWidget(self._paired)
+        self._paired_scroll = SidewaysScroll(self._paired, self)
+        paired_layout.addWidget(self._paired_scroll)
         outer.addWidget(paired_box)
 
         self._forest = ForestCanvas()
@@ -647,7 +735,8 @@ class ReportTab(QWidget):
         forest_controls.addWidget(self._sort_check)
         forest_controls.addStretch(1)
         forest_layout.addLayout(forest_controls)
-        forest_layout.addWidget(self._forest)
+        self._forest_scroll = SidewaysScroll(self._forest, self)
+        forest_layout.addWidget(self._forest_scroll)
         outer.addWidget(forest_box)
 
         self._acquisition_box = QGroupBox("Acquisition parameters", self)
@@ -658,7 +747,7 @@ class ReportTab(QWidget):
         self._acquisition_note.setStyleSheet("color:#777; font-size:11px;")
         acquisition_layout.addWidget(self._acquisition_note)
         self._image_table = self._make_table(ACQUISITION_COLUMNS)
-        acquisition_layout.addWidget(self._image_table)
+        acquisition_layout.addWidget(self._image_table, alignment=Qt.AlignmentFlag.AlignLeft)
         outer.addWidget(self._acquisition_box)
 
         self._methods = QLabel("", self)
@@ -668,8 +757,8 @@ class ReportTab(QWidget):
         outer.addWidget(self._methods)
 
     @staticmethod
-    def _make_table(columns: list[tuple[str, str]]) -> QTableWidget:
-        table = QTableWidget(0, len(columns))
+    def _make_table(columns: list[tuple[str, str]]) -> _CompactTable:
+        table = _CompactTable(0, len(columns))
         table.setHorizontalHeaderLabels([title for title, _tooltip in columns])
         for index, (_title, tooltip) in enumerate(columns):
             header_item = table.horizontalHeaderItem(index)
@@ -678,39 +767,23 @@ class ReportTab(QWidget):
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        # Equal widths across the row. Content-sized columns gave a ragged left
-        # edge that changed every time the data did, which made two tables
-        # stacked above each other impossible to read across.
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         return table
 
     @staticmethod
-    def _fit_table(table: QTableWidget, max_rows: int = MAX_VISIBLE_ROWS) -> None:
-        """Size a table to its contents, up to a ceiling, then let it scroll.
-
-        A fixed height wastes the page on a four-row table and hides rows on a
-        forty-row one. Both minimum and maximum are set to the fitted value so
-        the surrounding layout cannot stretch it back out.
-        """
-        header = table.horizontalHeader().height()
-        rows = table.rowCount()
-        row_height = table.rowHeight(0) if rows else table.verticalHeader().defaultSectionSize()
-        visible = min(rows, max_rows) if rows else 0
-        # Two pixels of frame, and half a row of headroom when scrolling so the
-        # cut-off row reads as "there is more" rather than as the end.
-        height = header + visible * row_height + 4
-        if rows > max_rows:
-            height += row_height // 2
-        height = max(height, header + row_height + 4)
-        table.setMinimumHeight(height)
-        table.setMaximumHeight(height)
+    def _fit_table(table: _CompactTable, max_rows: int = MAX_VISIBLE_ROWS) -> None:
+        """Size a table to its contents, up to a ceiling of rows, then scroll."""
+        table.fit(max_rows)
 
     @staticmethod
     def _wrap(title: str, widget: QWidget) -> QWidget:
         box = QGroupBox(title)
         layout = QVBoxLayout(box)
         layout.setContentsMargins(6, 6, 6, 6)
-        layout.addWidget(widget)
+        # A table keeps to the left at its own width; a figure fills the row.
+        if isinstance(widget, _CompactTable):
+            layout.addWidget(widget, alignment=Qt.AlignmentFlag.AlignLeft)
+        else:
+            layout.addWidget(widget)
         return box
 
     # ---- Controls ---------------------------------------------------------
@@ -1633,10 +1706,9 @@ class ReportTab(QWidget):
         in exactly as drawn — they have their own typography, and restyling
         them to match the page would trade legibility for a matching palette.
 
-        ``width`` and ``height`` are the paintable page in device pixels.
-        Everything that can fill the measure does, because a table or a figure
-        set to a fixed width leaves a column of white beside it that reads as a
-        missing second column.
+        ``width`` and ``height`` are the paintable page in device pixels. The
+        banner and the figures fill the measure; the data tables take the
+        central part of it (``_TABLE_WIDTH_PERCENT``).
         """
         axis = self._axis()
         metric = self._selected_metric()
@@ -1672,13 +1744,21 @@ class ReportTab(QWidget):
             )
         )
 
-        parts.append(_section("Coverage") + _table_html(self._coverage_table))
+        parts.append(_table_section("Coverage", self._coverage_table))
         parts.append(
-            _section("Descriptive statistics")
-            + f"<p class='note'>{self._descriptive_note.text()}</p>"
-            + _table_html(self._descriptive_table)
+            _table_section(
+                "Descriptive statistics",
+                self._descriptive_table,
+                self._descriptive_note.text(),
+            )
         )
-        parts.append(_section("Paired comparison") + _table_html(self._comparison_table))
+        parts.append(
+            _table_section(
+                "Paired comparison",
+                self._comparison_table,
+                self._comparison_note.text(),
+            )
+        )
 
         for name, canvas in self._figures():
             figure = self._figure_html(name, canvas, scratch, width, height)
@@ -1687,9 +1767,11 @@ class ReportTab(QWidget):
 
         if self._acquisition.available:
             parts.append(
-                _section("Acquisition parameters")
-                + f"<p class='note'>{self._acquisition_note.text()}</p>"
-                + _table_html(self._image_table)
+                _table_section(
+                    "Acquisition parameters",
+                    self._image_table,
+                    self._acquisition_note.text(),
+                )
             )
 
         comments = []
@@ -1742,6 +1824,11 @@ _MUTED = "#6B7B85"
 _RULE = "#C9D6DC"
 _PANEL = "#E8EFF2"
 
+#: How much of the page width each data table takes, centred. Sized to their
+#: contents the tables sat at the left edge with most of the page white beside
+#: them; across the full width, a few short columns drifted too far apart.
+_TABLE_WIDTH_PERCENT = 75
+
 #: What each figure is called in the document. The keys are the filename stems
 #: used when the figures are saved on their own, which are not titles.
 _FIGURE_TITLES = {
@@ -1789,6 +1876,8 @@ table.data {{ border-collapse: collapse; font-size: 7.5pt; }}
 table.data th {{ background-color: {_ACCENT}; color: #FFFFFF; font-size: 7pt;
                  padding: 5px 6px; text-align: left; border: 1px solid {_ACCENT}; }}
 table.data td {{ padding: 4px 6px; border: 1px solid {_RULE}; }}
+table.caption {{ margin: 13px 0 0 0; }}
+table.caption p.section {{ margin: 0 0 4px 0; }}
 table.panel {{ border-collapse: collapse; margin: 0 0 3px 0; }}
 table.panel td {{ padding: 8px 12px; font-size: 8pt;
                   background-color: {_PANEL}; }}
@@ -1906,12 +1995,31 @@ def _signoff_html(produced: str) -> str:
     )
 
 
+def _table_section(title: str, table: QTableWidget, note: str = "") -> str:
+    """A table with its section label and note above it, on the table's measure.
+
+    The label and note go in a one-cell table of the table's width and
+    alignment, so all three share a left edge. Left at the page margin, they
+    sat apart from a centred table, and a note ran the full width of the page
+    as one line.
+    """
+    caption = _section(title) + (f"<p class='note'>{note}</p>" if note else "")
+    return (
+        f"<table class='caption' width='{_TABLE_WIDTH_PERCENT}%' align='center' "
+        f"border='0' cellspacing='0' cellpadding='0'><tr><td>{caption}</td></tr></table>"
+        + _table_html(table)
+    )
+
+
 def _table_html(table: QTableWidget) -> str:
     """One Qt table as an HTML table, blanks and all.
 
     Blank cells are kept blank: the organ column is deliberately empty on
     continuation rows, and filling it back in for the PDF would undo the
     grouping the table exists to show.
+
+    ``width`` as an attribute, not as CSS: QTextDocument's stylesheet subset
+    ignores a percentage width on a table.
     """
     headers = [table.horizontalHeaderItem(column).text() for column in range(table.columnCount())]
     rows = []
@@ -1920,14 +2028,15 @@ def _table_html(table: QTableWidget) -> str:
         for column in range(table.columnCount()):
             item = table.item(row, column)
             value = item.text() if item is not None else ""
-            weight = " style='font-weight:bold'" if item is not None and item.font().bold() else ""
-            cells.append(f"<td{weight}>{value}</td>")
+            # Bold as markup inside the cell, not as a style on it: an inline
+            # style on a cell replaces the stylesheet's border, so two bold
+            # cells one above the other lost the rule between them.
+            if item is not None and item.font().bold():
+                value = f"<b>{value}</b>"
+            cells.append(f"<td>{value}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
-    # ``width`` as an attribute, not as CSS: QTextDocument's stylesheet subset
-    # ignores a percentage width on a table and sizes it to its contents, which
-    # leaves a long table sitting in the left third of the page.
     return (
-        "<table class='data' width='100%'><thead><tr>"
+        f"<table class='data' width='{_TABLE_WIDTH_PERCENT}%' align='center'><thead><tr>"
         + "".join(f"<th>{header}</th>" for header in headers)
         + "</tr></thead>"
         + "".join(rows)

@@ -455,17 +455,22 @@ def test_letter_spaced_labels_keep_their_words_apart(qapp):
     assert spaced.startswith("C O M P A R E D")
 
 
-def test_the_export_fills_the_measure(tab, tmp_path):
-    """Tables sized to their contents leave a page two thirds white.
-
-    QTextDocument's stylesheet subset ignores a percentage width on a table, so
-    this checks for the attribute that it does honour.
+def test_the_exported_tables_take_the_middle_of_the_page(tab, tmp_path):
+    """Sized to their contents the tables left most of the page white; across
+    the full width their columns drifted apart. Each takes the centre, with
+    its label and note on the same measure. The conditions panel is layout
+    rather than data, and still spans the page.
     """
     from pathlib import Path
 
+    from autoseg_evaluator.ui.tabs.report import _TABLE_WIDTH_PERCENT
+
     _select(tab, ORGANS)
     html = tab._pdf_html(Path(tmp_path), width=1600, height=1100)
-    assert "<table class='data' width='100%'>" in html
+    assert 50 <= _TABLE_WIDTH_PERCENT < 100
+    centred = f"width='{_TABLE_WIDTH_PERCENT}%' align='center'"
+    assert html.count(f"<table class='data' {centred}>") == 3
+    assert html.count(f"<table class='caption' {centred}") == 3
     assert "<table class='panel' width='100%'>" in html
     # No figure may outgrow its share of the page, or the leftover prints as a
     # gap above the next page break.
@@ -1121,22 +1126,123 @@ def test_every_section_spans_the_full_width(tab):
     assert tab.findChildren(QSplitter) == []
 
 
-def test_columns_are_evenly_spaced(tab):
-    """Content-sized columns shifted every time the data did.
+def _shown(tab, qapp, width):
+    tab.resize(width, 900)
+    tab.show()
+    for _ in range(5):
+        qapp.processEvents()
 
-    Two tables stacked above one another could not be read across, because
-    neither agreed with the other on where a column started.
+
+def _room_for_every_table(tab) -> int:
+    """A window wider than the widest table, whatever the fonts make that."""
+    return tab._comparison_table.sizeHint().width() + 200
+
+
+def test_tables_are_only_as_wide_as_their_columns(tab, qapp):
+    """Stretched across the window, short columns spread a row too far apart.
+
+    Each column is as wide as its widest entry, so nothing is cut off, and the
+    table keeps to the left of its section at that width.
     """
-    from PySide6.QtWidgets import QHeaderView
+    _select(tab, ORGANS)
+    _shown(tab, qapp, _room_for_every_table(tab))
 
-    for table in (
-        tab._coverage_table,
-        tab._descriptive_table,
-        tab._comparison_table,
-        tab._image_table,
-    ):
+    for table in (tab._coverage_table, tab._descriptive_table, tab._comparison_table):
         header = table.horizontalHeader()
-        assert header.sectionResizeMode(0) is QHeaderView.ResizeMode.Stretch
+        for column in range(table.columnCount()):
+            assert header.sectionSize(column) >= table.sizeHintForColumn(column)
+            assert header.sectionSize(column) >= header.sectionSizeHint(column)
+        assert table.width() == table.sizeHint().width()
+        assert table.x() < 30
+        assert not table.horizontalScrollBar().isVisible()
+    coverage = tab._coverage_table
+    assert coverage.width() < coverage.parentWidget().width() / 2
+
+
+def test_a_table_wider_than_the_window_scrolls_without_hiding_a_row(tab, qapp):
+    """Narrower than its columns, a table scrolls sideways within itself.
+
+    The tab keeps the window's width, and the table grows by the scroll bar's
+    height so the bar does not cover its bottom row.
+    """
+    _select(tab, ORGANS)
+    wide = _room_for_every_table(tab)
+    _shown(tab, qapp, wide)
+    table = tab._comparison_table
+    fitted = table.height()
+
+    _shown(tab, qapp, 700)
+    bar = table.horizontalScrollBar()
+    assert table.width() < table.sizeHint().width()
+    assert bar.isVisible()
+    assert table.height() == fitted + bar.sizeHint().height()
+
+    _shown(tab, qapp, wide)
+    assert not bar.isVisible()
+    assert table.height() == fitted
+    tab.hide()
+
+
+def test_bold_cells_keep_their_rules_in_the_export(qapp):
+    """A style on a cell replaced its border, so two bold cells, one above the
+    other, printed with no rule between them.
+
+    Rendered, not inspected as markup: a column of bold cells must cross as
+    many rules as a column of plain ones.
+    """
+    from PySide6.QtCore import QSizeF
+    from PySide6.QtGui import QColor, QImage, QPainter, QTextDocument
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+
+    from autoseg_evaluator.ui.tabs.report import _PDF_STYLE, _RULE, _table_html
+
+    def rules_crossed(bold: bool) -> int:
+        table = QTableWidget(4, 1)
+        table.setHorizontalHeaderLabels(["Median"])
+        for row in range(4):
+            item = QTableWidgetItem(f"0.8{row}")
+            font = item.font()
+            font.setBold(bold)
+            item.setFont(font)
+            table.setItem(row, 0, item)
+        document = QTextDocument()
+        document.setDefaultStyleSheet(_PDF_STYLE)
+        document.setDocumentMargin(0)
+        document.setHtml(_table_html(table))
+        document.setPageSize(QSizeF(400, 1000))
+        size = document.size().toSize()
+        image = QImage(size, QImage.Format.Format_RGB32)
+        image.fill(QColor("white"))
+        painter = QPainter(image)
+        document.drawContents(painter)
+        painter.end()
+        rule = QColor(_RULE)
+
+        def on_rule(x: int, y: int) -> bool:
+            pixel = image.pixelColor(x, y)
+            return (
+                abs(pixel.red() - rule.red())
+                + abs(pixel.green() - rule.green())
+                + abs(pixel.blue() - rule.blue())
+                < 60
+            )
+
+        # The table is centred: find its left edge from the header's fill,
+        # then go down the cell padding just inside it, left of the text,
+        # where only rules cross.
+        white = QColor("white")
+        left = next(x for x in range(image.width()) if image.pixelColor(x, 3) != white)
+        crossings, inside = 0, False
+        for y in range(image.height()):
+            here = on_rule(left + 3, y)
+            crossings += here and not inside
+            inside = here
+        table.deleteLater()
+        return crossings
+
+    plain = rules_crossed(bold=False)
+    assert plain >= 4  # one between each pair of rows, and the bottom edge
+    assert rules_crossed(bold=True) == plain
 
 
 def test_a_short_table_does_not_reserve_a_tall_block(tab):
@@ -1857,6 +1963,107 @@ def test_the_distribution_widens_with_the_organ_count(tab):
     assert tab._distribution.minimumWidth() > narrow
 
 
+def test_a_wide_figure_scrolls_inside_its_section(tab):
+    """Many organs widen the distributions; the tab and its tables do not follow.
+
+    Placed straight in the tab, the figure's width became the tab's, so every
+    table stretched to it and the whole tab scrolled sideways to read a row.
+    """
+    _select(tab, ["Parotid (L)"])
+    narrow_tab = tab.minimumSizeHint().width()
+    # Thirty organs: a figure far wider than anything else the tab holds.
+    tab._distribution.plot(
+        {f"Organ {i}": {"Vendor A": [0.8, 0.9], "Vendor B": [0.7, 0.85]} for i in range(30)},
+        "dice",
+    )
+    wide_figure = tab._distribution.minimumWidth()
+    assert wide_figure > 2 * narrow_tab
+    assert tab.minimumSizeHint().width() == narrow_tab
+    assert tab._distribution_scroll.minimumSizeHint().width() < wide_figure
+
+
+def test_the_difference_figure_is_never_clipped(tab):
+    """Its height follows its rows, so its scroll area has to follow it too."""
+    for organs in (["Parotid (L)"], ORGANS):
+        _select(tab, organs)
+        bar = tab._forest_scroll.horizontalScrollBar().sizeHint().height()
+        assert tab._forest_scroll.sizeHint().height() == tab._forest.maximumHeight() + bar
+
+
+def test_a_figure_area_does_not_follow_the_figure_it_holds(tab):
+    """The loop that crashed the tab on a restored session.
+
+    A matplotlib canvas reports its current size as its preferred one. An area
+    sized from that grew the canvas by a scroll bar's height, which grew the
+    area, and so on until the stack overflowed.
+    """
+    _select(tab, ORGANS)
+    for area, canvas in (
+        (tab._distribution_scroll, tab._distribution),
+        (tab._paired_scroll, tab._paired),
+        (tab._forest_scroll, tab._forest),
+    ):
+        before = area.sizeHint().height()
+        width, height = canvas.figure.get_size_inches()
+        canvas.figure.set_size_inches(width, height + 3.0, forward=False)
+        assert area.sizeHint().height() == before
+
+
+def test_the_difference_area_resizes_with_its_rows_on_screen(tab, qapp):
+    """Including rows drawn while the tab was hidden, as a restored session draws them.
+
+    A figure redrawn behind a hidden tab asks nothing of its parent's layout, so
+    an area that waited for a layout event kept its old height and clipped it.
+    """
+
+    def settle() -> None:
+        for _ in range(5):
+            qapp.processEvents()
+
+    def fits() -> bool:
+        bar = tab._forest_scroll.horizontalScrollBar().sizeHint().height()
+        return tab._forest_scroll.height() == tab._forest.maximumHeight() + bar
+
+    tab.resize(1400, 900)
+    _select(tab, ["Parotid (L)"])
+    tab.show()
+    settle()
+    try:
+        tab.hide()
+        _select(tab, ORGANS)  # more rows, drawn while hidden
+        tab.show()
+        settle()
+        assert fits()
+        _select(tab, ["Parotid (L)"])  # fewer rows, drawn on screen
+        settle()
+        assert fits()
+    finally:
+        tab.hide()
+
+
+def test_the_paired_medians_say_their_unit(tab):
+    tab._metric_combo.setCurrentText("hausdorff95")
+    _select(tab, ORGANS)
+    tab._paired_combo.setCurrentText("Parotid (L)")
+    labels = [text.get_text() for text in tab._paired.figure.axes[0].texts]
+    medians = [label for label in labels if label.startswith("median")]
+    assert medians and all(label.endswith(" mm") for label in medians)
+
+
+def test_a_dose_difference_has_its_statistic_unit():
+    """``dmean_gy_diff`` is in Gy; an axis without the unit reads as dimensionless."""
+    from autoseg_evaluator.core.readable import metric_units, readable_metric
+
+    assert metric_units("dmean_gy_diff") == "Gy"
+    assert metric_units("d2cc_gy_diff") == "Gy"
+    assert metric_units("v20gy_cc_diff") == "cc"
+    assert readable_metric("dmean_gy_diff") == "Mean dose difference from ground truth"
+    assert readable_metric("d2cc_gy_diff") == "D2cc difference from ground truth"
+    # Dimensionless measures stay bare rather than gaining a made-up unit.
+    assert metric_units("dice") == ""
+    assert metric_units("poly_napl@1mm") == ""
+
+
 def test_the_paired_plot_imposes_no_scale(tab):
     """It exists to show movement; a metric's full range flattens it."""
     tab._metric_combo.setCurrentText("dice")
@@ -1969,3 +2176,20 @@ def test_the_paired_view_draws_the_row_it_names(qapp):
         assert drawn == expected, source
     assert "may not be the same patients as another row" in widget._paired.figure.get_supxlabel()
     widget.deleteLater()
+
+
+def test_the_paired_comparison_says_which_test_it_ran(tab, tmp_path):
+    """Above the table, on screen and in the PDF, for a reader who starts there."""
+    from pathlib import Path
+
+    _select(tab, ORGANS)
+    note = tab._comparison_note.text()
+    assert "Wilcoxon signed-rank" in note
+    assert "Hodges–Lehmann" in note
+    assert "sign test" in note
+    assert "not adjusted" in note
+
+    html = tab._pdf_html(Path(tmp_path), width=1600, height=1100)
+    paired = html.index("P A I R E D")
+    assert html.index(note) > paired
+    assert html.index(note) < html.index("<table class='data'", paired)

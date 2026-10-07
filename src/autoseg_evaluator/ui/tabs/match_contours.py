@@ -118,8 +118,8 @@ class MatchContoursTab(QWidget):
         self._focused_drawer: OrganDrawer | None = None
         self._synonyms_flat: dict[str, str] = flatten_synonyms(load_synonyms(synonyms_path()))
         # Remember the last Auto-Match GT identifier so we can detect a
-        # manufacturer/filename change between runs and clear stale drawers.
-        self._last_auto_match_identifier: tuple[str, str] | None = None
+        # source-label change between runs and clear stale drawers.
+        self._last_auto_match_identifier: str | None = None
         # Bounded undo history of session_state() snapshots; pushed before
         # every drawer-mutating operation. Most recent state on top.
         self._undo_stack: list[list[dict[str, Any]]] = []
@@ -1380,27 +1380,26 @@ class MatchContoursTab(QWidget):
             .strip()
             .lower()
         )
-        gt_filename = str(template.get("gt_filename", "") or "").strip().lower()
         if not organs:
             self._show_status(
                 "No template defined. Click '2. Define Template…' first to specify "
                 "the organs and GT identifier."
             )
             return
-        if not gt_source and not gt_filename:
+        if not gt_source:
             self._show_status(
-                "Template needs a source-label or filename criterion to identify "
-                "the GT RTSS file. Edit the template and try again."
+                "Template needs a source label to identify the GT RTSS. "
+                "Edit the template and try again."
             )
             return
 
-        # If the GT identifier (source-label + filename criteria) has changed
+        # If the GT identifier (the source-label criterion) has changed
         # since the previous Auto-Match run, wipe existing drawers first.
         # Otherwise stale GTs from the previous source label linger on patients
         # the new source label doesn't cover. Same-identifier re-runs (e.g.
         # the user added another organ to the template) keep existing drawers
         # and merge in the new organs.
-        current_identifier = (gt_source, gt_filename)
+        current_identifier = gt_source
         previous_identifier = getattr(self, "_last_auto_match_identifier", None)
         if previous_identifier is not None and previous_identifier != current_identifier:
             self._reset_drawers()
@@ -1417,7 +1416,7 @@ class MatchContoursTab(QWidget):
         missing_organs: list[str] = []
 
         for patient_id, patient in self._library.patients.items():
-            gt_rtss = _find_gt_rtss(patient, gt_source, gt_filename)
+            gt_rtss = _find_gt_rtss(patient, gt_source)
             if gt_rtss is None:
                 no_gt_patients.append(patient_id)
                 continue
@@ -1521,8 +1520,8 @@ def _short_sop(sop: str) -> str:
     return f"{sop[:8]}…{sop[-6:]}"
 
 
-def _find_gt_rtss(patient, gt_source: str, gt_filename: str) -> RTSTRUCTEntry | None:
-    """Return the first RTSS in ``patient`` whose source label or filename matches.
+def _find_gt_rtss(patient, gt_source: str) -> RTSTRUCTEntry | None:
+    """Return the first RTSS in ``patient`` whose source label contains ``gt_source``.
 
     ``gt_source`` is matched against ``rtss.source_label`` — the cascade-resolved
     display name (Manufacturer → StructureSetLabel → SoftwareVersions → … →
@@ -1532,27 +1531,20 @@ def _find_gt_rtss(patient, gt_source: str, gt_filename: str) -> RTSTRUCTEntry | 
     overrides — a single substring catches both ``Manufacturer="Limbus AI"``
     and an override ``"Limbus"`` on an RTSS where Manufacturer was empty.
 
-    Either substring may be empty (the criterion is then ignored). When both
-    are non-empty, ANY match wins (OR semantics).
+    ``gt_source`` is lower-case. An empty one matches nothing.
     """
+    if not gt_source:
+        return None
     for ctx in patient.contexts:
         for rtss in ctx.rtstructs:
-            if gt_source and gt_source in (rtss.source_label or "").lower():
-                return rtss
-            if gt_filename and gt_filename in rtss.filename.lower():
+            if gt_source in (rtss.source_label or "").lower():
                 return rtss
     return None
 
 
-def _fmt_identifier(identifier: tuple[str, str]) -> str:
-    """Human-readable rendering of the (gt_source, gt_filename) tuple for status messages."""
-    source, fname = identifier
-    parts = []
-    if source:
-        parts.append(f"source~='{source}'")
-    if fname:
-        parts.append(f"file~='{fname}'")
-    return " + ".join(parts) if parts else "(unset)"
+def _fmt_identifier(identifier: str) -> str:
+    """The GT source-label criterion as status messages show it."""
+    return f"source~='{identifier}'" if identifier else "(unset)"
 
 
 def _h_divider() -> QFrame:

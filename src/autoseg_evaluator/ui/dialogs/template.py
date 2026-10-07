@@ -3,10 +3,11 @@
 The user specifies:
 
 * a list of organ names to set as ground truth (one per patient),
-* a way to identify the GT RTSS file within each patient — either by a
-  substring of its **source label** (the cascade-resolved display name,
-  honouring any Manage Source Labels override), or by a substring of
-  its filename, or both,
+* a substring of the GT RTSS's **source label** (the cascade-resolved
+  display name, honouring any Manage Source Labels override), which
+  identifies the GT RTSS within each patient. Filenames are not offered:
+  the source label is what the cohort tree and every drawer show, so it is
+  the name a user can check a match against,
 * a string-similarity threshold below which test matches are flagged.
 
 The template is persisted in ``settings.json`` under ``last_template`` so
@@ -77,21 +78,14 @@ class TemplateDialog(QDialog):
         right_col = QVBoxLayout()
         right_col.setSpacing(8)
 
-        id_box = QGroupBox("Identify the GT RTSS file by…")
+        id_box = QGroupBox("Identify the GT RTSS")
         id_form = QFormLayout(id_box)
         self._mfr_edit = QLineEdit()
         self._mfr_edit.setPlaceholderText("e.g. Limbus, MIM, Varian, manual…")
         id_form.addRow("Source label contains:", self._mfr_edit)
-        self._filename_edit = QLineEdit()
-        self._filename_edit.setPlaceholderText("e.g. manual")
-        id_form.addRow("Filename contains:", self._filename_edit)
         hint = QLabel(
-            "<i>An RTSS file matches if its <b>source label</b> OR its filename "
-            "contains the corresponding substring (case-insensitive). The source "
-            "label is the column shown in the cohort tree and on every drawer — "
-            "i.e. the cascade-resolved name (Manufacturer → StructureSetLabel → "
-            "SoftwareVersions → … → filename) with any Manage Source Labels "
-            "override applied. Leave blank to ignore that criterion.</i>"
+            "<i>The GT is the RTSS whose source label, as shown in the cohort "
+            "tree, contains this text. Case is ignored.</i>"
         )
         hint.setWordWrap(True)
         id_form.addRow(hint)
@@ -127,7 +121,6 @@ class TemplateDialog(QDialog):
             "gt_source_label", self._existing.get("gt_manufacturer", "")
         )
         self._mfr_edit.setText(str(legacy_or_new))
-        self._filename_edit.setText(str(self._existing.get("gt_filename", "")))
         try:
             thr = float(self._existing.get("similarity_threshold", 0.6))
         except (TypeError, ValueError):
@@ -141,7 +134,6 @@ class TemplateDialog(QDialog):
         self._result = {
             "organs": organs,
             "gt_source_label": self._mfr_edit.text().strip(),
-            "gt_filename": self._filename_edit.text().strip(),
             "similarity_threshold": float(self._threshold_spin.value()),
         }
         self.accept()

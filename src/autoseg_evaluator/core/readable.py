@@ -57,6 +57,10 @@ METRIC_PROSE: dict[str, str] = {
     "dmax_gy": "Maximum dose",
 }
 
+#: What the metrics worker appends to a DVH statistic's key for its difference
+#: from the ground truth (test minus ground truth): ``d2cc_gy_diff``.
+DIFFERENCE_SUFFIX = "_diff"
+
 #: Metric key -> unit, for the axis.
 METRIC_UNITS: dict[str, str] = {
     "hausdorff95": "mm",
@@ -164,6 +168,10 @@ def readable_metric(metric: str) -> str:
     prose = METRIC_PROSE.get(key.lower())
     if prose:
         return prose
+    # A DVH difference column, ``d2cc_gy_diff``, holds test minus ground truth
+    # (the Results table's "Δ vs GT"); its name is the statistic's, so said.
+    if key.lower().endswith(DIFFERENCE_SUFFIX) and len(key) > len(DIFFERENCE_SUFFIX):
+        return f"{readable_metric(key[: -len(DIFFERENCE_SUFFIX)])} difference from ground truth"
     # Dose metrics are generated, so they are matched by shape: D95_gy, V20gy_cc.
     dose = re.fullmatch(r"([dv])(\d+(?:\.\d+)?)(cc)?_?gy(_cc|_pct)?", key, re.IGNORECASE)
     if dose:
@@ -174,9 +182,13 @@ def readable_metric(metric: str) -> str:
 
 
 def metric_units(metric: str) -> str:
+    """The unit for a metric's axis, or ``""`` for a dimensionless one (Dice, NAPL)."""
     key = base_metric(str(metric).strip().lower())
     if key in METRIC_UNITS:
         return METRIC_UNITS[key]
+    # A difference is in its statistic's unit: ``dmean_gy_diff`` is in Gy.
+    if key.endswith(DIFFERENCE_SUFFIX) and len(key) > len(DIFFERENCE_SUFFIX):
+        return metric_units(key[: -len(DIFFERENCE_SUFFIX)])
     if key.endswith("_gy"):
         return "Gy"
     if key.endswith("_cc") or "gy_cc" in key:
@@ -216,6 +228,7 @@ def tolerance_note(
 
 __all__ = [
     "BOUNDED_UNIT_METRICS",
+    "DIFFERENCE_SUFFIX",
     "METRIC_PROSE",
     "METRIC_UNITS",
     "NON_NEGATIVE_METRICS",

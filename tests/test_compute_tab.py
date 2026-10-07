@@ -55,43 +55,116 @@ def test_parse_number_list_accepts_decimals():
 # ---- ComputeTab -----------------------------------------------------------
 
 
-def test_compute_tab_defaults_load_from_settings(qapp):
+def _ticks(tab) -> list[str]:
+    return [
+        key
+        for checks in (tab._geom_checks, tab._poly_checks, tab._dose_checks)
+        for key, cb in checks.items()
+        if cb.isChecked()
+    ]
+
+
+def _fields(tab) -> list[str]:
+    return [
+        edit.text()
+        for edit in (
+            tab._sd_tau_edit,
+            tab._poly_tau_edit,
+            tab._d_pct_edit,
+            tab._d_cc_edit,
+            tab._v_gy_edit,
+        )
+    ]
+
+
+def test_the_tab_opens_with_nothing_selected(qapp):
+    """What a study measures is chosen for it, not inherited from the last run.
+
+    Settings in the shape earlier versions saved them must not tick anything
+    or fill any field.
+    """
     settings = {
-        "compute_geometric": {
-            "dice": True,
-            "hausdorff100": False,
-            "hausdorff95": True,
-            "mean_surface_distance": False,
-            "surface_dice": True,
-            # Stale: mask APL was removed in v3. The tab must load regardless
-            # and must not hand the setting on.
-            "apl_mean": True,
-            "apl_total": False,
-        },
-        "tolerances": {"surface_dice_tau_mm": 5.0, "apl_tolerance_mm": 2.5},
+        "compute_geometric": {"dice": True, "hausdorff95": True, "surface_dice": True},
+        "compute_polygon": {"metrics": {"hd95": True}, "tolerance_mm": 5.0},
+        "tolerances": {"surface_dice_tau_mm": 5.0},
         "dvh": {
-            "include_dmean": False,
+            "include_dmean": True,
             "include_dmax": True,
-            "include_dmin": True,
             "d_at_volumes_pct": [99, 50],
             "v_at_doses_gy": [25],
         },
+        "audit": {"sidecar": True},
     }
-    tab = ComputeTab(settings=settings)
-    cfg = tab.config()
-    assert cfg["geometric"]["dice"] is True
-    assert cfg["geometric"]["hausdorff100"] is False
-    # Not in these settings, so it takes its default: on, like the rest of 3D.
-    assert cfg["geometric"]["precision_recall"] is True
-    # A single stored number, as settings held before tolerance lists, reads
-    # as a list of one.
-    assert cfg["tolerances"]["surface_dice_tau_mm"] == pytest.approx([5.0])
-    assert "apl_mean" not in cfg["geometric"]
-    assert "apl_tolerance_mm" not in cfg["tolerances"]
-    assert cfg["dvh"]["include_dmean"] is False
-    assert cfg["dvh"]["include_dmin"] is True
-    assert cfg["dvh"]["d_at_volumes_pct"] == [99.0, 50.0]
-    assert cfg["dvh"]["v_at_doses_gy"] == [25.0]
+    for tab in (ComputeTab(), ComputeTab(settings=settings)):
+        assert _ticks(tab) == []
+        assert _fields(tab) == [""] * 5
+        tab.deleteLater()
+
+    # Not a metric: whether to keep the audit detail is still remembered.
+    assert ComputeTab(settings=settings).config()["audit"]["sidecar"] is True
+
+
+def test_the_selection_is_cleared_when_settings_are_reapplied(qapp):
+    tab = ComputeTab()
+    tab._geom_checks["dice"].setChecked(True)
+    tab._d_pct_edit.setText("95")
+
+    tab.set_settings({"compute_geometric": {"dice": True}})
+
+    assert _ticks(tab) == []
+    assert _fields(tab) == [""] * 5
+    tab.deleteLater()
+
+
+def test_compute_with_nothing_selected_is_refused(qapp):
+    """A run with no metric would produce a table of names and no numbers."""
+    tab = ComputeTab()
+    received: list[dict] = []
+    tab.computeRequested.connect(received.append)
+
+    tab._on_compute_clicked()
+
+    assert received == []
+    assert "Select at least one metric" in tab._validation_label.text()
+    tab.deleteLater()
+
+
+def test_a_dose_value_alone_counts_as_a_selection(qapp):
+    tab = ComputeTab()
+    received: list[dict] = []
+    tab.computeRequested.connect(received.append)
+    tab._v_gy_edit.setText("20")
+
+    tab._on_compute_clicked()
+
+    assert len(received) == 1
+    assert received[0]["dvh"]["v_at_doses_gy"] == [20.0]
+    tab.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("checks", "key", "edit", "message"),
+    [
+        ("_geom_checks", "surface_dice", "_sd_tau_edit", "Surface Dice tolerance"),
+        ("_poly_checks", "apl", "_poly_tau_edit", "APL tolerance"),
+        ("_poly_checks", "napl", "_poly_tau_edit", "APL tolerance"),
+    ],
+)
+def test_a_tolerance_is_asked_for_not_assumed(qapp, checks, key, edit, message):
+    """An empty field would mean 3 mm, a number nobody typed, in a column name."""
+    tab = ComputeTab()
+    received: list[dict] = []
+    tab.computeRequested.connect(received.append)
+    getattr(tab, checks)[key].setChecked(True)
+
+    tab._on_compute_clicked()
+    assert received == []
+    assert message in tab._validation_label.text()
+
+    getattr(tab, edit).setText("2")
+    tab._on_compute_clicked()
+    assert len(received) == 1
+    tab.deleteLater()
 
 
 def test_compute_tab_config_changed_signal_fires(qapp):
@@ -107,6 +180,7 @@ def test_compute_tab_compute_clicked_emits_full_config(qapp):
     tab = ComputeTab(settings={})
     received: list[dict] = []
     tab.computeRequested.connect(received.append)
+    tab._geom_checks["dice"].setChecked(True)
     tab._on_compute_clicked()
     assert len(received) == 1
     cfg = received[0]
@@ -339,26 +413,6 @@ def test_the_stream_stays_off_until_it_is_asked_for(qapp):
     tab.set_settings({})
 
     assert not PolygonConfig.from_dict(tab.config()["polygon"]).any_enabled()
-    tab.deleteLater()
-
-
-def test_the_selection_survives_a_restart(qapp):
-    """Settings round-trip, in the shape main_window persists."""
-    from autoseg_evaluator.core.polygon_metrics import PolygonConfig
-
-    tab = ComputeTab()
-    tab.set_settings(
-        {
-            "compute_polygon": {
-                "metrics": {"hd95": True, "median": True},
-                "tolerance_mm": 5.0,
-            }
-        }
-    )
-
-    config = PolygonConfig.from_dict(tab.config()["polygon"])
-    assert config.metrics == {"hd95", "median"}
-    assert config.tolerance_mm == 5.0
     tab.deleteLater()
 
 

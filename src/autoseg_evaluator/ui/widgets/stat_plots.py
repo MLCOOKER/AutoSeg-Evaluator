@@ -20,7 +20,8 @@ from __future__ import annotations
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from PySide6.QtWidgets import QSizePolicy
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtWidgets import QFrame, QScrollArea, QSizePolicy, QWidget
 
 from autoseg_evaluator.core.readable import (
     SCALE_BOUNDED_UNIT,
@@ -128,12 +129,78 @@ def _apply_scale(axes, metric: str, values: list[float]) -> None:
         axes.set_ylim(-reach * 1.12, reach * 1.12)
 
 
+class SidewaysScroll(QScrollArea):
+    """A figure's own horizontal scroll bar, inside its section of the tab.
+
+    The distributions grow sideways with the number of organs. Placed straight in
+    the tab, that width became the tab's: every table and caption stretched to
+    the widest figure, and the whole tab scrolled sideways to read a row. In
+    here only the figure scrolls. The area is always as tall as the figure, so
+    it never scrolls vertically, and it follows a figure whose height changes
+    with its rows.
+    """
+
+    def __init__(self, canvas: QWidget, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWidget(canvas)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._follow(canvas)
+
+    def _height(self) -> int:
+        """The figure's height, with room for the scroll bar beneath it.
+
+        Taken from the height the figure was designed at, never from its current
+        size. A matplotlib canvas reports its current size as its preferred one,
+        so an area sized from that grows the canvas by a scroll bar's height,
+        which grows the area, which grows the canvas: a loop that ran until the
+        stack overflowed once a real cohort reached the tab.
+        """
+        canvas = self.widget()
+        preferred = canvas.preferred_height() if hasattr(canvas, "preferred_height") else 0
+        figure = max(canvas.minimumHeight(), min(preferred, canvas.maximumHeight()))
+        return figure + self.horizontalScrollBar().sizeHint().height()
+
+    def sizeHint(self) -> QSize:
+        # Narrow on purpose: the figure's width is what scrolls, not what the
+        # section asks of the tab.
+        return QSize(MIN_CANVAS_WIDTH, self._height())
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def _follow(self, canvas: QWidget) -> None:
+        """Take a new height whenever the figure says its height changed.
+
+        Said by the figure, not inferred from layout events: a figure redrawn
+        while its tab is hidden (a session being restored) asks nothing of its
+        parent's layout, and the area kept its old height and clipped it.
+        """
+        changed = getattr(canvas, "height_changed", None)
+        if changed is not None:
+            changed.connect(self.updateGeometry)
+
+
 class _Canvas(FigureCanvasQTAgg):
+    #: Emitted when the figure fixes a new height for itself, so the area that
+    #: holds it can follow; only the forest, whose height follows its rows, does.
+    height_changed = Signal()
+
     def __init__(self, width: float = 9.0, height: float = 5.0) -> None:
         self.figure = Figure(figsize=(width, height), layout="constrained")
+        # Fixed at construction, in logical pixels: the canvas's own size hint
+        # is whatever size it currently is, which cannot size a container.
+        self._preferred_height = int(round(height * self.figure.dpi))
         super().__init__(self.figure)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(MIN_CANVAS_WIDTH, MIN_CANVAS_HEIGHT)
+
+    def preferred_height(self) -> int:
+        """The height this figure is designed to be shown at, in pixels."""
+        return self._preferred_height
 
     def clear(self) -> None:
         self.figure.clear()
@@ -372,7 +439,7 @@ class PairedCanvas(_Canvas):
                 solid_capstyle="round",
             )
             axes.annotate(
-                f"median {median:.3f}",
+                f"median {median:.3f}" + (f" {units}" if units else ""),
                 (x, median),
                 textcoords="offset points",
                 xytext=(0, 10),
@@ -644,6 +711,7 @@ class ForestCanvas(_Canvas):
         pixels = int(round(inches * self.figure.dpi))
         self.setMinimumHeight(max(pixels, MIN_CANVAS_HEIGHT))
         self.setMaximumHeight(max(pixels, MIN_CANVAS_HEIGHT))
+        self.height_changed.emit()
 
 
 __all__ = [
@@ -654,4 +722,5 @@ __all__ = [
     "DistributionCanvas",
     "ForestCanvas",
     "PairedCanvas",
+    "SidewaysScroll",
 ]

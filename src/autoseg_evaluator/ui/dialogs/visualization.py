@@ -186,7 +186,7 @@ class VisualizationWindow(QDialog):
         layout = QHBoxLayout(scale)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        layout.addWidget(QLabel("0"))
+        layout.addWidget(QLabel("0 Gy"))
         ramp = QLabel(scale)
         ramp.setFixedSize(120, 12)
         stops = ", ".join(f"stop:{at} {colour}" for at, colour in _JET_STOPS)

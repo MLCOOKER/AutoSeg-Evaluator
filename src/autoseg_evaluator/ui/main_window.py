@@ -245,15 +245,17 @@ class MainWindow(QMainWindow):
         save_settings(self._settings)
 
     def _on_metric_config_changed(self, config: dict) -> None:
-        """Persist Tab 3's metric configuration so it survives across launches."""
-        self._settings["compute_geometric"] = dict(config.get("geometric", {}))
+        """Persist the parts of Tab 3 that survive across launches.
+
+        The metric selection is not among them: Tab 3 opens with nothing
+        selected every time. The Surface Dice tolerance is still kept, because
+        the inter-observer table on the consensus tab starts from it.
+        """
         # Note: tolerances are shared with the GT-similarity setting structure,
         # so keep the existing key under "tolerances".
         existing_tol = dict(self._settings.get("tolerances", {}) or {})
         existing_tol.update(config.get("tolerances", {}))
         self._settings["tolerances"] = existing_tol
-        self._settings["dvh"] = dict(config.get("dvh", {}))
-        self._settings["compute_polygon"] = dict(config.get("polygon", {}))
         self._settings["audit"] = dict(config.get("audit", {}))
         self._settings["staple"] = dict(config.get("staple", {}))
         save_settings(self._settings)

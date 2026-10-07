@@ -6,6 +6,56 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — the Compute tab opens with nothing selected, October 2026
+- **No metric is selected, and no value filled in, when the tab opens.** The
+  3D, 2D and dose checkboxes start unticked and the tolerance, D-at-volume and
+  V-at-dose fields start empty, at every launch: the selection is no longer
+  carried over from the last run, and the `compute_geometric`,
+  `compute_polygon` and `dvh` sections are dropped from `settings.json` when
+  it is next read. Compute All asks for at least one metric, and for the
+  Surface Dice or APL tolerance when that metric is ticked, rather than taking
+  3 mm for an empty field.
+
+### Changed — the auto-match template, October 2026
+- **The GT RTSS is identified by its source label only.** The template no
+  longer offers a filename criterion; one saved in an older template is
+  ignored, and dropped from `settings.json` when it is next read. The source
+  label is the name the cohort tree and every drawer show, so it is the one a
+  match can be checked against. The dialog's explanation is shortened to one
+  sentence.
+
+### Changed — Report tab tables and figures, October 2026
+- **Tables are only as wide as their columns.** Every column used to be
+  stretched to share the window's width equally, which spread a three-column
+  table across the screen. Each column now takes the width of its widest
+  entry, and the table keeps to the left of its section; in a window narrower
+  than a table, that table scrolls sideways within itself.
+- **The exported PDF centres its tables** on three quarters of the page
+  width, with each table's section label and note on the same measure. Full
+  width spread a few short columns apart; sized to their contents, the tables
+  sat at the left edge with most of the page white.
+- **The paired comparison says which test it ran.** A note above the table,
+  on the tab and in the PDF: an exact two-sided Wilcoxon signed-rank test per
+  row, the Hodges–Lehmann difference with its 95% confidence interval, an
+  exact sign test alongside, and p-values not adjusted for multiplicity. The
+  methods paragraph at the foot still gives it in full.
+- **A wide figure scrolls inside its own section.** The distributions widen
+  with the organ count, and the figure's width used to become the tab's: every
+  table and caption stretched to match, and reading a row meant scrolling the
+  whole tab sideways. Each figure now has its own horizontal scroll bar, and the
+  tab keeps the window's width.
+- **Every axis with a unit shows it.** The DVH difference columns
+  (`d2cc_gy_diff` and the like) had no unit and read "D2cc gy diff"; they now
+  read "D2cc difference from ground truth (Gy)". The paired figure's median
+  labels carry the unit, and the viewer's dose scale reads "0 Gy" at its foot.
+  Dimensionless measures (Dice, NAPL, ratios) stay without one.
+
+### Fixed — exported report, October 2026
+- **Two bold cells one above the other printed with no rule between them.**
+  Bold was written as a style on the cell, and in Qt's HTML a style on a cell
+  replaces the stylesheet's border; it is now written as bold text inside the
+  cell.
+
 ### Changed — validation reports, October 2026
 - **The validation reports are rewritten as Supplementary 1–5** of the paper,
   in `docs/validation/`: each a short report (aim, method, results, findings)

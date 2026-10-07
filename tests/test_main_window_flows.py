@@ -234,6 +234,19 @@ def test_staple_settings_are_kept_across_launches(qapp):
     win.close()
 
 
+def test_the_metric_selection_is_not_saved_for_the_next_launch(qapp):
+    """The Compute tab opens with nothing selected, so nothing is kept for it."""
+    settings: dict = {}
+    win = MainWindow(settings)
+    win._compute_tab._geom_checks["dice"].setChecked(True)
+    win._compute_tab._v_gy_edit.setText("20")
+    win._on_metric_config_changed(win._compute_tab.config())
+
+    for section in ("compute_geometric", "compute_polygon", "dvh"):
+        assert section not in settings
+    win.close()
+
+
 def test_a_session_saved_without_an_extension_gets_one(qapp, monkeypatch, tmp_path):
     """External audit: the fallback passed "session", without a dot, to
     Path.with_suffix, which raises."""

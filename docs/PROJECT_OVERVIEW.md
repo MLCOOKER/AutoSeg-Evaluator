@@ -364,8 +364,9 @@ Generate replaces the entry in place.
 1. **Replacement Rules…** — site-specific `find → replace` substring
    rules applied before TG-263 canonicalisation.
 2. **Define Template…** — a list of organs to find + the GT-identification
-   criterion (`Source label contains:` substring and/or filename
-   substring). The source-label criterion is matched against
+   criterion (`Source label contains:` substring; a filename criterion was
+   removed in October 2026, and one in an older template is ignored). It is
+   matched against
    `rtss.source_label` — the cascade-resolved name with any Manage
    Source Labels override applied — so it works regardless of which
    DICOM tag the cascade resolved through and honours user overrides.
@@ -402,7 +403,7 @@ slice.
 - **Clear All** — wipes drawers + denylist + last-auto-match identifier
   (preserves undo stack so a Clear All can be undone with Ctrl+Z).
 - **Template-change clear**: if Run Auto-Match is re-invoked with a
-  different GT identifier (manufacturer / filename) than the previous
+  different GT identifier (source label) than the previous
   run, drawers are wiped first to prevent stale GTs lingering.
 - **Test-source refresh (Option A workflow)**: when re-running Auto-Match
   with the SAME identifier, any RTSSes added since the last run (e.g. a
@@ -465,16 +466,20 @@ its mask from its raters, as Compute does.
 **Two geometry groups side by side**, because they are two methods, not one
 list: a reader compares them where they sit together.
 
+**Nothing is selected when the tab opens**, at every launch: every checkbox is
+unticked and every value field empty, and the selection is not carried over
+from the last run. Compute All asks for at least one metric, and for the
+tolerance of Surface Dice or APL when that metric is ticked; an empty
+tolerance field is not taken to mean 3 mm.
+
 - **3D mask metrics (rasterised)** — Dice, precision + recall (one checkbox,
   two columns), Surface Dice, 3D Hausdorff 100% and 95%, Mean Surface Distance,
-  Volume, COM offset; all on by default. **Surface Dice τ (mm)**, default
-  3 mm (Nikolov 2018), takes a list — "1, 2, 3" — and each tolerance fills its
-  own column; the surface distances are computed once.
+  Volume, COM offset. **Surface Dice τ (mm)** (3 mm is usual; Nikolov 2018)
+  takes a list — "1, 2, 3" — and each tolerance fills its own column; the
+  surface distances are computed once.
 - **2D contour metrics (native RTSS polygons)** — APL, NAPL, 2D Hausdorff 100%
-  and 95%, 2D mean and median contour distance; all off by default, so an
-  existing install does not start producing a second set of columns because it
-  was upgraded. **APL τ (mm)**, default 3 mm, also takes a list; both 2D
-  engines measure every tolerance in one call. A note states which 2D engine
+  and 95%, 2D mean and median contour distance. **APL τ (mm)** also takes a
+  list; both 2D engines measure every tolerance in one call. A note states which 2D engine
   will run (compiled, or the portable reference engine where no library is
   packaged). All six come from one engine call, so a narrower selection buys a
   narrower table, not a shorter run.
@@ -1361,8 +1366,7 @@ not session data. Settings for removed features — mask APL's `apl_mean`,
   "folder": "C:/path/to/cohort",
   "replacement_rules": [{"find": "...", "replace": "..."}],
   "last_template": {"organs": ["Parotid_L", ...],
-                    "gt_manufacturer": "Varian",
-                    "gt_filename": "manual"},
+                    "gt_source_label": "Varian"},
   "drawers": [
     {
       "organ_name": "Parotid_L",

@@ -14,28 +14,36 @@ def _write(tmp_path, monkeypatch, data):
     return path
 
 
-def test_mask_apl_settings_from_before_v3_are_dropped_on_load(tmp_path, monkeypatch):
-    """Mask APL was removed in v3; its switches must not travel on in the file.
+def test_retired_settings_are_dropped_on_load(tmp_path, monkeypatch):
+    """Settings nothing reads any more must not travel on in the file.
 
     Left in, they would suggest to anyone reading settings.json that they still
-    do something. Everything else the user set is kept.
+    do something: the mask APL tolerance (removed in v3), and the metric
+    selection, which the Compute tab no longer restores. Everything else the
+    user set is kept.
     """
     _write(
         tmp_path,
         monkeypatch,
         {
             "compute_geometric": {"dice": False, "apl_mean": True, "apl_total": True},
+            "compute_polygon": {"metrics": {"hd95": True}, "tolerance_mm": [3.0]},
+            "dvh": {"include_dmean": True, "v_at_doses_gy": [20]},
             "tolerances": {"surface_dice_tau_mm": 2.0, "apl_tolerance_mm": 2.5},
+            "last_template": {"organs": ["Bladder"], "gt_filename": "manual"},
+            "theme": "dark_teal.xml",
         },
     )
 
     loaded = settings_module.load_settings()
 
-    assert "apl_mean" not in loaded["compute_geometric"]
-    assert "apl_total" not in loaded["compute_geometric"]
+    for section in ("compute_geometric", "compute_polygon", "dvh"):
+        assert section not in loaded
     assert "apl_tolerance_mm" not in loaded["tolerances"]
-    assert loaded["compute_geometric"]["dice"] is False
     assert loaded["tolerances"]["surface_dice_tau_mm"] == 2.0
+    assert "gt_filename" not in loaded["last_template"]
+    assert loaded["last_template"]["organs"] == ["Bladder"]
+    assert loaded["theme"] == "dark_teal.xml"
 
 
 def test_the_next_save_leaves_the_retired_settings_out(tmp_path, monkeypatch):

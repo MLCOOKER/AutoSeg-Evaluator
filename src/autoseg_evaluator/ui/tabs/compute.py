@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from autoseg_evaluator.core.tolerance_keys import normalise_tolerances, tolerance_token
+from autoseg_evaluator.core.tolerance_keys import normalise_tolerances
 from autoseg_evaluator.data.linkage import collect_link_issues
 from autoseg_evaluator.ui.dialogs.metric_definitions import MetricDefinitionsDialog
 from autoseg_evaluator.ui.widgets.progress_panel import ProgressPanel
@@ -619,73 +619,31 @@ class ComputeTab(QWidget):
     # ---- Settings round-trip ---------------------------------------------
 
     def _load_from_settings(self) -> None:
-        # Geometric metric flags
-        defaults_geom = {
-            "dice": True,
-            "precision_recall": True,
-            "hausdorff100": True,
-            "hausdorff95": True,
-            "mean_surface_distance": True,
-            "surface_dice": True,
-            "volume": True,
-            "com_offset": True,
-        }
-        # Use settings if any are explicitly stored under "compute_geometric"
-        stored_geom = (self._settings.get("compute_geometric") or {}) if self._settings else {}
-        for key, cb in self._geom_checks.items():
-            cb.blockSignals(True)
-            cb.setChecked(bool(stored_geom.get(key, defaults_geom[key])))
-            cb.blockSignals(False)
-
-        # Polygon metrics. Default off: this is a second measurement stream that
-        # adds up to eleven columns, and an existing install should not start
-        # producing them because it was upgraded.
-        stored_poly = (self._settings.get("compute_polygon") or {}) if self._settings else {}
-        selected = stored_poly.get("metrics", {}) or {}
-        for key, cb in self._poly_checks.items():
-            cb.blockSignals(True)
-            cb.setChecked(bool(selected.get(key, False)))
-            cb.blockSignals(False)
-        self._poly_tau_edit.blockSignals(True)
-        self._poly_tau_edit.setText(_tolerance_text(stored_poly.get("tolerance_mm")))
-        self._poly_tau_edit.blockSignals(False)
+        # Nothing is measured until someone chooses it: every metric starts
+        # unticked and every value field empty, at every launch. What a study
+        # measures is decided for that study, and a selection carried over from
+        # the last run, or supplied as a default, is a decision nobody made.
+        # The placeholders still show what each field takes.
+        for checks in (self._geom_checks, self._poly_checks, self._dose_checks):
+            for cb in checks.values():
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
+        for edit in (
+            self._sd_tau_edit,
+            self._poly_tau_edit,
+            self._d_pct_edit,
+            self._d_cc_edit,
+            self._v_gy_edit,
+        ):
+            edit.blockSignals(True)
+            edit.clear()
+            edit.blockSignals(False)
 
         stored_audit = (self._settings.get("audit") or {}) if self._settings else {}
         self._audit_check.blockSignals(True)
         self._audit_check.setChecked(bool(stored_audit.get("sidecar", False)))
         self._audit_check.blockSignals(False)
-
-        # Tolerances
-        tol = (self._settings.get("tolerances") or {}) if self._settings else {}
-        self._sd_tau_edit.blockSignals(True)
-        self._sd_tau_edit.setText(_tolerance_text(tol.get("surface_dice_tau_mm")))
-        self._sd_tau_edit.blockSignals(False)
-
-        # DVH config
-        dvh = (self._settings.get("dvh") or {}) if self._settings else {}
-        self._dose_checks["dmean"].blockSignals(True)
-        self._dose_checks["dmean"].setChecked(bool(dvh.get("include_dmean", True)))
-        self._dose_checks["dmean"].blockSignals(False)
-        self._dose_checks["dmax"].blockSignals(True)
-        self._dose_checks["dmax"].setChecked(bool(dvh.get("include_dmax", True)))
-        self._dose_checks["dmax"].blockSignals(False)
-        self._dose_checks["dmin"].blockSignals(True)
-        self._dose_checks["dmin"].setChecked(bool(dvh.get("include_dmin", False)))
-        self._dose_checks["dmin"].blockSignals(False)
-        self._d_pct_edit.blockSignals(True)
-        self._d_pct_edit.setText(
-            ", ".join(str(v) for v in dvh.get("d_at_volumes_pct", [95, 50, 5, 2]))
-        )
-        self._d_pct_edit.blockSignals(False)
-        self._d_cc_edit.blockSignals(True)
-        # Empty default for D-at-cc — clinicians who don't use it shouldn't
-        # have to clear placeholders. D2cc, D1cc, D0.1cc are common OAR
-        # constraints and shown as placeholder text instead.
-        self._d_cc_edit.setText(", ".join(str(v) for v in dvh.get("d_at_volumes_cc", []) or []))
-        self._d_cc_edit.blockSignals(False)
-        self._v_gy_edit.blockSignals(True)
-        self._v_gy_edit.setText(", ".join(str(v) for v in dvh.get("v_at_doses_gy", [20, 30, 40])))
-        self._v_gy_edit.blockSignals(False)
 
         # STAPLE config
         staple = (self._settings.get("staple") or {}) if self._settings else {}
@@ -735,6 +693,10 @@ class ComputeTab(QWidget):
         except ValueError as exc:
             self._validation_label.setText(str(exc))
             return
+        missing = self._selection_blocker(cfg)
+        if missing:
+            self._validation_label.setText(missing)
+            return
         blocker = self._link_blocker(cfg)
         if blocker:
             self._validation_label.setText(blocker)
@@ -748,6 +710,24 @@ class ComputeTab(QWidget):
         # against it with a real step count.
         self._progress.setVisible(True)
 
+    def _selection_blocker(self, cfg: dict[str, Any]) -> str:
+        """Message saying what the selection still lacks, or "" if nothing.
+
+        The tab opens with nothing selected, so a run without a metric would
+        produce a table of names and no numbers. A tolerance is asked for rather
+        than assumed: an empty field would mean 3 mm, and a tolerance the user
+        never typed should not end up in a column heading.
+        """
+        geometric = cfg.get("geometric") or {}
+        polygon = (cfg.get("polygon") or {}).get("metrics") or {}
+        if not (any(geometric.values()) or any(polygon.values()) or _dose_wanted(cfg)):
+            return "Select at least one metric to compute."
+        if geometric.get("surface_dice") and not self._sd_tau_edit.text().strip():
+            return "Enter the Surface Dice tolerance τ (mm)."
+        if (polygon.get("apl") or polygon.get("napl")) and not self._poly_tau_edit.text().strip():
+            return "Enter the APL tolerance τ (mm)."
+        return ""
+
     def _link_blocker(self, cfg: dict[str, Any]) -> str:
         """Message describing why this run cannot start, or "" if it can.
 
@@ -759,16 +739,7 @@ class ComputeTab(QWidget):
         """
         if self._library is None:
             return ""
-        dvh = cfg.get("dvh") or {}
-        dose_wanted = bool(
-            dvh.get("include_dmean")
-            or dvh.get("include_dmax")
-            or dvh.get("include_dmin")
-            or dvh.get("d_at_volumes_pct")
-            or dvh.get("d_at_volumes_cc")
-            or dvh.get("v_at_doses_gy")
-        )
-        issues = collect_link_issues(self._library, include_dose=dose_wanted)
+        issues = collect_link_issues(self._library, include_dose=_dose_wanted(cfg))
         if not issues:
             return ""
         first = issues[0].message
@@ -803,13 +774,17 @@ class ComputeTab(QWidget):
 # ---- Helpers --------------------------------------------------------------
 
 
-def _tolerance_text(stored: object) -> str:
-    """A stored tolerance — one number, as before, or a list — as field text."""
-    try:
-        tolerances = normalise_tolerances(stored)
-    except ValueError:
-        tolerances = normalise_tolerances(None)
-    return ", ".join(tolerance_token(t) for t in tolerances)
+def _dose_wanted(cfg: dict[str, Any]) -> bool:
+    """Whether any dose metric is switched on in this configuration."""
+    dvh = cfg.get("dvh") or {}
+    return bool(
+        dvh.get("include_dmean")
+        or dvh.get("include_dmax")
+        or dvh.get("include_dmin")
+        or dvh.get("d_at_volumes_pct")
+        or dvh.get("d_at_volumes_cc")
+        or dvh.get("v_at_doses_gy")
+    )
 
 
 def _parse_number_list(text: str) -> list[float]:
