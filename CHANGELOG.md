@@ -50,6 +50,49 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   labels carry the unit, and the viewer's dose scale reads "0 Gy" at its foot.
   Dimensionless measures (Dice, NAPL, ratios) stay without one.
 
+### Changed — the exported PDF, October 2026
+- **Type prints at its stated size.** The report was laid out for the screen
+  and printed at the PDF's 150 dpi, so every size printed at 96/150 of itself:
+  tables came out at about 4.8 pt and the prose at about 5 pt. It is now laid out
+  on the PDF writer, and set at 9 pt for tables and 10–10.5 pt for prose. The
+  report runs to more pages as a result.
+- **Page numbers and a running header.** Every page has a footer with the
+  version and *Page n of N*; every page after the first is headed with the
+  metric and the comparison, and the date it was produced. Margins are set
+  rather than left at the writer's 3.5 mm.
+- **Nothing is split across a page break.** An organ's rows stay on one page,
+  so no row starts a page without its organ; a table running onto the next
+  page is split there into a table of its own, with its header row, instead of
+  carrying its column rules to the foot of the page; a section heading stays
+  with the rows it introduces; and a figure's heading stays above its figure,
+  where *Paired differences* and *Forest plot* had been printed below the
+  figures before them.
+- **Figures are drawn at the size they print at.** The forest takes the page's
+  full width, with its rows closed up to fit the page, where it had filled half
+  the width at a reduced size. The distributions stand their organ labels
+  upright on paper, where twenty angled labels ran into each other. The forest
+  and paired figures' titles no longer overlap their subtitles.
+- **The coverage table says which organs were truncated**: *yes*, *no*, or
+  *partly* where drawers pooled under one organ were set differently. On the
+  Report tab as well.
+- **Notes are written for paper.** "Hover those rows", "the paired view below"
+  and pointers to other tabs are reworded or left out, and the patients excluded
+  for having two treatment courses are counted rather than named: the Export
+  button already promised that no patient identifiers are written, and this
+  note listed up to four.
+- Data tables take more than the central three quarters of the page only where
+  their columns need it to stay on one line.
+- The methods paragraph no longer says "Every comparison is reported rather
+  than a selected subset, which is what makes that defensible", on the tab or
+  in the PDF.
+- **A cohort with one test source says why it has no paired comparison.** The
+  ground truth is never a comparator, so one source has nothing to pair with.
+  The tab said so only by an empty table and a paired figure claiming no
+  patient had both sources; it now says it in the section, and both figures
+  give the reason. The PDF prints the reason under the section heading and
+  leaves out the empty table and the two comparison figures. Choosing the
+  reference as its own challenger is explained the same way.
+
 ### Fixed — exported report, October 2026
 - **Two bold cells one above the other printed with no rule between them.**
   Bold was written as a style on the cell, and in Qt's HTML a style on a cell

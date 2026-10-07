@@ -1317,8 +1317,21 @@ reported unadjusted.** Metric directions (lower or higher is better) and axis
 bounds come from [`core/readable.py`](../src/autoseg_evaluator/core/readable.py)
 and `data/report.py`, and the 2D plane counts are left out as diagnostics.
 The acquisition summary reads only an allowlist of non-identifying tags
-([`core/acquisition.py`](../src/autoseg_evaluator/core/acquisition.py)); the
-PDF export writes the page as a clinical report.
+([`core/acquisition.py`](../src/autoseg_evaluator/core/acquisition.py)). The
+coverage table says, per organ, whether its test contours were truncated to the
+ground truth's extent (*yes*, *no*, or *partly* where pooled drawers differ).
+
+The PDF export writes the page as a clinical report on A4 landscape. It is laid
+out on the PDF writer itself, so type prints at its stated size (tables 9 pt,
+prose 10–10.5 pt); every page has a footer with the version and *Page n of N*,
+and every page after the first a running header naming the metric and the
+comparison. The layout is checked and repaired before printing: an organ's
+rows, a heading with the rows it introduces, and a figure with its heading are
+each kept on one page, and a table running onto the next page is split there,
+with its header row repeated. Figures are drawn at the size they print at,
+the forest across the page's full width. Notes that point at the screen ("hover
+those rows", "the paired view below") are reworded for paper, and excluded
+patients are counted rather than named.
 
 Every statistical decision, with worked examples regenerated from the shipped
 code by `scripts/make_register_tables.py`, is in

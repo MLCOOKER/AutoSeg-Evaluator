@@ -37,14 +37,19 @@ instead of printing a column of 1.000 that reads as evidence of agreement.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from PySide6.QtCore import QRect, QSize, QSizeF, Qt
+from PySide6.QtCore import QMarginsF, QPointF, QRect, QRectF, QSize, QSizeF, Qt
 from PySide6.QtGui import (
     QColor,
+    QFont,
+    QFontMetricsF,
     QImage,
     QPageLayout,
     QPageSize,
@@ -52,6 +57,7 @@ from PySide6.QtGui import (
     QPdfWriter,
     QPen,
     QTextDocument,
+    QTextTable,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -108,13 +114,11 @@ _ALPHA = 0.05
 _PAGE_WIDTH = 1754
 _PAGE_HEIGHT = 1240
 
-#: The most of a page one figure may take. Held well under a full page so two
-#: figures can share one: a figure that cannot share a page spends whatever is
-#: left of that page as white space.
-_FIGURE_PAGE_SHARE = 0.46
-
 #: Where the packaged artwork lives.
 _ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
+
+#: The coverage table's Truncated column, from ``ReportModel.truncation``.
+_TRUNCATION_TEXT = {True: "yes", False: "no", None: "partly"}
 
 #: What the paired comparison is, in two sentences above its table. The methods
 #: paragraph at the foot of the tab says it in full; this is for the reader who
@@ -265,6 +269,13 @@ COVERAGE_COLUMNS: list[tuple[str, str]] = [
             "<b>Produced / attempted</b> — how often this source actually contoured this organ, out of the patients it ran on.",
             "<b>· N not run</b> means the source was not run on those patients at all. That says nothing about the model; failing to contour an organ it did attempt says a great deal.",
             "Caveat: patients where <i>no</i> source produced the organ generate no result row, so they are invisible here. The denominator is 'patients where at least one source produced it', not 'patients who have this organ'.",
+        ),
+    ),
+    (
+        "Truncated",
+        _tip(
+            "Whether this organ's test contours were cut to the ground truth's craniocaudal extent before being measured — the drawer's <b>Truncate</b> setting on the Match Contours tab.",
+            "<b>partly</b> means drawers pooled under this organ were set differently.",
         ),
     ),
 ]
@@ -451,6 +462,13 @@ class ReportTab(QWidget):
         #: The one ground truth currently on screen. Everything reads this.
         self._model: ReportModel = ReportModel()
         self._family: dict = {}
+        #: The cautions and the acquisition note as the PDF prints them: without
+        #: pointers to the screen, and without patient identifiers.
+        self._printed_notes: list[str] = []
+        self._printed_acquisition_note = ""
+        #: Why no paired comparison can be made, on screen and on paper; empty
+        #: when one can.
+        self._unavailable: tuple[str, str] = ("", "")
         self._build_ui()
         self._render_empty()
         self._deferred = DeferredRefresh(self, self.refresh)
@@ -957,6 +975,10 @@ class ReportTab(QWidget):
             # so leaving it behind would let a cleared cohort be exported from
             # an empty-looking tab.
             self._family = {}
+            self._unavailable = ("", "")
+            self._comparison_note.setText(PAIRED_TEST_NOTE)
+            self._comparison_table.setHidden(False)
+            self._printed_notes = []
             self._warning.setText("")
             self._warning.setVisible(False)
             for table in (self._coverage_table, self._descriptive_table, self._comparison_table):
@@ -994,6 +1016,11 @@ class ReportTab(QWidget):
         elif reference and challenger and reference != challenger:
             family = self._model.family(metric, reference, challenger, organs)
         self._family = family
+        self._unavailable = self._nothing_to_compare(axis, reference, challenger)
+        # Said where the comparison would be, rather than left as an empty
+        # table and two blank figures for the reader to puzzle over.
+        self._comparison_note.setText(self._unavailable[0] or PAIRED_TEST_NOTE)
+        self._comparison_table.setHidden(bool(self._unavailable[0]))
         self._fill_comparison(metric, family, reference, challenger, axis)
         self._fill_warning(metric, family, reference, challenger, axis)
 
@@ -1040,8 +1067,34 @@ class ReportTab(QWidget):
             # figure must not label a single one.
             challenger=None if axis is FamilyAxis.SOURCES else challenger,
             alpha=_ALPHA,
+            empty=self._unavailable[0] or "Nothing to compare",
         )
         self._write_methods(metric, family, reference, challenger, axis)
+
+    def _nothing_to_compare(
+        self, axis: FamilyAxis, reference: str, challenger: str
+    ) -> tuple[str, str]:
+        """Why no paired comparison can be made, as ``(on screen, on paper)``.
+
+        Both empty when one can. The ground truth is never a comparator — every
+        metric already measures agreement with it — so a cohort with one test
+        source has nothing to pair that source with.
+        """
+        sources = self._model.sources()
+        if len(sources) == 1:
+            alone = (
+                f"Only one test source ({sources[0]}), and a paired comparison needs "
+                f"two, so none was made. The coverage, descriptive statistics and "
+                f"distributions describe {sources[0]} on its own."
+            )
+            return alone, alone
+        if axis is FamilyAxis.ORGANS and reference and reference == challenger:
+            return (
+                "The challenger is the reference. Choose a different source to compare.",
+                "No paired comparison was made: the challenger and the reference were "
+                "the same source.",
+            )
+        return "", ""
 
     def _fill_acquisition(self) -> None:
         """Scanner parameters, summarised over the cohort."""
@@ -1077,18 +1130,37 @@ class ReportTab(QWidget):
             self._acquisition_note.setText(
                 "Load a folder on Tab 1 to read the cohort's acquisition parameters."
             )
+            self._printed_acquisition_note = ""
         else:
             varying = sum(1 for summary in report.images if summary.values and not summary.uniform)
-            self._acquisition_note.setText(
+            counted = (
                 f"{report.n_series} image series and {report.n_structure_sets} structure "
                 f"sets across {report.n_patients} patients."
+            )
+            scope = (
+                "  Equipment and geometry only: no identifiers, dates, institutions or "
+                "free-text descriptions are read."
+            )
+            uniform = "  Every parameter is uniform across the cohort."
+            self._acquisition_note.setText(
+                counted
                 + (
                     f"  {varying} parameter(s) vary across the cohort — hover those rows."
                     if varying
-                    else "  Every parameter is uniform across the cohort."
+                    else uniform
                 )
-                + "  Equipment and geometry only: no identifiers, dates, institutions or "
-                "free-text descriptions are read."
+                + scope
+            )
+            # Nothing to hover on paper; the varying rows show their spread.
+            self._printed_acquisition_note = (
+                counted
+                + (
+                    f"  {varying} parameter(s) vary across the cohort, shown as each "
+                    "value with its count, or as a range."
+                    if varying
+                    else uniform
+                )
+                + scope
             )
 
     def _repopulate_paired(self, family: dict) -> None:
@@ -1112,7 +1184,13 @@ class ReportTab(QWidget):
         label = self._paired_combo.currentText()
         axis = self._axis()
         if not metric or not reference or not label:
-            self._paired.plot([], metric or "", reference=reference, challenger="")
+            self._paired.plot(
+                [],
+                metric or "",
+                reference=reference,
+                challenger="",
+                **({"empty": self._unavailable[0]} if self._unavailable[0] else {}),
+            )
             return
         if axis is FamilyAxis.SOURCES:
             organ, challenger = self._selected_organ(), label
@@ -1193,7 +1271,10 @@ class ReportTab(QWidget):
                         else ""
                     )
                 )
-                for column, text in enumerate([organ if first else "", source, cell.summary()]):
+                cut = _TRUNCATION_TEXT[self._model.truncation(organ)] if first else ""
+                for column, text in enumerate(
+                    [organ if first else "", source, cell.summary(), cut]
+                ):
                     item = QTableWidgetItem(text)
                     item.setData(ORGAN_ROLE, organ)
                     item.setToolTip(explanation)
@@ -1408,17 +1489,31 @@ class ReportTab(QWidget):
         axis: FamilyAxis = FamilyAxis.ORGANS,
     ) -> None:
         notes: list[str] = []
+        # The PDF's version of each note. Most read the same on paper; a few
+        # point at the screen (a view below, another tab) or name patients,
+        # which the export promises not to do, and are reworded for it.
+        printed: list[str] = []
+
+        def add(note: str, on_paper: str | None = None) -> None:
+            notes.append(note)
+            printed.append(note if on_paper is None else on_paper)
+
         unit = axis.plural
         estimable = {organ: r for organ, r in family.items() if r is not None}
         missing = [organ for organ, r in family.items() if r is None]
         if self._model.conflicting_observations:
-            notes.append(
+            discarded = (
                 f"<b>{self._model.conflicting_observations} observation(s) discarded:</b> "
                 "the same organ, source and metric were measured more than once "
                 "within a single treatment context, with differing values. The first "
-                "was kept. This is not a second course — those are separated by "
+                "was kept. "
+            )
+            add(
+                discarded + "This is not a second course — those are separated by "
                 "linkage and handled below — so check the Results tab for a repeated "
-                "structure set."
+                "structure set.",
+                discarded + "This is not a second course, which is analysed as a case of "
+                "its own; it suggests a structure set that was loaded twice.",
             )
 
         excluded = sorted(
@@ -1435,19 +1530,25 @@ class ReportTab(QWidget):
             }
         )
         if excluded:
-            notes.append(
-                f"<b>{len(excluded)} patient(s) excluded</b> "
-                f"({', '.join(excluded[:4])}"
-                + (f" and {len(excluded) - 4} more" if len(excluded) > 4 else "")
-                + "): each contributed more than one treatment context — a "
+            reason = (
+                ": each contributed more than one treatment context — a "
                 "re-irradiation or a replan — for these organs, or the two sources "
                 "were assessed on different ones. Two courses of one patient are not "
                 "two independent observations, and choosing between them is a "
-                "study-design decision, so neither is used. Restrict the cohort on "
-                "Tab 1 if you intend to analyse a particular course."
+                "study-design decision, so neither is used."
+            )
+            add(
+                f"<b>{len(excluded)} patient(s) excluded</b> "
+                f"({', '.join(excluded[:4])}"
+                + (f" and {len(excluded) - 4} more" if len(excluded) > 4 else "")
+                + ")"
+                + reason
+                + " Restrict the cohort on Tab 1 if you intend to analyse a particular course.",
+                # Counted, not named: the export carries no patient identifiers.
+                f"<b>{len(excluded)} patient(s) excluded</b>" + reason,
             )
         if missing:
-            notes.append(
+            add(
                 f"<b>Not estimable:</b> {', '.join(missing[:4])}"
                 + (f" and {len(missing) - 4} more" if len(missing) > 4 else "")
                 + " had no patient contoured by both sources, so no comparison "
@@ -1455,7 +1556,7 @@ class ReportTab(QWidget):
             )
         if estimable and not self._model.family_can_detect(family.values(), _ALPHA):
             largest = max(r.n_pairs for r in estimable.values())
-            notes.append(
+            add(
                 f"<b>Nothing here can reach significance.</b> The largest comparison "
                 f"shown has {largest} paired patient(s), and below six the smallest "
                 f"attainable p-value exceeds 0.05 — so no row can be significant "
@@ -1464,14 +1565,14 @@ class ReportTab(QWidget):
             )
         thin_rows = [r for r in estimable.values() if r.n_pairs < 6]
         if thin_rows and len(thin_rows) != len(estimable):
-            notes.append(
+            add(
                 f"<b>{len(thin_rows)} of {len(estimable)} {unit} have fewer than six "
                 "paired patients</b>, which cannot produce a p-value at or below 0.05 "
                 "whatever the data show. Their p-values are not evidence of similarity."
             )
         if len(estimable) > 1:
             expected = expected_false_positives(len(estimable), _ALPHA)
-            notes.append(
+            add(
                 f"<b>{len(estimable)} comparisons are shown, each answering its own "
                 f"question.</b> p-values are per {axis.noun} and unadjusted, so a row "
                 "does not change because another is displayed. If you scan the table "
@@ -1485,7 +1586,7 @@ class ReportTab(QWidget):
             if r.coverage_fraction is not None and r.coverage_fraction < 0.8
         ]
         if thin:
-            notes.append(
+            add(
                 f"<b>Partial coverage:</b> {', '.join(thin[:4])}"
                 + (f" and {len(thin) - 4} more" if len(thin) > 4 else "")
                 + " were compared on a subset of patients, because one source did not "
@@ -1505,7 +1606,7 @@ class ReportTab(QWidget):
             distinct = {frozenset(patients) for patients in sets.values()}
             if len(distinct) > 1:
                 sizes = {len(patients) for patients in sets.values()}
-                notes.append(
+                same = (
                     "<b>The rows do not all use the same patients.</b> Each comparison "
                     "runs on the patients that pair for it, so a row is sound on its own "
                     "but two rows are not measured on the same cohort"
@@ -1514,21 +1615,25 @@ class ReportTab(QWidget):
                         if len(sizes) == 1
                         else "."
                     )
-                    + " The paired view below always shows the patients belonging to the "
-                    "row it names."
+                )
+                add(
+                    same + " The paired view below always shows the patients belonging "
+                    "to the row it names.",
+                    same + " The paired-differences figure shows the patients of the one "
+                    "row it names.",
                 )
         disconnected = [
             organ for organ, r in estimable.items() if r.ci.status is IntervalStatus.DISCONNECTED
         ]
         if disconnected:
-            notes.append(
+            add(
                 f"<b>Disconnected confidence set</b> in {', '.join(disconnected[:4])}: "
                 "exact ties make the accepted region fall into separate pieces, so the "
                 "interval shown encloses them and is wider than the true set."
             )
         approximate = [organ for organ, r in estimable.items() if not r.ci.exhaustive]
         if approximate:
-            notes.append(
+            add(
                 f"<b>Interval bracketed, not enumerated</b> in "
                 f"{', '.join(approximate[:4])}: the sample was large enough that the "
                 "confidence set was located by bisection, which assumes it is "
@@ -1536,13 +1641,14 @@ class ReportTab(QWidget):
             )
         disagreeing = [organ for organ, r in estimable.items() if not r.ci_agrees_with_test]
         if disagreeing:
-            notes.append(
+            add(
                 f"<b>Exact ties present</b> in {', '.join(disagreeing[:4])}: some paired "
                 "differences are exactly zero, so the interval and the p-value need not "
                 "agree for those rows."
             )
         self._warning.setText("<br><br>".join(notes))
         self._warning.setVisible(bool(notes))
+        self._printed_notes = printed
 
     def _write_methods(
         self,
@@ -1593,8 +1699,9 @@ class ReportTab(QWidget):
                 if len(estimable) != len(family)
                 else ""
             )
-            + ". Every comparison is reported rather than a selected subset, which is what "
-            "makes that defensible." + caveat + " Descriptive values "
+            + "."
+            + caveat
+            + " Descriptive values "
             "are median [Q1, Q3] with a distribution-free 95% interval for the median, which "
             "is not estimable below six observations."
         )
@@ -1678,44 +1785,111 @@ class ReportTab(QWidget):
         """Render the page to ``target`` through Qt's own PDF writer.
 
         HTML into a QTextDocument rather than drawing to a painter: the tables
-        keep real typography and reflow to the page, and figures embed as images
-        at their drawn resolution. No new dependency, and nothing here has to
-        know about page breaks.
+        keep real typography and reflow to the page, and figures embed as
+        images. No new dependency.
+
+        The document is laid out on the writer itself, so a point size prints at
+        that size. Laid out for the screen and printed at the writer's
+        resolution, every size came out at 96/150 of itself, and 7.5 pt tables
+        printed at 4.8 pt. Each page is then painted here rather than by
+        ``QTextDocument.print_``, which is what puts a running header and a page
+        number on it.
         """
         writer = QPdfWriter(str(target))
         writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
         writer.setPageOrientation(QPageLayout.Orientation.Landscape)
-        writer.setResolution(150)
+        writer.setPageMargins(_PAGE_MARGINS_MM, QPageLayout.Unit.Millimeter)
+        writer.setResolution(_PDF_DPI)
         writer.setTitle("AutoSeg Evaluator — statistical report")
 
-        document = QTextDocument()
-        document.setDefaultStyleSheet(_PDF_STYLE)
+        band = round(_RUNNING_BAND_MM / 25.4 * _PDF_DPI)
+        body = QSizeF(writer.width(), writer.height() - 2 * band)
+        produced = datetime.now().strftime("%d %B %Y · %H:%M")
         with TemporaryDirectory() as scratch:
-            # The real page geometry, so the banner, the tables and the figures
-            # are sized to the paper rather than to a guess about it.
-            document.setHtml(self._pdf_html(Path(scratch), writer.width(), writer.height()))
-            document.setPageSize(QSizeF(writer.width(), writer.height()))
-            document.print_(writer)
+            document = self._paginated(Path(scratch), body, writer, produced)
+            _paint_pages(document, writer, body, band, self._running_title(), produced)
 
-    def _pdf_html(self, scratch: Path, width: int = _PAGE_WIDTH, height: int = _PAGE_HEIGHT) -> str:
+    def _running_title(self) -> str:
+        """What the head of every page after the first says."""
+        metric = readable_metric(self._selected_metric()) or "—"
+        reference = self._reference_combo.currentText() or "—"
+        if self._axis() is FamilyAxis.SOURCES:
+            subject = f"{self._selected_organ() or '—'}: every source against {reference}"
+        else:
+            subject = f"{self._challenger_combo.currentText() or '—'} against {reference}"
+        return f"Auto-contouring evaluation report  ·  {metric}  ·  {subject}"
+
+    def _paginated(self, scratch: Path, body: QSizeF, device: Any, produced: str) -> QTextDocument:
+        """The document laid out on ``device``, with its page breaks repaired.
+
+        QTextDocument breaks a page wherever the next line does not fit. That
+        cut an organ's rows apart, leaving its second source unlabelled at the
+        top of the next page; left a table's heading at the foot of one page and
+        the table on the next; and put each figure's heading under the figure
+        before it, because the image moved on and its heading did not. So the
+        document is laid out, checked, and the first such break pushed to the
+        next page, until none remains.
+        """
+        figures = self._figure_images(scratch, body.width(), body.height(), device.logicalDpiY())
+        pagination = _Pagination()
+        document = QTextDocument()
+        document.documentLayout().setPaintDevice(device)
+        document.setDefaultStyleSheet(_PDF_STYLE)
+        for _attempt in range(_PAGINATION_PASSES):
+            units: list[_Unit] = []
+            document.setHtml(
+                self._pdf_html(
+                    scratch,
+                    round(body.width()),
+                    round(body.height()),
+                    produced=produced,
+                    figures=figures,
+                    pagination=pagination,
+                    units=units,
+                    device=device,
+                )
+            )
+            document.setPageSize(body)
+            if not pagination.repair(document, units, body.height()):
+                break
+        return document
+
+    def _pdf_html(
+        self,
+        scratch: Path,
+        width: int = _PAGE_WIDTH,
+        height: int = _PAGE_HEIGHT,
+        *,
+        produced: str | None = None,
+        figures: dict[str, tuple[Path, int, int]] | None = None,
+        pagination: _Pagination | None = None,
+        units: list[_Unit] | None = None,
+        device: Any = None,
+    ) -> str:
         """The page as HTML, with the figures written beside it as PNGs.
 
         Laid out as a report rather than as a dump of the screen: the banner,
         the conditions it was produced under, then the sections in reading
         order, then a sign-off saying what produced it and when. The figures go
-        in exactly as drawn — they have their own typography, and restyling
-        them to match the page would trade legibility for a matching palette.
+        in as drawn — they have their own typography, and restyling them to
+        match the page would trade legibility for a matching palette.
 
-        ``width`` and ``height`` are the paintable page in device pixels. The
-        banner and the figures fill the measure; the data tables take the
-        central part of it (``_TABLE_WIDTH_PERCENT``).
+        ``width`` and ``height`` are one page's body in device pixels. The
+        banner and the figures fill the measure; each data table takes the
+        central ``_TABLE_WIDTH_PERCENT`` of it, or more where its columns need
+        it. ``pagination`` says which tables, headings and figures start a new
+        page, and ``units`` receives what each top-level table is, in order, so
+        the laid-out document can be checked against it.
         """
         axis = self._axis()
         metric = self._selected_metric()
         reference = self._reference_combo.currentText()
         challenger = self._challenger_combo.currentText()
         tolerance = tolerance_note(metric)
-        produced = datetime.now().strftime("%d %B %Y · %H:%M")
+        produced = produced or datetime.now().strftime("%d %B %Y · %H:%M")
+        if figures is None:
+            figures = self._figure_images(scratch, width, height, _PDF_DPI)
+        build = _Builder(width, pagination or _Pagination(), [] if units is None else units, device)
 
         fixed_label = "Challenger" if axis is FamilyAxis.ORGANS else "Organ"
         fixed_value = (challenger if axis is FamilyAxis.ORGANS else self._selected_organ()) or "—"
@@ -1724,90 +1898,90 @@ class ReportTab(QWidget):
         if self._acquisition.available:
             sections.append("Acquisition")
 
-        parts = [_banner_html(scratch, width)]
+        parts = [_banner_html(scratch, width, build.image_scale)]
         parts.append("<h1>Auto-contouring evaluation report</h1>")
         parts.append("<p class='subtitle'>" + "  ·  ".join(sections) + "</p>")
         parts.append(f"<p class='provenance'>version {__version__} · generated {produced}</p>")
         parts.append(
-            _panel_html(
-                [
-                    ("Metric", readable_metric(metric) or "—"),
-                    ("Tolerance", tolerance.replace("tolerance = ", "") if tolerance else "n/a"),
-                    ("Ground truth", self._ground_truth_combo.currentText() or "—"),
-                ],
-                [
-                    ("Compared against", reference or "—"),
-                    (fixed_label, fixed_value),
-                    ("Compared across", axis.plural),
-                ],
-                [("Cohort", self._summary_label.text() or "—")],
+            build.panel(
+                _panel_html(
+                    [
+                        ("Metric", readable_metric(metric) or "—"),
+                        (
+                            "Tolerance",
+                            tolerance.replace("tolerance = ", "") if tolerance else "n/a",
+                        ),
+                        ("Ground truth", self._ground_truth_combo.currentText() or "—"),
+                    ],
+                    [
+                        ("Compared against", reference or "—"),
+                        (fixed_label, fixed_value),
+                        ("Compared across", axis.plural),
+                    ],
+                    [("Cohort", self._summary_label.text() or "—")],
+                )
             )
         )
 
-        parts.append(_table_section("Coverage", self._coverage_table))
+        parts.append(build.table("Coverage", self._coverage_table))
         parts.append(
-            _table_section(
-                "Descriptive statistics",
-                self._descriptive_table,
-                self._descriptive_note.text(),
+            build.table(
+                "Descriptive statistics", self._descriptive_table, self._descriptive_note.text()
             )
         )
-        parts.append(
-            _table_section(
-                "Paired comparison",
-                self._comparison_table,
-                self._comparison_note.text(),
-            )
-        )
-
-        for name, canvas in self._figures():
-            figure = self._figure_html(name, canvas, scratch, width, height)
-            if figure:
-                parts.append(_section(_FIGURE_TITLES.get(name, name)) + figure)
-
-        if self._acquisition.available:
+        if self._unavailable[1]:
+            # Said in place of the section, with no empty table or figures.
+            parts.append(build.heading("Paired comparison", self._unavailable[1]))
+        else:
             parts.append(
-                _table_section(
-                    "Acquisition parameters",
-                    self._image_table,
-                    self._acquisition_note.text(),
+                build.table(
+                    "Paired comparison", self._comparison_table, self._comparison_note.text()
                 )
             )
 
-        comments = []
-        if self._warning.text():
-            for note in self._warning.text().split("<br><br>"):
-                comments.append(("Caution", note))
+        for name, _canvas in self._figures():
+            if name in figures:
+                parts.append(build.figure(name, _FIGURE_TITLES.get(name, name), *figures[name]))
+
+        if self._acquisition.available:
+            parts.append(
+                build.table(
+                    "Acquisition parameters", self._image_table, self._printed_acquisition_note
+                )
+            )
+
+        comments = [("Caution", note) for note in self._printed_notes]
         if self._methods.text():
             comments.append(("Methods", self._methods.text()))
         if comments:
-            parts.append(_section("Notes & interpretation") + _comments_html(comments))
+            parts.append(build.comments("Notes & interpretation", comments))
 
         parts.append(_signoff_html(produced))
         return "<html><body>" + "".join(parts) + "</body></html>"
 
-    def _figure_html(self, name: str, canvas: Any, scratch: Path, width: int, height: int) -> str:
-        """One figure, filling the measure without outgrowing the page.
+    def _figure_images(
+        self, scratch: Path, width: float, height: float, dpi: float
+    ) -> dict[str, tuple[Path, int, int]]:
+        """Each figure drawn for the page: ``{name: (png, width, height)}``, in pixels.
 
-        Rendered at the resolution the page will show it at, so a figure
-        stretched to the full width is not an upscaled screenshot of itself. The
-        height cap is what keeps the document dense: a figure that would take
-        two thirds of a page cannot share one with anything else, and the
-        leftover is spent as white space above the next page break.
+        Drawn at the size it prints at rather than scaled to fit, so its type
+        prints at the size it was set in. The height allowed leaves room for its
+        heading, so the two share a page.
         """
-        image = scratch / f"{name}.png"
-        inches = canvas.figure.get_size_inches()[0] or 1.0
-        canvas.figure.savefig(
-            image, dpi=max(150, width / inches), bbox_inches="tight", facecolor="white"
-        )
-        drawn = QImage(str(image))
-        if drawn.isNull():
-            return ""
-        scale = min(width / drawn.width(), height * _FIGURE_PAGE_SHARE / drawn.height())
-        return (
-            f"<img src='{image.as_uri()}' width='{round(drawn.width() * scale)}' "
-            f"height='{round(drawn.height() * scale)}'/>"
-        )
+        free_width = width / dpi
+        free_height = height / dpi - _FIGURE_HEADING_INCHES
+        images: dict[str, tuple[Path, int, int]] = {}
+        for name, canvas in self._figures():
+            if self._unavailable[1] and name in _COMPARISON_FIGURES:
+                continue  # nothing to compare: the section says so instead
+            target = scratch / f"{name}.png"
+            _save_for_print(canvas, target, *canvas.print_size(free_width, free_height), dpi)
+            drawn = QImage(str(target))
+            if drawn.isNull():
+                continue
+            scale = min(1.0, width / drawn.width(), free_height * dpi / drawn.height())
+            images[name] = (target, round(drawn.width() * scale), round(drawn.height() * scale))
+        return images
 
 
 #: The PDF follows a clinical-report idiom rather than the screen's: a banner
@@ -1828,6 +2002,32 @@ _PANEL = "#E8EFF2"
 #: contents the tables sat at the left edge with most of the page white beside
 #: them; across the full width, a few short columns drifted too far apart.
 _TABLE_WIDTH_PERCENT = 75
+
+#: The PDF's resolution. Text is vector at any value; this sets the figures'
+#: pixels and the unit the layout measures in.
+_PDF_DPI = 150
+
+#: Page margins in millimetres: left, top, right, bottom.
+_PAGE_MARGINS_MM = QMarginsF(12, 10, 12, 10)
+
+#: The bands holding the running header and the footer, in millimetres, and
+#: their type.
+_RUNNING_BAND_MM = 8
+_RUNNING_PT = 8.5
+_RUNNING_FONT = "Segoe UI"
+
+#: The most layout-and-repair passes made. Each pass moves one page break, so a
+#: report needs about as many as it has pages; this only bounds a pathological
+#: case, which then keeps the breaks where they fell.
+_PAGINATION_PASSES = 60
+
+#: The room a figure's heading takes above it, in inches: the section's top
+#: margin, the heading and the space under it. A figure is drawn no taller than
+#: a page less this, so the two always fit on one.
+_FIGURE_HEADING_INCHES = 0.75
+
+#: The figures that show a paired comparison, left out when none can be made.
+_COMPARISON_FIGURES = frozenset({"paired", "forest"})
 
 #: What each figure is called in the document. The keys are the filename stems
 #: used when the figures are saved on their own, which are not titles.
@@ -1855,36 +2055,40 @@ _BANNER_HEIGHT_SHARE = 0.125
 _BANNER_FILL = "#000000"
 
 _PDF_STYLE = f"""
-body {{ color: {_INK}; font-family: "Segoe UI", Calibri, Arial, sans-serif; }}
+body {{ color: {_INK}; font-family: "Segoe UI", Calibri, Arial, sans-serif; font-size: 10.5pt; }}
 td, th, p {{ font-family: "Segoe UI", Calibri, Arial, sans-serif; }}
-p.banner {{ margin: 0 0 9px 0; }}
-h1 {{ font-family: Georgia, "Times New Roman", serif; font-size: 19pt;
-      color: {_INK}; margin: 4px 0 1px 0; font-weight: normal; }}
+p.banner {{ margin: 0 0 12px 0; }}
+h1 {{ font-family: Georgia, "Times New Roman", serif; font-size: 22pt;
+      color: {_INK}; margin: 6px 0 2px 0; font-weight: normal; }}
 p.subtitle {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
-              color: {_ACCENT}; font-size: 9.5pt; margin: 0 0 2px 0; }}
-p.provenance {{ color: {_MUTED}; font-size: 7.5pt; margin: 0 0 9px 0; }}
-p.section {{ color: {_ACCENT}; font-size: 8pt; font-weight: bold;
-             margin: 13px 0 4px 0; }}
-p.note {{ color: {_MUTED}; font-size: 7.5pt; margin: 0 0 4px 0; }}
-p.methods {{ color: {_INK}; font-size: 8pt; margin: 0; }}
+              color: {_ACCENT}; font-size: 11pt; margin: 0 0 3px 0; }}
+p.provenance {{ color: {_MUTED}; font-size: 9pt; margin: 0 0 12px 0; }}
+p.section {{ color: {_ACCENT}; font-size: 10pt; font-weight: bold;
+             margin: 18px 0 6px 0; }}
+p.note {{ color: {_MUTED}; font-size: 10pt; margin: 0 0 6px 0; }}
+p.plate {{ margin: 0; }}
 p.sign-name {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
-               color: {_ACCENT}; font-size: 15pt; margin: 10px 0 0 0; }}
-p.sign-role {{ color: {_INK}; font-size: 8.5pt; font-weight: bold; margin: 2px 0 0 0; }}
+               color: {_ACCENT}; font-size: 16pt; margin: 14px 0 0 0; }}
+p.sign-role {{ color: {_INK}; font-size: 10pt; font-weight: bold; margin: 3px 0 0 0; }}
 p.sign-meta {{ font-family: Georgia, "Times New Roman", serif; font-style: italic;
-               color: {_MUTED}; font-size: 7.5pt; margin: 2px 0 0 0; }}
-table.data {{ border-collapse: collapse; font-size: 7.5pt; }}
-table.data th {{ background-color: {_ACCENT}; color: #FFFFFF; font-size: 7pt;
-                 padding: 5px 6px; text-align: left; border: 1px solid {_ACCENT}; }}
-table.data td {{ padding: 4px 6px; border: 1px solid {_RULE}; }}
-table.caption {{ margin: 13px 0 0 0; }}
-table.caption p.section {{ margin: 0 0 4px 0; }}
+               color: {_MUTED}; font-size: 9pt; margin: 3px 0 0 0; }}
+table.data {{ border-collapse: collapse; font-size: 9pt; }}
+table.data th {{ background-color: {_ACCENT}; color: #FFFFFF; font-size: 9pt;
+                 padding: 6px 9px; text-align: left; border: 1px solid {_ACCENT}; }}
+table.data td {{ padding: 5px 9px; border: 1px solid {_RULE}; }}
+table.caption {{ margin: 18px 0 0 0; }}
+table.figure {{ margin: 18px 0 0 0; }}
+table.caption p.section {{ margin: 0 0 6px 0; }}
+table.caption p.note {{ margin: 0; }}
+table.caption td {{ padding: 0 0 8px 0; }}
+table.figure p.section {{ margin: 0 0 6px 0; }}
 table.panel {{ border-collapse: collapse; margin: 0 0 3px 0; }}
-table.panel td {{ padding: 8px 12px; font-size: 8pt;
+table.panel td {{ padding: 12px 16px; font-size: 10.5pt;
                   background-color: {_PANEL}; }}
 table.comments {{ border-collapse: collapse; }}
-table.comments td {{ padding: 3px 0 7px 0; vertical-align: top; }}
-td.comment-label {{ color: {_ACCENT}; font-size: 7pt; font-weight: bold; }}
-td.comment-body {{ color: {_INK}; font-size: 8pt; }}
+table.comments td {{ padding: 4px 0 10px 0; vertical-align: top; }}
+td.comment-label {{ color: {_ACCENT}; font-size: 9pt; font-weight: bold; }}
+td.comment-body {{ color: {_INK}; font-size: 10.5pt; }}
 """
 
 #: Word gap inside a letter-spaced label. HTML collapses runs of whitespace, so
@@ -1932,11 +2136,12 @@ def _banner_image(width: int) -> QImage | None:
     return canvas
 
 
-def _banner_html(scratch: Path, width: int) -> str:
+def _banner_html(scratch: Path, width: int, scale: float = 1.0) -> str:
     """The banner as an ``<img>``, or nothing at all if the artwork is missing.
 
     A missing asset costs the document its masthead and nothing else — the title
-    underneath still says what the report is.
+    underneath still says what the report is. Drawn at ``width`` device pixels
+    and sized by ``scale`` into the units the layout reads (``_Builder``).
     """
     banner = _banner_image(width)
     if banner is None:
@@ -1946,7 +2151,7 @@ def _banner_html(scratch: Path, width: int) -> str:
         return ""
     return (
         f"<p class='banner'><img src='{target.as_uri()}' "
-        f"width='{banner.width()}' height='{banner.height()}'/></p>"
+        f"width='{round(banner.width() * scale)}' height='{round(banner.height() * scale)}'/></p>"
     )
 
 
@@ -1962,7 +2167,7 @@ def _panel_html(*columns: list[tuple[str, str]]) -> str:
     for column in columns:
         entries = "".join(
             f"<p class='section' style='margin:0 0 2px 0'>{_spaced(label)}</p>"
-            f"<p style='margin:0 0 8px 0; font-size:8.5pt'>{value}</p>"
+            f"<p style='margin:0 0 8px 0; font-size:10.5pt'>{value}</p>"
             for label, value in column
         )
         cells.append(f"<td width='{share}%'>{entries}</td>")
@@ -1995,35 +2200,27 @@ def _signoff_html(produced: str) -> str:
     )
 
 
-def _table_section(title: str, table: QTableWidget, note: str = "") -> str:
-    """A table with its section label and note above it, on the table's measure.
-
-    The label and note go in a one-cell table of the table's width and
-    alignment, so all three share a left edge. Left at the page margin, they
-    sat apart from a centred table, and a note ran the full width of the page
-    as one line.
-    """
-    caption = _section(title) + (f"<p class='note'>{note}</p>" if note else "")
-    return (
-        f"<table class='caption' width='{_TABLE_WIDTH_PERCENT}%' align='center' "
-        f"border='0' cellspacing='0' cellpadding='0'><tr><td>{caption}</td></tr></table>"
-        + _table_html(table)
-    )
-
-
-def _table_html(table: QTableWidget) -> str:
-    """One Qt table as an HTML table, blanks and all.
+def _table_html(
+    table: QTableWidget,
+    width_percent: int | None = _TABLE_WIDTH_PERCENT,
+    rows: Sequence[int] | None = None,
+    *,
+    page_break: bool = False,
+) -> str:
+    """One Qt table, or ``rows`` of it, as an HTML table, blanks and all.
 
     Blank cells are kept blank: the organ column is deliberately empty on
     continuation rows, and filling it back in for the PDF would undo the
-    grouping the table exists to show.
+    grouping the table exists to show. Every part of a table split across
+    pages carries the header row.
 
     ``width`` as an attribute, not as CSS: QTextDocument's stylesheet subset
-    ignores a percentage width on a table.
+    ignores a percentage width on a table. ``None`` leaves it out, which sizes
+    the table to its contents.
     """
     headers = [table.horizontalHeaderItem(column).text() for column in range(table.columnCount())]
-    rows = []
-    for row in range(table.rowCount()):
+    lines = []
+    for row in range(table.rowCount()) if rows is None else rows:
         cells = []
         for column in range(table.columnCount()):
             item = table.item(row, column)
@@ -2034,14 +2231,294 @@ def _table_html(table: QTableWidget) -> str:
             if item is not None and item.font().bold():
                 value = f"<b>{value}</b>"
             cells.append(f"<td>{value}</td>")
-        rows.append("<tr>" + "".join(cells) + "</tr>")
+        lines.append("<tr>" + "".join(cells) + "</tr>")
+    width = "" if width_percent is None else f" width='{width_percent}%'"
+    start = _PAGE_BREAK if page_break else ""
     return (
-        f"<table class='data' width='{_TABLE_WIDTH_PERCENT}%' align='center'><thead><tr>"
+        f"<table class='data'{width} align='center'{start}><thead><tr>"
         + "".join(f"<th>{header}</th>" for header in headers)
         + "</tr></thead>"
-        + "".join(rows)
+        + "".join(lines)
         + "</table>"
     )
+
+
+#: Starts a top-level table on a new page.
+_PAGE_BREAK = " style='page-break-before: always'"
+
+
+def _table_width(table: QTableWidget, page_width: float, device: Any) -> int:
+    """The percentage of the page a table takes.
+
+    The central ``_TABLE_WIDTH_PERCENT``, or as much more as its columns need
+    to sit on one line each. Held to the central share regardless, a wide table
+    wrapped its cells and doubled its rows' height.
+    """
+    if page_width <= 0:
+        return _TABLE_WIDTH_PERCENT
+    probe = QTextDocument()
+    if device is not None:
+        probe.documentLayout().setPaintDevice(device)
+    probe.setDefaultStyleSheet(_PDF_STYLE)
+    probe.setDocumentMargin(0)
+    probe.setHtml(_table_html(table, None))
+    needed = math.ceil(100 * probe.idealWidth() / page_width) + 1
+    return max(_TABLE_WIDTH_PERCENT, min(100, needed))
+
+
+def _starts_group(table: QTableWidget, row: int) -> bool:
+    """Whether ``row`` begins a group: it names its organ, or its parameter."""
+    item = table.item(row, 0)
+    return item is not None and bool(item.text().strip())
+
+
+@dataclass(frozen=True)
+class _Unit:
+    """What one top-level table of the PDF is, so its place can be checked.
+
+    ``kind`` is ``panel``, ``caption`` (a section heading and note, which
+    belongs with what follows), ``rows`` (a data table, or the part of one on a
+    page), ``figure`` (a heading and its image), or ``comments``. A ``rows``
+    unit carries the source rows it holds and, as positions among them, the
+    rows that start a group.
+    """
+
+    kind: str
+    name: str = ""
+    rows: tuple[int, ...] = ()
+    groups: tuple[int, ...] = ()
+    header_rows: int = 1
+
+    def spans(self) -> list[tuple[int, int]]:
+        """Each group as (first, last) positions among ``rows``; none for an empty table."""
+        if not self.rows:
+            return []
+        starts = list(self.groups) or [0]
+        ends = [start - 1 for start in starts[1:]] + [len(self.rows) - 1]
+        return list(zip(starts, ends, strict=True))
+
+
+@dataclass
+class _Pagination:
+    """Which parts of the PDF start a new page, found by checking a layout.
+
+    ``pushed`` holds ``(kind, name)`` of headings and figures moved to the next
+    page; ``breaks`` the source rows at which a table is split, the rest of it
+    starting a new page with its header row repeated.
+    """
+
+    pushed: set[tuple[str, str]] = field(default_factory=set)
+    breaks: dict[str, set[int]] = field(default_factory=dict)
+
+    def repair(self, document: QTextDocument, units: list[_Unit], page_height: float) -> bool:
+        """Move the first misplaced part to the next page; False if none is.
+
+        A group of rows, a heading with the first group it introduces, and a
+        figure with its heading are each kept on one page. Anything already
+        moved once and still split is taller than a page, and stays as it is.
+        """
+        frames = [f for f in document.rootFrame().childFrames() if isinstance(f, QTextTable)]
+        if page_height <= 0 or len(frames) != len(units):
+            return False
+        layout = document.documentLayout()
+
+        def page(y: float) -> int:
+            return int(y // page_height)
+
+        def top(table: QTextTable, row: int) -> float:
+            block = table.cellAt(row, 0).firstCursorPosition().block()
+            return layout.blockBoundingRect(block).top()
+
+        def bottom(table: QTextTable, row: int) -> float:
+            block = table.cellAt(row, 0).lastCursorPosition().block()
+            return layout.blockBoundingRect(block).bottom()
+
+        for index, (frame, unit) in enumerate(zip(frames, units, strict=True)):
+            if unit.kind == "figure":
+                if page(top(frame, 0)) != page(bottom(frame, 0) - 1) and self._push(unit):
+                    return True
+            elif unit.kind == "caption":
+                # A heading belongs with what it introduces: its own text, and
+                # the first group of the table that follows it.
+                end = page(bottom(frame, 0) - 1)
+                following = units[index + 1] if index + 1 < len(units) else None
+                if following is not None and following.kind == "rows" and following.rows:
+                    last = following.spans()[0][1]
+                    end = page(top(frames[index + 1], following.header_rows + last))
+                if page(top(frame, 0)) != end and self._push(unit):
+                    return True
+            elif unit.kind == "rows" and unit.header_rows:
+                # Where a table runs onto the next page, it is split there into
+                # a table of its own, at the start of the group the break falls
+                # in. That keeps each organ's rows on one page, and each page's
+                # part of the table closed off and headed, where QTextDocument
+                # carried its column rules down to the foot of the page.
+                # Rows never split, so comparing row tops finds every break.
+                starts = [first for first, _last in unit.spans()]
+                for position in range(1, len(unit.rows)):
+                    row = unit.header_rows + position
+                    if page(top(frame, row)) == page(top(frame, row - 1)):
+                        continue
+                    group = max(start for start in starts if start <= position)
+                    if group == 0:
+                        # The first group already starts this part: it is
+                        # longer than a page, or it is kept with the heading.
+                        continue
+                    self.breaks.setdefault(unit.name, set()).add(unit.rows[group])
+                    return True
+        return False
+
+    def _push(self, unit: _Unit) -> bool:
+        key = (unit.kind, unit.name)
+        if key in self.pushed:
+            return False
+        self.pushed.add(key)
+        return True
+
+
+class _Builder:
+    """Writes the PDF's top-level tables, and records what each one is.
+
+    Every top-level table goes through here, so the recorded units line up one
+    for one with the tables of the laid-out document.
+    """
+
+    def __init__(self, width: float, pagination: _Pagination, units: list[_Unit], device: Any):
+        self._width = width
+        self._pagination = pagination
+        self._units = units
+        self._device = device
+        #: Device pixels to the units an ``<img>`` size is read in. Laid out on
+        #: a printer, QTextDocument takes those as 96 dpi pixels and scales
+        #: them up to the device, which drew the banner half again too wide.
+        self.image_scale = 96 / device.logicalDpiY() if device is not None else 1.0
+
+    def _start(self, kind: str, name: str) -> str:
+        return _PAGE_BREAK if (kind, name) in self._pagination.pushed else ""
+
+    def panel(self, html: str) -> str:
+        self._units.append(_Unit("panel"))
+        return html
+
+    def heading(self, title: str, note: str) -> str:
+        """A section heading and note with nothing beneath them."""
+        self._units.append(_Unit("caption", title))
+        return (
+            f"<table class='caption' width='{_TABLE_WIDTH_PERCENT}%' align='center' border='0' "
+            f"cellspacing='0' cellpadding='0'{self._start('caption', title)}><tr><td>"
+            f"{_section(title)}<p class='note'>{note}</p></td></tr></table>"
+        )
+
+    def table(self, title: str, table: QTableWidget, note: str = "") -> str:
+        """A table, with its section heading and note above it on its measure.
+
+        The heading and note go in a one-cell table of the table's width and
+        alignment, so all three share a left edge. A table split across pages
+        starts each part on a new page, at the start of a group.
+        """
+        width = _table_width(table, self._width, self._device)
+        caption = _section(title) + (f"<p class='note'>{note}</p>" if note else "")
+        parts = [
+            f"<table class='caption' width='{width}%' align='center' border='0' "
+            f"cellspacing='0' cellpadding='0'{self._start('caption', title)}>"
+            f"<tr><td>{caption}</td></tr></table>"
+        ]
+        self._units.append(_Unit("caption", title))
+        breaks = self._pagination.breaks.get(title, set())
+        segments: list[list[int]] = [[]]
+        for row in range(table.rowCount()):
+            if row in breaks and segments[-1]:
+                segments.append([])
+            segments[-1].append(row)
+        for index, rows in enumerate(segments):
+            groups = tuple(i for i, row in enumerate(rows) if i == 0 or _starts_group(table, row))
+            self._units.append(_Unit("rows", title, tuple(rows), groups))
+            parts.append(_table_html(table, width, rows, page_break=index > 0))
+        return "".join(parts)
+
+    def figure(self, name: str, title: str, image: Path, width: int, height: int) -> str:
+        """A figure and its heading in one cell, so they never part at a page break."""
+        self._units.append(_Unit("figure", name))
+        return (
+            f"<table class='figure' width='100%' border='0' cellspacing='0' "
+            f"cellpadding='0'{self._start('figure', name)}><tr><td>{_section(title)}"
+            f"<p class='plate' align='center'><img src='{image.as_uri()}' "
+            f"width='{round(width * self.image_scale)}' "
+            f"height='{round(height * self.image_scale)}'/></p></td></tr></table>"
+        )
+
+    def comments(self, title: str, entries: list[tuple[str, str]]) -> str:
+        self._units.append(_Unit("caption", title))
+        heading = (
+            "<table class='caption' width='100%' border='0' cellspacing='0' "
+            f"cellpadding='0'{self._start('caption', title)}><tr><td>{_section(title)}"
+            "</td></tr></table>"
+        )
+        rows = tuple(range(len(entries)))
+        self._units.append(_Unit("rows", title, rows, rows, header_rows=0))
+        return heading + _comments_html(entries)
+
+
+def _save_for_print(canvas: Any, target: Path, width: float, height: float, dpi: float) -> None:
+    """Save a figure as it prints, at ``width`` × ``height`` inches.
+
+    The canvas makes its print adjustments for the save and undoes them after,
+    so the tab is left as it was.
+    """
+    with canvas.printing(width, height):
+        canvas.figure.savefig(target, dpi=dpi, bbox_inches="tight", facecolor="white")
+
+
+def _paint_pages(
+    document: QTextDocument,
+    writer: QPdfWriter,
+    body: QSizeF,
+    band: int,
+    title: str,
+    produced: str,
+) -> None:
+    """Paint each page: its share of the document, a running header and a folio.
+
+    The first page carries the masthead in place of the running header. The
+    footer is on every page, so a loose page still says which report it is from
+    and where it goes.
+    """
+    pages = document.pageCount()
+    font = QFont(_RUNNING_FONT)
+    font.setPointSizeF(_RUNNING_PT)
+    title = QFontMetricsF(font, writer).elidedText(
+        title, Qt.TextElideMode.ElideRight, body.width() * 0.75
+    )
+    left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+    right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+    head = QRectF(0, 0, body.width(), band * 0.7)
+    foot = QRectF(0, band + body.height() + band * 0.3, body.width(), band * 0.7)
+    rule = QPen(QColor(_RULE), 1)
+    painter = QPainter(writer)
+    try:
+        for index in range(pages):
+            if index:
+                writer.newPage()
+            painter.save()
+            painter.translate(0, band - index * body.height())
+            document.drawContents(
+                painter, QRectF(0, index * body.height(), body.width(), body.height())
+            )
+            painter.restore()
+
+            painter.setFont(font)
+            painter.setPen(rule)
+            painter.drawLine(QPointF(0, foot.top()), QPointF(body.width(), foot.top()))
+            if index:
+                painter.drawLine(QPointF(0, head.bottom()), QPointF(body.width(), head.bottom()))
+            painter.setPen(QColor(_MUTED))
+            if index:
+                painter.drawText(head, left, title)
+                painter.drawText(head, right, produced)
+            painter.drawText(foot, left, f"AutoSeg Evaluator {__version__}")
+            painter.drawText(foot, right, f"Page {index + 1} of {pages}")
+    finally:
+        painter.end()
 
 
 __all__ = ["ReportTab"]

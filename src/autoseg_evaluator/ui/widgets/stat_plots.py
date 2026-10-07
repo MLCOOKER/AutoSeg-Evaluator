@@ -17,6 +17,9 @@ is on screen.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -202,6 +205,31 @@ class _Canvas(FigureCanvasQTAgg):
         """The height this figure is designed to be shown at, in pixels."""
         return self._preferred_height
 
+    def print_size(self, width: float, height: float) -> tuple[float, float]:
+        """Inches to draw this figure at, on a page with ``width`` × ``height`` free.
+
+        Its size on screen, made no larger than the page. Drawn at the page's
+        size rather than scaled down to it, its type prints at the size it was
+        set in.
+        """
+        drawn_width, drawn_height = self.figure.get_size_inches()
+        return min(float(drawn_width), width), min(float(drawn_height), height)
+
+    @contextmanager
+    def printing(self, width: float, height: float) -> Iterator[None]:
+        """The figure at ``width`` × ``height`` inches while it is saved for a page.
+
+        ``forward=False`` resizes the figure without resizing the widget showing
+        it, and the size is put back afterwards, so the tab never sees it.
+        """
+        shown = tuple(self.figure.get_size_inches())
+        self.figure.set_size_inches(width, height, forward=False)
+        try:
+            yield
+        finally:
+            self.figure.set_size_inches(*shown, forward=False)
+            self.draw_idle()
+
     def clear(self) -> None:
         self.figure.clear()
 
@@ -214,9 +242,39 @@ class DistributionCanvas(_Canvas):
     looks like data and is not. The enclosing scroll area supplies the panning.
     """
 
+    #: Height added for print, in inches, for the upright organ labels.
+    PRINT_LABEL_INCHES = 1.0
+
     def _resize_for(self, organs: int, sources: int) -> None:
         needed = int(ORGAN_SLOT_WIDTH * max(organs, 1) * max(1.0, sources / 3.0)) + 220
         self.setMinimumWidth(max(needed, MIN_CANVAS_WIDTH))
+
+    def print_size(self, width: float, height: float) -> tuple[float, float]:
+        """As the screen's, with room under the axis for upright organ labels."""
+        drawn_width, drawn_height = super().print_size(width, height)
+        return drawn_width, min(height, drawn_height + self.PRINT_LABEL_INCHES)
+
+    @contextmanager
+    def printing(self, width: float, height: float) -> Iterator[None]:
+        """As the base, with the organ labels upright.
+
+        On screen the figure widens with the organ count and its labels lie at
+        an angle. On a page it cannot widen, and twenty angled labels ran into
+        one another; upright, each takes only its own column.
+        """
+        axes = self.figure.axes
+        for each in axes:
+            each.tick_params(axis="x", labelrotation=90)
+            for label in each.get_xticklabels():
+                label.set_horizontalalignment("center")
+        try:
+            with super().printing(width, height):
+                yield
+        finally:
+            for each in axes:
+                each.tick_params(axis="x", labelrotation=30)
+                for label in each.get_xticklabels():
+                    label.set_horizontalalignment("right")
 
     def plot(
         self,
@@ -378,12 +436,14 @@ class PairedCanvas(_Canvas):
         organ: str = "",
         units: str = "",
         subtitle: str = "",
+        empty: str = "No patient has both sources for this organ",
     ) -> None:
         """``pairs`` is ``[(patient, reference value, challenger value)]``.
 
         ``metric`` is the metric **key** — direction is looked up from it, and a
         display label passed here would silently colour every line as tied.
-        ``display`` is what the reader sees.
+        ``display`` is what the reader sees. ``empty`` is what the figure says
+        when there are no pairs, which the caller can make more specific.
         """
         label = display or metric
         self.clear()
@@ -392,11 +452,12 @@ class PairedCanvas(_Canvas):
             axes.text(
                 0.5,
                 0.5,
-                "No patient has both sources for this organ",
+                empty,
                 ha="center",
                 va="center",
                 fontsize=11,
                 color=_MUTED_TEXT,
+                wrap=True,
             )
             axes.set_axis_off()
             self.draw_idle()
@@ -466,7 +527,7 @@ class PairedCanvas(_Canvas):
             axes.spines[spine].set_color(_GRID)
 
         title = f"{organ}: {label}" if organ else label
-        axes.set_title(title, fontsize=12, color=_TEXT, fontweight="bold", loc="left", pad=16)
+        axes.set_title(title, fontsize=12, color=_TEXT, fontweight="bold", loc="left", pad=22)
         if subtitle:
             axes.annotate(
                 subtitle,
@@ -516,9 +577,26 @@ class ForestCanvas(_Canvas):
     #: Everything that is not a row: titles, axis, tick labels, caption.
     CHROME_INCHES = 2.35
 
+    #: The closest a printed forest packs its rows, in inches, so that a long one
+    #: fits a page without its 10 pt labels touching (10 pt is 0.14 in).
+    PRINT_ROW_INCHES = 0.18
+
     def __init__(self, width: float = 9.0, height: float = 5.0) -> None:
         super().__init__(width, height)
+        self._rows = 0
         self.setMinimumWidth(MIN_FOREST_WIDTH)
+
+    def print_size(self, width: float, height: float) -> tuple[float, float]:
+        """The page's full width, and as tall as the rows need, up to the page.
+
+        On screen the forest is as wide as the tab, and printed at that shape it
+        took half a landscape page, scaled down until its labels were hard to
+        read. Rows close up to fit the page, down to ``PRINT_ROW_INCHES``.
+        """
+        rows = max(self._rows, 1)
+        spacing = (height - self.CHROME_INCHES) / rows
+        spacing = min(self.ROW_INCHES, max(self.PRINT_ROW_INCHES, spacing))
+        return width, min(height, self.CHROME_INCHES + rows * spacing)
 
     def plot(
         self,
@@ -533,8 +611,11 @@ class ForestCanvas(_Canvas):
         title: str = "",
         subtitle: str = "",
         sort_by_effect: bool = False,
+        empty: str = "Nothing to compare",
     ) -> None:
         """``results`` is ``{label: PairedResult}`` from either family method.
+
+        ``empty`` is what the figure says when there is no row to draw.
 
         ``challenger`` is the single source every row was measured against, or
         ``None`` when the rows *are* the sources. In that second case no row can
@@ -571,7 +652,9 @@ class ForestCanvas(_Canvas):
 
         if not usable:
             self._resize_for(0)
-            axes.text(0.5, 0.5, "Nothing to compare", ha="center", va="center", fontsize=11)
+            axes.text(
+                0.5, 0.5, empty, ha="center", va="center", fontsize=11, color=_MUTED_TEXT, wrap=True
+            )
             axes.set_axis_off()
             self.draw_idle()
             return
@@ -662,7 +745,7 @@ class ForestCanvas(_Canvas):
             axes.set_xlabel(f"Difference, % of {reference}'s median", fontsize=10, color=_TEXT)
 
         if title:
-            axes.set_title(title, fontsize=12, color=_TEXT, fontweight="bold", loc="left", pad=16)
+            axes.set_title(title, fontsize=12, color=_TEXT, fontweight="bold", loc="left", pad=22)
         if subtitle:
             axes.annotate(
                 subtitle,
@@ -705,6 +788,7 @@ class ForestCanvas(_Canvas):
 
     def _resize_for(self, rows: int) -> None:
         """Height follows the row count; width is left to the layout."""
+        self._rows = rows
         inches = self.CHROME_INCHES + max(rows, 1) * self.ROW_INCHES
         width = self.figure.get_size_inches()[0]
         self.figure.set_size_inches(width, inches, forward=False)

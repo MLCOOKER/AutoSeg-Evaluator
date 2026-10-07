@@ -426,6 +426,11 @@ class ReportModel:
 
     _patients_by_source: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     _patients_by_organ: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
+    _truncation: dict[tuple[str, str], set[bool]] = field(default_factory=lambda: defaultdict(set))
+    """``(organ, reference) -> {truncated?}`` over that organ's rows.
+
+    Truncation is a drawer setting, so one organ normally carries one value; two
+    appear when organ labels pool drawers that were set differently."""
     _by_reference: dict[str, tuple[dict[str, set[str]], dict[str, set[str]]]] = field(
         default_factory=dict
     )
@@ -480,6 +485,10 @@ class ReportModel:
             active_ground_truth=reference,
             _patients_by_source=defaultdict(set, {k: set(v) for k, v in by_source.items()}),
             _patients_by_organ=defaultdict(set, {k: set(v) for k, v in by_organ.items()}),
+            _truncation=defaultdict(
+                set,
+                {key: set(flags) for key, flags in self._truncation.items() if key[1] == reference},
+            ),
             _by_reference=self._by_reference,
         )
 
@@ -490,6 +499,19 @@ class ReportModel:
 
     def organs(self) -> list[str]:
         return sorted({organ for (organ, _s, _m, _p, _link, _ref) in self.observations})
+
+    def truncation(self, organ: str) -> bool | None:
+        """Whether this organ's test contours were cut to the ground truth's extent.
+
+        ``True`` or ``False`` when every row of the organ agrees, ``None`` when
+        they differ (drawers pooled under one organ label, set differently) or
+        when the organ has no rows.
+        """
+        flags: set[bool] = set()
+        for (name, _reference), seen in self._truncation.items():
+            if name == organ:
+                flags |= seen
+        return next(iter(flags)) if len(flags) == 1 else None
 
     def metrics(self) -> list[str]:
         return sorted({metric for (_o, _s, metric, _p, _link, _ref) in self.observations})
@@ -932,6 +954,7 @@ def build_report_model(
 
         model._patients_by_source[source].add(patient)
         model._patients_by_organ[organ].add(patient)
+        model._truncation[(organ, reference)].add(bool(row.get("truncated", False)))
         per_source, per_organ = model._by_reference.setdefault(
             reference, (defaultdict(set), defaultdict(set))
         )

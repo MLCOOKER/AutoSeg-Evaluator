@@ -185,7 +185,7 @@ def test_coverage_separates_a_declined_organ_from_an_unrun_patient(tab):
         tab._coverage_table.horizontalHeaderItem(c).text()
         for c in range(tab._coverage_table.columnCount())
     ]
-    assert headers == ["Organ", "Source", "Coverage"]
+    assert headers == ["Organ", "Source", "Coverage", "Truncated"]
 
 
 def test_a_comparison_reports_how_much_the_pairing_discarded(tab):
@@ -306,8 +306,8 @@ def test_the_methods_paragraph_names_the_test_and_the_reporting_rule(tab):
     assert "Hodges–Lehmann" in methods
     assert "2 organs is treated as a separate question" in methods
     assert "unadjusted" in methods
-    # The safeguard that makes reporting unadjusted p-values defensible.
-    assert "Every comparison is reported rather than a selected subset" in methods
+    assert "selected subset" not in methods  # removed from the report, October 2026
+    assert "applied across them. Descriptive values" in methods
     assert CHALLENGER in methods and REFERENCE in methods
 
 
@@ -468,9 +468,12 @@ def test_the_exported_tables_take_the_middle_of_the_page(tab, tmp_path):
     _select(tab, ORGANS)
     html = tab._pdf_html(Path(tmp_path), width=1600, height=1100)
     assert 50 <= _TABLE_WIDTH_PERCENT < 100
-    centred = f"width='{_TABLE_WIDTH_PERCENT}%' align='center'"
-    assert html.count(f"<table class='data' {centred}>") == 3
-    assert html.count(f"<table class='caption' {centred}") == 3
+    # The central share, or more where a table's columns need it.
+    tables = re.findall(r"<table class='data' width='(\d+)%' align='center'>", html)
+    captions = re.findall(r"<table class='caption' width='(\d+)%' align='center'", html)
+    assert len(tables) == 3
+    assert all(_TABLE_WIDTH_PERCENT <= int(width) <= 100 for width in tables)
+    assert captions == tables  # each heading on its table's measure
     assert "<table class='panel' width='100%'>" in html
     # No figure may outgrow its share of the page, or the leftover prints as a
     # gap above the next page break.
@@ -1908,10 +1911,10 @@ def test_the_paired_view_matches_the_model(tab):
     assert drawn == sorted((before, after) for _p, before, after in pairs)
 
 
-def test_an_empty_paired_view_says_so(tab):
+def test_an_empty_paired_view_says_why(tab):
     tab._challenger_combo.setCurrentText(REFERENCE)
     axes = tab._paired.figure.axes[0]
-    assert any("No patient has both sources" in t.get_text() for t in axes.texts)
+    assert any("The challenger is the reference" in t.get_text() for t in axes.texts)
 
 
 # ---- Which patients, and on what scale -------------------------------------
@@ -2193,3 +2196,295 @@ def test_the_paired_comparison_says_which_test_it_ran(tab, tmp_path):
     paired = html.index("P A I R E D")
     assert html.index(note) > paired
     assert html.index(note) < html.index("<table class='data'", paired)
+
+
+# ---- The PDF as printed ------------------------------------------------------
+
+
+def _truncation_rows():
+    """Parotid (L) truncated throughout, Brainstem never, Parotid (R) only in part."""
+    rows = []
+    for patient in range(3):
+        for organ, truncated in (
+            ("Parotid (L)", True),
+            ("Parotid (R)", patient == 0),
+            ("Brainstem", False),
+        ):
+            for source in (REFERENCE, CHALLENGER):
+                row = _row_for(f"P{patient:02d}", organ, source, 0.8)
+                row["truncated"] = truncated
+                rows.append(row)
+    return rows
+
+
+def test_the_model_knows_which_organs_were_truncated():
+    from autoseg_evaluator.data.report import build_report_model
+
+    model = build_report_model(_truncation_rows())
+    assert model.truncation("Parotid (L)") is True
+    assert model.truncation("Brainstem") is False
+    # Pooled drawers set differently: neither answer would be true.
+    assert model.truncation("Parotid (R)") is None
+
+
+def test_the_coverage_table_says_which_organs_were_truncated(qapp):
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(_truncation_rows())
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._metric_combo.setCurrentText("dice")
+    _select(widget, ["Parotid (L)", "Parotid (R)", "Brainstem"])
+
+    table = widget._coverage_table
+    column = _column(table, "Truncated")
+    said = {}
+    for row in range(table.rowCount()):
+        organ = table.item(row, 0).text()
+        if organ:
+            said[organ] = table.item(row, column).text()
+        else:
+            assert table.item(row, column).text() == ""  # once per organ, like its name
+    assert said == {"Parotid (L)": "yes", "Parotid (R)": "partly", "Brainstem": "no"}
+    widget.deleteLater()
+
+
+def test_the_pdf_counts_excluded_patients_without_naming_them(reirradiation_tab, tmp_path):
+    """The screen names them so they can be found; the export promises no identifiers."""
+    from pathlib import Path
+
+    _select(reirradiation_tab, ["Parotid (L)", "Parotid (R)"])
+    assert "P00" in reirradiation_tab._warning.text()
+
+    html = reirradiation_tab._pdf_html(Path(tmp_path))
+    assert "1 patient(s) excluded" in html
+    assert "re-irradiation or a replan" in html
+    assert "P00" not in html
+    assert "Tab 1" not in html
+
+
+def test_a_note_pointing_at_the_screen_is_reworded_for_paper(tab, tmp_path):
+    from pathlib import Path
+
+    _select(tab, ORGANS)
+    assert "paired view below" in tab._warning.text()
+
+    html = tab._pdf_html(Path(tmp_path))
+    assert "paired view below" not in html
+    assert "paired-differences figure shows the patients" in html
+
+
+def test_the_printed_acquisition_note_has_nothing_to_hover(tab, tmp_path):
+    from pathlib import Path
+
+    tab.set_library(_fake_library(spacings=(1.074, 1.367)))
+    _select(tab, ORGANS)
+    assert "hover those rows" in tab._acquisition_note.text()
+
+    html = tab._pdf_html(Path(tmp_path))
+    assert "hover" not in html
+    assert "shown as each value with its count, or as a range" in html
+
+
+def _laid_out(tab, tmp_path, body_height):
+    """The PDF's document as exported, on pages ``body_height`` pixels tall.
+
+    The writer is returned too: it is the document's paint device.
+    """
+    from PySide6.QtCore import QSizeF
+    from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter
+
+    writer = QPdfWriter(str(tmp_path / "layout.pdf"))
+    writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+    writer.setPageOrientation(QPageLayout.Orientation.Landscape)
+    writer.setResolution(150)
+    body = QSizeF(writer.width(), body_height)
+    return tab._paginated(tmp_path, body, writer, "today"), writer
+
+
+def test_the_pdf_never_splits_a_group_a_heading_or_a_figure(tab, tmp_path):
+    """Pages short enough to break inside every table.
+
+    An organ's rows sit on one page, so none starts a page unlabelled; each
+    part of a table is closed off on its own page; a heading is on the page of
+    the rows it introduces; and a figure is on the page of its heading.
+    """
+    from PySide6.QtGui import QTextTable
+
+    _select(tab, ORGANS)
+    height = 700
+    document, _writer = _laid_out(tab, tmp_path, height)
+    layout = document.documentLayout()
+
+    def page(block):
+        return int(layout.blockBoundingRect(block).top() // height)
+
+    def first(table, row):
+        return table.cellAt(row, 0).firstCursorPosition().block()
+
+    frames = [f for f in document.rootFrame().childFrames() if isinstance(f, QTextTable)]
+    parts = 0
+    for index, frame in enumerate(frames):
+        if frame.format().headerRowCount():
+            parts += 1
+            assert first(frame, 1).text(), "a part of a table starts mid-group"
+            pages = {page(first(frame, row)) for row in range(1, frame.rows())}
+            assert len(pages) == 1, "a part of a table runs over a page"
+        elif frame.rows() == 1 and frame.columns() == 1:
+            cell = frame.cellAt(0, 0)
+            last = cell.lastCursorPosition().block()
+            if "\ufffc" in last.text():  # a figure: its heading and its image
+                assert page(cell.firstCursorPosition().block()) == page(last)
+            elif index + 1 < len(frames) and frames[index + 1].format().headerRowCount():
+                assert page(cell.firstCursorPosition().block()) == page(first(frames[index + 1], 1))
+    assert parts > 3  # the short page did split the tables
+    assert document.pageCount() > 3
+
+
+def test_the_pdf_prints_type_at_its_stated_size(tab, tmp_path):
+    """Laid out for the screen and printed at 150 dpi, 7.5 pt came out at 4.8 pt."""
+    from PySide6.QtGui import QTextTable
+
+    _select(tab, ORGANS)
+    document, writer = _laid_out(tab, tmp_path, 1000)
+    table = next(
+        f
+        for f in document.rootFrame().childFrames()
+        if isinstance(f, QTextTable) and f.format().headerRowCount()
+    )
+    line = table.cellAt(1, 0).firstCursorPosition().block().layout().lineAt(0).height()
+    assert line >= 9 / 72 * writer.logicalDpiY()  # a 9 pt line, at the writer's resolution
+
+
+def test_every_page_is_numbered_and_every_later_page_headed(tab, tmp_path, monkeypatch):
+    """Recorded as painted: without installed fonts the PDF's text cannot be read back."""
+    from PySide6.QtGui import QPainter
+
+    from autoseg_evaluator.ui.tabs import report as report_module
+
+    painted: list[str] = []
+
+    class Recording(QPainter):
+        def drawText(self, *args):  # noqa: N802 — Qt override
+            painted.append(args[-1] if isinstance(args[-1], str) else "")
+            return super().drawText(*args)
+
+    monkeypatch.setattr(report_module, "QPainter", Recording)
+    _select(tab, ORGANS)
+    target = _export_pdf(tab, tmp_path, monkeypatch)
+    assert target.exists()
+
+    folios = [text for text in painted if text.startswith("Page ")]
+    pages = len(folios)
+    assert pages > 1
+    assert folios == [f"Page {index + 1} of {pages}" for index in range(pages)]
+    headers = [text for text in painted if text.startswith("Auto-contouring evaluation report")]
+    assert len(headers) == pages - 1  # the first page has the masthead instead
+    # Painted shortened to its band if need be, so the full title is checked.
+    title = tab._running_title()
+    assert "Dice" in title and REFERENCE in title and CHALLENGER in title
+
+
+def test_the_printed_forest_takes_the_page_width(qapp):
+    """On screen it is as wide as the tab, which printed at half a page."""
+    from autoseg_evaluator.ui.widgets.stat_plots import ForestCanvas
+
+    canvas = ForestCanvas()
+    canvas._resize_for(20)
+    width, height = canvas.print_size(10.5, 6.0)
+    assert width == 10.5
+    assert height <= 6.0
+    assert (height - canvas.CHROME_INCHES) / 20 >= canvas.PRINT_ROW_INCHES - 1e-9
+
+    canvas._resize_for(3)
+    assert canvas.print_size(10.5, 6.0)[1] < 6.0  # a short forest stays short
+    canvas.deleteLater()
+
+
+def test_printing_a_figure_leaves_the_tab_as_it_was(tab):
+    _select(tab, ORGANS)
+    canvas = tab._distribution
+    axes = canvas.figure.axes[0]
+    size = tuple(canvas.figure.get_size_inches())
+    angles = [label.get_rotation() for label in axes.get_xticklabels()]
+
+    with canvas.printing(8.0, 5.0):
+        assert tuple(canvas.figure.get_size_inches()) == (8.0, 5.0)
+        assert {label.get_rotation() for label in axes.get_xticklabels()} == {90.0}
+
+    assert tuple(canvas.figure.get_size_inches()) == size
+    assert [label.get_rotation() for label in axes.get_xticklabels()] == angles
+
+
+@pytest.fixture
+def one_source_tab(qapp):
+    widget = ReportTab()
+    manager = ResultsManager()
+    manager.add_rows(
+        [_row_for(f"P{p:02d}", organ, CHALLENGER, 0.8) for p in range(6) for organ in ORGANS]
+    )
+    widget.set_results_manager(manager)
+    widget.refresh()
+    widget._metric_combo.setCurrentText("dice")
+    yield widget
+    widget.deleteLater()
+
+
+def _figure_text(canvas) -> str:
+    return " ".join(text.get_text() for axes in canvas.figure.axes for text in axes.texts)
+
+
+def test_one_test_source_says_why_there_is_no_comparison(one_source_tab):
+    """The ground truth is never a comparator, so one source has nothing to pair with.
+
+    Said where the comparison would be, rather than as an empty table and a
+    paired figure claiming no patient had both sources.
+    """
+    tab = one_source_tab
+    assert tab._descriptive_table.rowCount() == len(ORGANS)  # still described
+    assert tab._comparison_table.rowCount() == 0
+    assert tab._comparison_table.isHidden()
+    note = tab._comparison_note.text()
+    assert f"Only one test source ({CHALLENGER})" in note
+    assert "Wilcoxon" not in note
+    assert "Only one test source" in _figure_text(tab._forest)
+    assert "Only one test source" in _figure_text(tab._paired)
+    assert "No patient has both sources" not in _figure_text(tab._paired)
+
+
+def test_one_test_source_exports_the_reason_and_no_empty_comparison(
+    one_source_tab, tmp_path, monkeypatch
+):
+    """An empty table once stopped the page-break check with an error."""
+    from pathlib import Path
+
+    from autoseg_evaluator.ui.tabs.report import _spaced
+
+    tab = one_source_tab
+    html = tab._pdf_html(Path(tmp_path))
+    assert f"Only one test source ({CHALLENGER})" in html
+    assert _spaced("Paired comparison") in html
+    assert "Wilcoxon" not in html
+    assert ">HL difference</th>" not in html  # no empty comparison table
+    assert "paired.png" not in html and "forest.png" not in html
+    assert "distributions.png" in html
+
+    target = _export_pdf(tab, tmp_path, monkeypatch)
+    assert target.read_bytes().startswith(b"%PDF")
+
+
+def test_the_reference_as_its_own_challenger_says_so(tab, tmp_path):
+    from pathlib import Path
+
+    _select(tab, ORGANS)
+    tab._challenger_combo.setCurrentText(REFERENCE)
+    assert tab._comparison_table.isHidden()
+    assert "Choose a different source" in tab._comparison_note.text()
+
+    html = tab._pdf_html(Path(tmp_path))
+    assert "the challenger and the reference were the same source" in html
+    assert "Choose" not in html  # nothing to choose on paper
+
+    tab._challenger_combo.setCurrentText(CHALLENGER)
+    assert not tab._comparison_table.isHidden()
+    assert "Wilcoxon signed-rank" in tab._comparison_note.text()
