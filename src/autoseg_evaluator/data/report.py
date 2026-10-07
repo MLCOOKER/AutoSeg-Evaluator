@@ -73,6 +73,11 @@ FAMILY_POLYGON = "2D contour"
 FAMILY_DOSIMETRIC = "Dosimetric"
 FAMILY_OTHER = "Other"
 FAMILY_STAPLE = "Consensus"
+FAMILY_PTV = "PTV overlap"
+
+#: The PTV overlap columns the report analyses. The ground truth's own overlap
+#: is the same for every source, so it is a diagnostic, not one of these.
+PTV_OVERLAP_METRICS = frozenset({"test_ptv_overlap_cc", "ptv_overlap_diff_cc"})
 
 #: Produced by the STAPLE machinery rather than by comparing two contours.
 #: Excluded from the report entirely — see :data:`_SKIP_MODES`.
@@ -183,6 +188,8 @@ def metric_family(metric: str) -> str:
     # geometric set or by the dose suffix rules.
     if lower.startswith("poly_"):
         return FAMILY_POLYGON
+    if lower in PTV_OVERLAP_METRICS:
+        return FAMILY_PTV
     if lower in GEOMETRIC_METRICS:
         return FAMILY_GEOMETRIC
     if lower in STAPLE_METRICS or lower.startswith("staple_"):
@@ -196,6 +203,7 @@ def metric_family(metric: str) -> str:
 FAMILY_ORDER: tuple[str, ...] = (
     FAMILY_GEOMETRIC,
     FAMILY_POLYGON,
+    FAMILY_PTV,
     FAMILY_DOSIMETRIC,
     FAMILY_OTHER,
 )
@@ -244,6 +252,9 @@ DIAGNOSTIC_COLUMNS = frozenset(
         # The dose's equivalent: how much of the structure the dose grid covers,
         # which is the part every dose statistic in the row describes.
         "dose_coverage_pct",
+        # The ground truth's overlap with the PTV: the same for every source, so
+        # it qualifies their overlaps rather than being compared between them.
+        "gt_ptv_overlap_cc",
     }
 )
 
@@ -426,6 +437,13 @@ class ReportModel:
 
     _patients_by_source: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     _patients_by_organ: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
+    _ptv_only: dict[tuple[str, str, str], dict[tuple[str, str], bool]] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
+    """``(organ, source, reference) -> {case: test overlaps the PTV, the GT does not}``.
+
+    Recorded for every case where both overlaps were measured, so a count has
+    its denominator."""
     _truncation: dict[tuple[str, str], set[bool]] = field(default_factory=lambda: defaultdict(set))
     """``(organ, reference) -> {truncated?}`` over that organ's rows.
 
@@ -489,6 +507,10 @@ class ReportModel:
                 set,
                 {key: set(flags) for key, flags in self._truncation.items() if key[1] == reference},
             ),
+            _ptv_only=defaultdict(
+                dict,
+                {key: dict(cases) for key, cases in self._ptv_only.items() if key[2] == reference},
+            ),
             _by_reference=self._by_reference,
         )
 
@@ -512,6 +534,26 @@ class ReportModel:
             if name == organ:
                 flags |= seen
         return next(iter(flags)) if len(flags) == 1 else None
+
+    def measured_ptv_overlap(self) -> bool:
+        """Whether any case has its overlap with the PTV measured."""
+        return any(self._ptv_only.values())
+
+    def ptv_only_overlap(self, organ: str, source: str) -> tuple[int, int] | None:
+        """``(k, n)``: of ``n`` cases with both overlaps measured, ``k`` where the
+        test contour overlaps the PTV and the ground truth does not.
+
+        ``None`` when no case of this organ and source was measured. Only that
+        one case is counted (D9): a test missing an overlap the ground truth has
+        shows in the difference, not here.
+        """
+        flags = [
+            flag
+            for (name, label, _reference), cases in self._ptv_only.items()
+            if name == organ and label == source
+            for flag in cases.values()
+        ]
+        return (sum(flags), len(flags)) if flags else None
 
     def metrics(self) -> list[str]:
         return sorted({metric for (_o, _s, metric, _p, _link, _ref) in self.observations})
@@ -913,6 +955,10 @@ def collect_acquisition(library: Any) -> AcquisitionReport:
 _SKIP_MODES = {"staple details", "qualitative"}
 
 
+def _finite(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def build_report_model(
     rows: Iterable[dict[str, Any]],
     *,
@@ -962,6 +1008,11 @@ def build_report_model(
         per_organ[organ].add(patient)
 
         metrics = row.get("metrics") or {}
+        test_ptv, gt_ptv = metrics.get("test_ptv_overlap_cc"), metrics.get("gt_ptv_overlap_cc")
+        if _finite(test_ptv) and _finite(gt_ptv):
+            model._ptv_only[(organ, source, reference)][(patient, linkage)] = bool(
+                test_ptv > 0 and gt_ptv == 0
+            )
         for metric, value in metrics.items():
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue
@@ -993,6 +1044,8 @@ def build_report_model(
 
 
 __all__ = [
+    "FAMILY_PTV",
+    "PTV_OVERLAP_METRICS",
     "CONSENSUS_REFERENCE_MARKERS",
     "FAMILY_DOSIMETRIC",
     "FAMILY_GEOMETRIC",

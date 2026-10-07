@@ -6,6 +6,21 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — overlap with the PTV, October 2026
+- **PTV overlap**, a new 3D mask metric on the Compute tab, adds three columns:
+  the ground truth's volume inside the PTV, the test contour's, and the
+  difference, test − GT, in cc. Any overlap counts; 0 means none. The PTV is
+  every structure whose type (RTROIInterpretedType) is PTV in the ground truth's
+  own structure set, combined into one region; names are not read. The test
+  contour is the truncated one when the drawer truncates. The columns are blank
+  for a consensus ground truth and for a structure set with no structure typed
+  PTV; the audit sidecar records why, and which PTVs were combined.
+- **The coverage table counts test-only overlaps**: per organ and source, how
+  many test contours overlap the PTV where the ground truth's does not, as
+  *k of n*, on the Report tab and in the PDF. The test overlap and the
+  difference can also be selected as metrics in the Report tab.
+- Design and decisions: `docs/V3_PTV_OVERLAP_SPEC.md`.
+
 ### Changed — the Compute tab opens with nothing selected, October 2026
 - **No metric is selected, and no value filled in, when the tab opens.** The
   3D, 2D and dose checkboxes start unticked and the tolerance, D-at-volume and

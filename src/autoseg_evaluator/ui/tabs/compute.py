@@ -130,6 +130,16 @@ _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
         "coordinates (mm), with signed Δx / Δy / Δz components. Detects "
         "positional shifts that high-overlap metrics can hide.",
     ),
+    (
+        "ptv_overlap",
+        "PTV overlap",
+        "Volume of the GT and of the test contour inside the PTV (cc), and the "
+        "difference, test − GT. Any overlap counts; 0 means none. The PTV is every "
+        "structure typed PTV in the GT's structure set, combined — the name is "
+        "not read. Blank when that structure set has none, and for a consensus "
+        "GT, which has no structure set of its own. The test contour is the "
+        "truncated one when the drawer truncates.",
+    ),
 )
 
 

@@ -122,6 +122,20 @@ OAR_TYPES = frozenset({"ORGAN", "AVOIDANCE", "CAVITY"})
 
 TARGET_TYPES = frozenset({"GTV", "CTV", "PTV", "ITV", "TREATED_VOLUME", "IRRAD_VOLUME"})
 
+#: The structure type that makes a structure a PTV for the overlap metric.
+PTV_TYPE = "PTV"
+
+
+def is_ptv(interpreted_type: str) -> bool:
+    """Whether a structure is a PTV, by its ``RTROIInterpretedType`` alone.
+
+    The name is not read. A structure named like a PTV but typed otherwise, or
+    not typed, is not one: the type is the only part of the file that says what
+    a structure is rather than what someone called it.
+    """
+    return (interpreted_type or "").strip().upper() == PTV_TYPE
+
+
 NONANATOMIC_TYPES = frozenset(
     {"EXTERNAL", "SUPPORT", "CONTROL", "MARKER", "BOLUS", "FIXATION", "REGISTRATION", "ISOCENTER"}
 )
@@ -769,6 +783,8 @@ def dominant_type(types: Mapping[str, int]) -> tuple[str, bool]:
 
 
 __all__ = [
+    "PTV_TYPE",
+    "is_ptv",
     "AUTOMATIC_TIERS",
     "DEFAULT_DECORATIONS",
     "LATERALITY_L",

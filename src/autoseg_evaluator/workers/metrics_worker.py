@@ -19,7 +19,9 @@ from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import pydicom
+import SimpleITK as sitk
 from PySide6.QtCore import QObject, Signal, Slot
 
 from autoseg_evaluator.core.contour_grid import GridUnavailableError, build_grid
@@ -43,7 +45,9 @@ from autoseg_evaluator.core.masks import (
 from autoseg_evaluator.core.metrics import (
     compute_geometric_metrics,
     geometric_metrics_with_audit,
+    overlap_cc,
 )
+from autoseg_evaluator.core.organ_groups import is_ptv
 from autoseg_evaluator.core.polygon_metrics import (
     MISSING_PLANE_POLICY,
     STATUS_NO_CONTOURS,
@@ -95,6 +99,14 @@ DVH_FROM_CONTOURS = "contours"
 DVH_FROM_MASK = "mask"
 
 
+#: What the audit record says about a row's PTV overlap columns.
+PTV_STATUS_MEASURED = "measured"
+PTV_STATUS_NONE = "not measured: no structure in the ground truth's structure set is typed PTV"
+PTV_STATUS_CONSENSUS = (
+    "not measured: a consensus ground truth has no structure set of its own, so no PTV"
+)
+
+
 class MetricsWorker(QObject):
     """Drives the per-row metric loop on a background thread.
 
@@ -132,6 +144,13 @@ class MetricsWorker(QObject):
         self._dvh_config = DVHConfig.from_dict(self._config.get("dvh", {}) or {})
         self._staple_config = StapleConfig.from_dict(self._config.get("staple", {}) or {})
         self._polygon_config = PolygonConfig.from_dict(self._config.get("polygon", {}))
+        # Overlap with the PTV: asked for as one of the 3D mask metrics, though
+        # computed here, because it needs the PTV and the metric functions are
+        # given only the two contours. See docs/V3_PTV_OVERLAP_SPEC.md.
+        self._ptv_enabled = bool((self._config.get("geometric") or {}).get("ptv_overlap"))
+        # Per patient and structure set: the PTVs combined, as a boolean array
+        # on the CT, the names combined, and the status the audit records.
+        self._ptv_cache: dict[tuple[str, str], tuple[Any, list[str], str]] = {}
         # Audit detail cannot be reconstructed from a finished table, so whether
         # to keep it is decided before computing rather than at export time.
         self._audit = bool((self._config.get("audit") or {}).get("sidecar", False))
@@ -428,6 +447,10 @@ class MetricsWorker(QObject):
             error_text = f"{type(exc).__name__}: {exc}"
             return self._error_rows_for_group(group, error_text)
 
+        # The PTV is rasterised on the CT, so it is taken now, before the CT can
+        # be released below.
+        ptv = self._ptv_basis(group, ct, gt_rtss, gt_mask)
+
         # Per-rater mask loads. Each may fail independently; failed raters
         # get a stub error row and are dropped from the STAPLE pool.
         test_records: list[dict[str, Any]] = []
@@ -540,7 +563,7 @@ class MetricsWorker(QObject):
                 # show per-rater activity; the bar advances by the group's
                 # weight once the whole group finishes (keeps it monotonic).
                 self.progress.emit(idx, total, state)
-                rows.append(self._compute_gt_row(group, rec, gt_mask, gt_dvh, dvh_z_extent))
+                rows.append(self._compute_gt_row(group, rec, gt_mask, gt_dvh, dvh_z_extent, ptv))
 
         # When the GT is a multi-observer synthetic consensus (Tab 2), emit a
         # "STAPLE Details" row describing the consensus that backs this GT.
@@ -570,8 +593,12 @@ class MetricsWorker(QObject):
         gt_mask,
         gt_dvh: dict[str, float] | None = None,
         z_extent_mm: tuple[float, float] | None = None,
+        ptv: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """One row: a single test vs the designated GT.
+
+        ``ptv`` is the group's PTV and the ground truth's overlap with it
+        (:meth:`_ptv_basis`), or ``None`` when the overlap was not asked for.
 
         ``gt_dvh`` carries the GT contour's own dose statistics (computed once
         per group); when present, each DVH metric also gets a ``{key}_diff``
@@ -609,6 +636,7 @@ class MetricsWorker(QObject):
             else:
                 geometric = compute_geometric_metrics(gt_mask, record["mask"], self._config)
             row["metrics"].update(geometric)
+            self._ptv_into_row(row, ptv, record["mask"])
             # When the GT is a multi-observer STAPLE consensus, also report each
             # test's sensitivity / specificity against that consensus (treating
             # the consensus as truth) — alongside the geometric metrics.
@@ -680,6 +708,86 @@ class MetricsWorker(QObject):
         except Exception as exc:  # noqa: BLE001
             row["error"] = f"{type(exc).__name__}: {exc}"
         return row
+
+    # ---- PTV overlap -------------------------------------------------------
+
+    def _ptv_region(
+        self, patient_id: str, sop_uid: str, ct: Any, rtss: Any
+    ) -> tuple[Any, list[str], str]:
+        """One structure set's PTVs combined: ``(region, names, status)``.
+
+        Every structure typed PTV (D10: the name is not read), rasterised on the
+        CT and combined, so a voxel inside two PTVs counts once. ``region`` is
+        ``None`` when there is no PTV, or when one cannot be rasterised: a union
+        missing a PTV would understate the overlap, which is worse than giving
+        no value. Cached per patient and structure set, so every organ of the
+        patient reuses one union.
+        """
+        key = (patient_id, sop_uid)
+        if key in self._ptv_cache:
+            return self._ptv_cache[key]
+        entry = self._find_rtstruct_entry(patient_id, sop_uid)
+        ptvs = sorted(
+            (int(organ.roi_number), organ.roi_name)
+            for organ in getattr(entry, "organs", None) or []
+            if is_ptv(organ.interpreted_type)
+        )
+        names = [name for _number, name in ptvs]
+        region = None
+        status = PTV_STATUS_MEASURED if ptvs else PTV_STATUS_NONE
+        for roi_number, name in ptvs:
+            try:
+                mask, _notes = mask_with_reading(ct, rtss, roi_number)
+            except MaskConversionError as exc:
+                region = None
+                status = f"not measured: the PTV '{name}' could not be rasterised ({exc})"
+                break
+            filled = sitk.GetArrayFromImage(mask).astype(bool)
+            region = filled if region is None else np.logical_or(region, filled, out=region)
+        result = (region, names, status)
+        self._ptv_cache[key] = result
+        return result
+
+    def _ptv_basis(self, group: dict[str, Any], ct: Any, gt_rtss: Any, gt_mask: Any) -> Any:
+        """What each test row of a group is measured against.
+
+        The PTV region, the ground truth's overlap with it, and the account the
+        audit records; ``None`` when the overlap was not asked for. Only the
+        ground truth's own structure set supplies a PTV (D5), so a consensus
+        ground truth, which has none, gets no value.
+        """
+        if not self._ptv_enabled:
+            return None
+        if group.get("_gt_synthetic"):
+            return {"region": None, "structures": [], "status": PTV_STATUS_CONSENSUS}
+        region, names, status = self._ptv_region(group["patient_id"], group["gt_sop"], ct, gt_rtss)
+        basis: dict[str, Any] = {"region": region, "structures": names, "status": status}
+        if region is not None:
+            try:
+                basis["gt_cc"] = overlap_cc(gt_mask, region)
+            except ValueError as exc:
+                basis.update(region=None, status=f"not measured: {exc}")
+        return basis
+
+    def _ptv_into_row(self, row: dict[str, Any], basis: Any, test_mask: Any) -> None:
+        """The three PTV columns, or none, with the reason in the audit record.
+
+        ``test_mask`` is the mask the other 3D metrics used: cut to the ground
+        truth's extent when the drawer truncates (D6). A blank says why only in
+        the audit record, there being no status column (D7).
+        """
+        if basis is None:
+            return
+        if basis["region"] is not None:
+            test_cc = overlap_cc(test_mask, basis["region"])
+            row["metrics"]["gt_ptv_overlap_cc"] = basis["gt_cc"]
+            row["metrics"]["test_ptv_overlap_cc"] = test_cc
+            row["metrics"]["ptv_overlap_diff_cc"] = test_cc - basis["gt_cc"]
+        if self._audit:
+            row.setdefault("audit", {})["ptv"] = {
+                "status": basis["status"],
+                "structures": list(basis["structures"]),
+            }
 
     # ---- Polygon stream ---------------------------------------------------
 
@@ -1597,6 +1705,9 @@ class MetricsWorker(QObject):
                 for ctx in patient.contexts:
                     for rtss in ctx.rtstructs:
                         self._rtstruct_cache.pop(rtss.sop_instance_uid, None)
+        # The PTV union is a full CT volume, like a mask.
+        for key in [k for k in self._ptv_cache if k[0] == patient_id]:
+            self._ptv_cache.pop(key, None)
         # The polygon caches key on the same patient, and a prepared structure
         # holds its edge arrays; dropping them here keeps peak memory tied to
         # one patient rather than to the whole cohort.

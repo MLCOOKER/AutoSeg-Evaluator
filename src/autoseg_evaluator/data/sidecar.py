@@ -75,7 +75,7 @@ def build(rows: Iterable[Mapping[str, Any]], *, settings: Mapping[str, Any] | No
                 "slices_removed": row.get("truncated_slices"),
                 "extent_removed_mm": row.get("truncated_extent_mm"),
             }
-        for stream in ("mask", "polygon", "dvh"):
+        for stream in ("mask", "polygon", "dvh", "ptv"):
             if detail.get(stream):
                 record[stream] = detail[stream]
         if row.get("error"):
@@ -125,6 +125,15 @@ def build(rows: Iterable[Mapping[str, Any]], *, settings: Mapping[str, Any] | No
                 "part beyond it has no calculated dose and is left out "
                 "(volume_outside_dose_grid_cc, dose_grid_coverage_pct). D{x} is read "
                 "from a histogram of bin_gy bins."
+            ),
+            "ptv": (
+                "The overlap with the PTV. structures: every structure typed PTV in "
+                "the ground truth's structure set, combined into one region; the "
+                "name is not read. status: measured, or why the three overlap "
+                "columns are blank (no structure typed PTV; a consensus ground "
+                "truth, which has no structure set of its own; a PTV that could "
+                "not be rasterised). Measured on the masks, the test one truncated "
+                "when the drawer truncates."
             ),
         },
         "records": records,

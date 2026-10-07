@@ -185,7 +185,7 @@ def test_coverage_separates_a_declined_organ_from_an_unrun_patient(tab):
         tab._coverage_table.horizontalHeaderItem(c).text()
         for c in range(tab._coverage_table.columnCount())
     ]
-    assert headers == ["Organ", "Source", "Coverage", "Truncated"]
+    assert headers == ["Organ", "Source", "Coverage", "Truncated", "Test-only PTV overlap"]
 
 
 def test_a_comparison_reports_how_much_the_pairing_discarded(tab):
@@ -1153,6 +1153,8 @@ def test_tables_are_only_as_wide_as_their_columns(tab, qapp):
     for table in (tab._coverage_table, tab._descriptive_table, tab._comparison_table):
         header = table.horizontalHeader()
         for column in range(table.columnCount()):
+            if table.isColumnHidden(column):
+                continue  # the PTV overlap count, when no overlap was measured
             assert header.sectionSize(column) >= table.sizeHintForColumn(column)
             assert header.sectionSize(column) >= header.sectionSizeHint(column)
         assert table.width() == table.sizeHint().width()

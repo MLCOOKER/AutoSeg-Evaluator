@@ -109,6 +109,21 @@ def volume_cc(mask: sitk.Image) -> float:
     return float(int(arr.sum()) * _voxel_volume_cc(mask))
 
 
+def overlap_cc(mask: sitk.Image, region: np.ndarray) -> float:
+    """Volume of ``mask`` inside ``region``, in cubic centimetres.
+
+    ``region`` is a boolean array on the mask's own grid, in its (z, y, x)
+    order: the PTV, rasterised on the same CT. Counted as ``volume_cc`` counts,
+    so the two are comparable.
+    """
+    arr = sitk.GetArrayViewFromImage(mask)
+    if arr.shape != region.shape:
+        raise ValueError(
+            f"the mask ({arr.shape}) and the region ({region.shape}) are not on the same grid"
+        )
+    return float(int(np.count_nonzero(np.logical_and(arr, region))) * _voxel_volume_cc(mask))
+
+
 def centroid_physical(mask: sitk.Image) -> tuple[float, float, float] | None:
     """Return the physical (x, y, z) mm centroid of a binary mask, or None if empty.
 

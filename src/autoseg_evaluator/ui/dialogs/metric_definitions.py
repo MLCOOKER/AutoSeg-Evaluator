@@ -165,6 +165,18 @@ extreme. The centre-of-mass offset is the distance between the two centroids in
 patient coordinates, with signed components, and catches a positional shift that
 a high overlap score can hide.</p>
 
+<h3>PTV overlap</h3>
+<p>The volume of the ground truth, and of the test contour, inside the PTV, and
+the difference, test &minus; ground truth, all in cc. Any overlap counts: 0 means
+none. The PTV is every structure in the ground truth's own structure set whose
+structure type (RTROIInterpretedType) is PTV, combined into one region so that a
+voxel inside two PTVs counts once; names are not read. Each volume is a voxel
+count multiplied by the voxel volume, on the same masks as Dice. The test contour
+is the truncated one when the drawer truncates. The columns are blank when the
+ground truth's structure set has no structure typed PTV, and for a consensus
+ground truth, which has no structure set of its own. A positive difference means
+the test contour reaches further into the PTV than the ground truth does.</p>
+
 <h3>Rasterisation</h3>
 <p>How each structure becomes a mask, adapted from dcmrtstruct2nii:</p>
 <ol>

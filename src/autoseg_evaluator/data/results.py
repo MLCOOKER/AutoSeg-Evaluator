@@ -112,6 +112,10 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
     "com_dx_mm",
     "com_dy_mm",
     "com_dz_mm",
+    # Overlap with the PTV: the ground truth's, the test's, and test − GT.
+    "gt_ptv_overlap_cc",
+    "test_ptv_overlap_cc",
+    "ptv_overlap_diff_cc",
     # STAPLE per-rater
     "staple_sensitivity",
     "staple_specificity",
@@ -180,6 +184,10 @@ _METRIC_LABELS: dict[str, str] = {
     "com_dx_mm": "COM Δx (mm)",
     "com_dy_mm": "COM Δy (mm)",
     "com_dz_mm": "COM Δz (mm)",
+    # PTV overlap
+    "gt_ptv_overlap_cc": "GT overlap with PTV (cc)",
+    "test_ptv_overlap_cc": "Test overlap with PTV (cc)",
+    "ptv_overlap_diff_cc": "PTV overlap difference (cc)",
     # DVH (static)
     "dose_coverage_pct": "Dose grid coverage (%)",
     "dvh_status": "Dose status",

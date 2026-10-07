@@ -309,7 +309,10 @@ def test_the_2d_plane_counts_never_reach_the_report():
     from autoseg_evaluator.core.polygon_metrics import CONTEXT_COLUMNS
     from autoseg_evaluator.data.report import DIAGNOSTIC_COLUMNS
 
-    assert set(CONTEXT_COLUMNS) == set(DIAGNOSTIC_COLUMNS) - {"dose_coverage_pct"}
+    assert set(CONTEXT_COLUMNS) == set(DIAGNOSTIC_COLUMNS) - {
+        "dose_coverage_pct",
+        "gt_ptv_overlap_cc",
+    }
     model = build_report_model(
         [
             _row(

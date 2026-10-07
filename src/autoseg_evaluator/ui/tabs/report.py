@@ -205,7 +205,8 @@ class _CompactTable(QTableWidget):
         self.resizeColumnsToContents()
         header = self.horizontalHeader()
         for column in range(self.columnCount()):
-            header.resizeSection(column, header.sectionSize(column) + COLUMN_PADDING)
+            if not self.isColumnHidden(column):
+                header.resizeSection(column, header.sectionSize(column) + COLUMN_PADDING)
 
         rows = self.rowCount()
         row_height = self.rowHeight(0) if rows else self.verticalHeader().defaultSectionSize()
@@ -278,7 +279,19 @@ COVERAGE_COLUMNS: list[tuple[str, str]] = [
             "<b>partly</b> means drawers pooled under this organ were set differently.",
         ),
     ),
+    (
+        "Test-only PTV overlap",
+        _tip(
+            "How many of this source's contours of this organ overlap the PTV where the ground truth's does not, out of the cases where both overlaps were measured.",
+            "Any overlap counts. The PTV is every structure typed PTV in the ground truth's structure set, combined. A test contour that misses an overlap the ground truth has is not counted here; the PTV overlap difference shows it.",
+            "Shown only when PTV overlap was computed. <b>—</b>: not measured for this organ and source, as with a consensus ground truth.",
+        ),
+    ),
 ]
+
+#: Where the coverage table holds the PTV overlap count, hidden when no case had
+#: its overlap measured.
+COVERAGE_PTV_COLUMN = len(COVERAGE_COLUMNS) - 1
 
 DESCRIPTIVE_COLUMNS: list[tuple[str, str]] = [
     (
@@ -1272,8 +1285,10 @@ class ReportTab(QWidget):
                     )
                 )
                 cut = _TRUNCATION_TEXT[self._model.truncation(organ)] if first else ""
+                counted = self._model.ptv_only_overlap(organ, source)
+                ptv = f"{counted[0]} of {counted[1]}" if counted else "—"
                 for column, text in enumerate(
-                    [organ if first else "", source, cell.summary(), cut]
+                    [organ if first else "", source, cell.summary(), cut, ptv]
                 ):
                     item = QTableWidgetItem(text)
                     item.setData(ORGAN_ROLE, organ)
@@ -1285,6 +1300,9 @@ class ReportTab(QWidget):
                             font.setBold(True)
                             item.setFont(font)
                     table.setItem(row, column, item)
+        # Only where the overlap was computed: a column of dashes would suggest
+        # a measurement that was never asked for.
+        table.setColumnHidden(COVERAGE_PTV_COLUMN, not self._model.measured_ptv_overlap())
         self._fit_table(table)
 
     def _fill_descriptive(self, metric: str, organs: list[str]) -> None:
@@ -2218,11 +2236,13 @@ def _table_html(
     ignores a percentage width on a table. ``None`` leaves it out, which sizes
     the table to its contents.
     """
-    headers = [table.horizontalHeaderItem(column).text() for column in range(table.columnCount())]
+    # A column hidden on the tab is left out of the page too.
+    columns = [c for c in range(table.columnCount()) if not table.isColumnHidden(c)]
+    headers = [table.horizontalHeaderItem(column).text() for column in columns]
     lines = []
     for row in range(table.rowCount()) if rows is None else rows:
         cells = []
-        for column in range(table.columnCount()):
+        for column in columns:
             item = table.item(row, column)
             value = item.text() if item is not None else ""
             # Bold as markup inside the cell, not as a style on it: an inline
