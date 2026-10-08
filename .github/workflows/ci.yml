@@ -106,5 +106,9 @@ jobs:
         # themselves when these packages are absent.
         run: python -m pip install "platipy>=0.7" surface-distance dcmrtstruct2nii
 
+      # A crash at interpreter exit, after every test has passed, prints where
+      # it happened instead of only an exit code.
       - name: Run pytest
+        env:
+          PYTHONFAULTHANDLER: "1"
         run: python -m pytest -q
