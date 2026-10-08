@@ -1,0 +1,121 @@
+name: Linux polygon-metric library
+
+# Builds the 2D polygon-metric engine's Linux library once, for committing to
+# src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/linux-x86_64/
+# beside the supplied Windows library. Run by hand (Actions -> this workflow ->
+# Run workflow), and only when the vendored C++ changes: the build is not
+# reproducible, so a rebuild is a different file whose hash cannot be pinned
+# until it has been validated again.
+#
+# Built in the manylinux_2_28 image (AlmaLinux 8, glibc 2.28) with the
+# supplier's own build script, so the library loads on any x86-64 distribution
+# with glibc 2.28 or newer. Then validated - the suppliers' 150 published pairs
+# and 44 stress cases, and the same 150 pairs through our call path - on glibc
+# 2.28 inside that image and on two Ubuntu runners. hypot, asinh and fma come
+# from each system's own maths library, so one environment is not enough.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# bash -eo pipefail, so a failure ahead of `| tee` still fails the step.
+defaults:
+  run:
+    shell: bash
+
+env:
+  LIBRARY: src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/linux-x86_64/libfast_native.so
+
+jobs:
+  build:
+    name: Build and validate (manylinux_2_28, glibc 2.28)
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    timeout-minutes: 20
+    env:
+      PYTHON: /opt/python/cp311-cp311/bin/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the library
+        run: $PYTHON src/autoseg_evaluator/vendor/tools/build_native_library.py
+
+      # No more than manylinux_2_28 promises: glibc 2.28 and the libstdc++ of
+      # GCC 8 (GLIBCXX_3.4.25). The image's newer compiler supplies anything
+      # later statically, which this checks rather than assumes.
+      - name: Check what the library asks of the system
+        run: |
+          mkdir -p out
+          glibc=$(objdump -T "$LIBRARY" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          glibcxx=$(objdump -T "$LIBRARY" | grep -o 'GLIBCXX_[0-9.]*' | sort -uV | tail -1)
+          {
+            echo "sha256: $(sha256sum "$LIBRARY" | cut -d' ' -f1)"
+            echo "needed: $(readelf -d "$LIBRARY" | grep NEEDED | sed -E 's/.*\[(.*)\]/\1/' | tr '\n' ' ')"
+            echo "newest glibc symbol: ${glibc:-none}"
+            echo "newest libstdc++ symbol: ${glibcxx:-none}"
+            echo "compiler: $(c++ --version | sed -n 1p)"
+            echo "glibc here: $(ldd --version 2>&1 | sed -n 1p)"
+          } | tee out/system-requirements.txt
+          printf '%s\n2.28\n' "${glibc#GLIBC_}" | sort -CV
+          printf '%s\n3.4.25\n' "${glibcxx#GLIBCXX_}" | sort -CV
+
+      - name: Validate on glibc 2.28
+        run: |
+          $PYTHON -m pip install --quiet numpy shapely pydicom
+          $PYTHON scripts/validate_polygon_metrics.py --engine fast 2>&1 \
+            | tee out/validation-manylinux_2_28.log
+
+      - name: Collect the build record
+        run: |
+          cp "$LIBRARY" out/
+          cp src/autoseg_evaluator/vendor/evidence/builds/linux-x86_64.json out/build-record.json
+          cp src/autoseg_evaluator/vendor/build/linux-x86_64/build.log out/build.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-library
+          path: out/
+          retention-days: 90
+
+  validate:
+    name: Validate (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-library
+          path: built
+
+      - name: Put the built library in place
+        run: |
+          mkdir -p "$(dirname "$LIBRARY")"
+          cp built/libfast_native.so "$LIBRARY"
+          sha256sum "$LIBRARY"
+          ldd --version 2>&1 | sed -n 1p
+
+      - name: Validate
+        run: |
+          mkdir -p out
+          python -m pip install --quiet numpy shapely pydicom
+          python scripts/validate_polygon_metrics.py --engine fast 2>&1 \
+            | tee "out/validation-${{ matrix.os }}.log"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validation-${{ matrix.os }}
+          path: out/
+          retention-days: 90
