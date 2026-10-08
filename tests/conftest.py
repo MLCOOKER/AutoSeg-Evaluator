@@ -9,6 +9,7 @@ passed: a segfault on Ubuntu, a bare exit code 1 on Windows.
 
 from __future__ import annotations
 
+import contextlib
 import gc
 
 import pytest
@@ -27,10 +28,8 @@ def pytest_sessionfinish(session, exitstatus):
     # Run what is still queued - matplotlib's idle redraws, chiefly - while
     # its widgets exist. A redraw queued for a canvas a test already deleted
     # raises here, harmlessly; at interpreter exit it has nothing to raise to.
-    try:
+    with contextlib.suppress(RuntimeError):
         QCoreApplication.processEvents()
-    except RuntimeError:
-        pass
     # deleteLater, not close: closing a main window can ask about an unsaved
     # session, and a modal dialog would hang a headless run. Only the deletions
     # are delivered, so nothing queued above runs against a deleted widget.
