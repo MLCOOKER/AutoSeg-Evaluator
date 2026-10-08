@@ -72,17 +72,21 @@ truth's craniocaudal extent, as for the other 3D metrics. That is what makes
 the difference from the ground truth (D2) fair. The ground truth is never
 truncated; it defines the extent.
 
-### D7 — Three result columns, as volumes
+### D7 — Three result columns as volumes, and one yes/no
 
 | Column | Heading | Meaning |
 |---|---|---|
 | `gt_ptv_overlap_cc` | GT overlap with PTV (cc) | The ground truth's volume inside the PTV; 0 = no overlap |
 | `test_ptv_overlap_cc` | Test overlap with PTV (cc) | The test contour's volume inside the PTV; 0 = no overlap |
 | `ptv_overlap_diff_cc` | PTV overlap difference (cc) | Test − GT (D2) |
+| `test_only_ptv_overlap` | Test-only PTV overlap | True: the test overlaps the PTV and the ground truth does not (D9) |
 
 Volumes rather than yes/no flags: with no threshold (D1), "overlaps" is
 "above zero", so a volume carries the yes/no and the amount together, and the
-difference can only be read next to the two volumes it comes from.
+difference can only be read next to the two volumes it comes from. The fourth
+column (added 2026-10-08) flags, row by row, the one case D9 counts, so it can
+be found in the table without comparing two columns. Blank wherever the
+volumes are blank.
 
 The names of the PTVs combined, and the row's status, go in the audit
 sidecar's record for the row, not in the table. The record already names the

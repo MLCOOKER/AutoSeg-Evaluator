@@ -257,7 +257,9 @@ count multiplied by the voxel volume, on the same masks as Dice. The test contou
 is the truncated one when the drawer truncates. The columns are blank when the
 ground truth's structure set has no structure typed PTV, and for a consensus
 ground truth, which has no structure set of its own. A positive difference means
-the test contour reaches further into the PTV than the ground truth does.</p>
+the test contour reaches further into the PTV than the ground truth does.
+<b>Test-only PTV overlap</b> is yes when the test contour overlaps the PTV and the
+ground truth does not: the case the Report tab counts.</p>
 
 <h3>Contour Discontinuity</h3>
 <p>Yes when the test contour skips a slice: a CT slice between its first and last

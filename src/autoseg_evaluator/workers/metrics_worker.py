@@ -800,6 +800,8 @@ class MetricsWorker(QObject):
             row["metrics"]["gt_ptv_overlap_cc"] = basis["gt_cc"]
             row["metrics"]["test_ptv_overlap_cc"] = test_cc
             row["metrics"]["ptv_overlap_diff_cc"] = test_cc - basis["gt_cc"]
+            # The case worth flagging (D9), as the Report tab counts it.
+            row["metrics"]["test_only_ptv_overlap"] = bool(test_cc > 0 and basis["gt_cc"] == 0)
         if self._audit:
             row.setdefault("audit", {})["ptv"] = {
                 "status": basis["status"],

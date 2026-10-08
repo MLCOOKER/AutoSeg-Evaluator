@@ -165,6 +165,7 @@ def test_the_three_columns_are_measured_against_the_combined_ptvs():
     assert row["metrics"]["gt_ptv_overlap_cc"] == pytest.approx(GT_IN_PTV_CC)
     assert row["metrics"]["test_ptv_overlap_cc"] == pytest.approx(TEST_IN_PTV_CC)
     assert row["metrics"]["ptv_overlap_diff_cc"] == pytest.approx(TEST_IN_PTV_CC - GT_IN_PTV_CC)
+    assert row["metrics"]["test_only_ptv_overlap"] is False  # the GT overlaps too
     # Typed PTV, whatever the name; named PTV but typed otherwise, never.
     assert basis["structures"] == ["Boost", "PTV_56"]
     assert row["audit"]["ptv"] == {"status": PTV_STATUS_MEASURED, "structures": ["Boost", "PTV_56"]}
@@ -262,7 +263,29 @@ def test_both_checks_are_recorded_whatever_is_ticked(qapp, monkeypatch):
     assert row["metrics"]["gt_ptv_overlap_cc"] == pytest.approx(GT_IN_PTV_CC)
     # 60 + 100 voxels on the two slices the boost reaches; none at z = 4 mm.
     assert row["metrics"]["test_ptv_overlap_cc"] == pytest.approx(160 * VOXEL_CC)
+    assert row["metrics"]["test_only_ptv_overlap"] is False
     assert row["metrics"]["contour_discontinuity"] is True
+
+
+@pytest.mark.parametrize(
+    ("gt_voxels", "test_voxels", "flagged"),
+    [(0, 5, True), (5, 5, False), (5, 0, False), (0, 0, False)],
+)
+def test_test_only_overlap_is_yes_only_where_the_gt_has_none(gt_voxels, test_voxels, flagged):
+    worker = _worker()
+    region = np.ones((1, 1, 10), bool)
+    filled = np.zeros((1, 1, 10), np.uint8)
+    filled[0, 0, :test_voxels] = 1
+    test_mask = sitk.GetImageFromArray(filled)
+    basis = {
+        "region": (region, None),
+        "gt_cc": gt_voxels * 0.001,
+        "structures": ["PTV"],
+        "status": PTV_STATUS_MEASURED,
+    }
+    row = {"metrics": {}}
+    worker._ptv_into_row(row, basis, test_mask)
+    assert row["metrics"]["test_only_ptv_overlap"] is flagged
 
 
 # ---- Table, report and audit ----------------------------------------------------
@@ -276,6 +299,7 @@ def test_the_columns_have_their_names_and_sit_with_the_checks():
         "gt_ptv_overlap_cc": "GT overlap with PTV (cc)",
         "test_ptv_overlap_cc": "Test overlap with PTV (cc)",
         "ptv_overlap_diff_cc": "PTV overlap difference (cc)",
+        "test_only_ptv_overlap": "Test-only PTV overlap",
     }
     for key, label in labels.items():
         assert key in CANONICAL_METRIC_COLUMNS

@@ -29,6 +29,9 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   contour is the truncated one when the drawer truncates. The columns are blank
   for a consensus ground truth and for a structure set with no structure typed
   PTV; the audit sidecar records why, and which PTVs were combined.
+- **Test-only PTV overlap**, a fourth column: True when the test contour
+  overlaps the PTV and the ground truth's does not, the case the Report tab
+  counts. Blank wherever the volumes are.
 - **The coverage table counts test-only overlaps**: per organ and source, how
   many test contours overlap the PTV where the ground truth's does not, as
   *k of n*, on the Report tab and in the PDF. The test overlap and the

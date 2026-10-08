@@ -116,6 +116,7 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
     "gt_ptv_overlap_cc",
     "test_ptv_overlap_cc",
     "ptv_overlap_diff_cc",
+    "test_only_ptv_overlap",
     # Whether the test contour skips a slice.
     "contour_discontinuity",
     # STAPLE per-rater
@@ -190,6 +191,7 @@ _METRIC_LABELS: dict[str, str] = {
     "gt_ptv_overlap_cc": "GT overlap with PTV (cc)",
     "test_ptv_overlap_cc": "Test overlap with PTV (cc)",
     "ptv_overlap_diff_cc": "PTV overlap difference (cc)",
+    "test_only_ptv_overlap": "Test-only PTV overlap",
     "contour_discontinuity": "Contour Discontinuity",
     # DVH (static)
     "dose_coverage_pct": "Dose grid coverage (%)",
