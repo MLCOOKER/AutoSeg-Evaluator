@@ -4,8 +4,9 @@ Eight changes were scoped together on 2026-09-15 and are being released as one
 version, because several of them move numbers and shipping them separately
 would produce three releases whose results cannot be compared with each other.
 
-Nothing here is released. This file records where each item stands so the scope
-of v3.0.0 is legible from the repository rather than from memory.
+**Released as v3.0.0 on 2026-10-08**, from `main`, with portable downloads for
+Windows and Linux. This file records where each item stood, so the scope of
+v3.0.0 is legible from the repository rather than from memory.
 
 **Checkpoint: 2026-09-26**, with #7 done and the external audit's findings
 fixed: branch `v3-dev`; 1265 tests pass; `ruff check` and `ruff format --check`
@@ -24,7 +25,7 @@ clean.
 | 5 | Two-stream metric architecture | **Done**, all seven phases |
 | 6 | Canonical organ bucketing + statistics | **Done**, both halves |
 | 7 | Quantify DVH on mask vs on RTSS | **Done** — DVH now integrated over the contours |
-| 8 | Validation report for the Stream B metrics | **Partly done** — synthetic and analytic halves written |
+| 8 | Validation report for the Stream B metrics | **Partly done** — synthetic and analytic halves written; the report on the paper's own data follows the release (documentation only) |
 
 ---
 
@@ -353,11 +354,9 @@ the README and overview say what it covers.
   Qt platform reports zero font families, so headless renders show every glyph
   as a box. Layout, tables, figures and the masthead are verified; the type is
   not.
-- **`main` is 16 commits ahead of `origin/main`.** Nothing is at risk — every
-  one of those commits is contained in `origin/v3-dev` — but `origin/main` does
-  not yet show the rasteriser, linking or organ-grouping work.
 - **Four changes move numbers**: the DVH now integrated over the contours
   (every dose statistic), the rasteriser default, the half-open fill
   under the shared contour reading (vendor A in particular), and the removal of
   mask-APL in phase 7. Results produced before and after v3.0.0 are not directly
-  comparable, and the release notes have to say so plainly.
+  comparable, and the release notes have to say so plainly — they do, from
+  the summary at the top of the 3.0.0 entry in `CHANGELOG.md`.

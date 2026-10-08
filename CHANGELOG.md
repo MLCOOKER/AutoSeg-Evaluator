@@ -6,6 +6,36 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-10-08
+
+A second, contour-based metric stream, a statistical Report tab, data linking by
+explicit DICOM references, and validated downloads for Windows and Linux.
+
+**Results are not directly comparable with v2.** Four changes move numbers:
+every dose statistic (the DVH is now integrated over the contours instead of
+computed by dicompyler-core), the binary-mask rasteriser (masks are smaller,
+most of all for small structures), the half-open fill under the shared contour
+reading, and added path length, which now comes only from the 2D contours
+(mask APL is removed).
+
+- **2D contour metrics**, computed on the stored polygons by a compiled
+  engine: added path length and its normalised form, 2D HD95 and HD100, and
+  mean and median contour distance.
+- **Precision and recall** among the 3D mask metrics.
+- **A Report tab**: paired statistics per organ (Wilcoxon signed-rank test,
+  Hodges–Lehmann interval), a forest plot, a paired-difference view, coverage
+  and acquisition tables, and a PDF export.
+- **Data linking by explicit DICOM references** (dose, structure set, CT
+  series), with any ambiguity resolved on the Load Data tab before computing.
+- **Organ grouping** across naming variants, and a corrected TG-263 synonym
+  dictionary.
+- **Contour checks on every run**: overlap with the PTV, and slices a test
+  contour skips.
+- **Validation reports** for the DVH, the rasteriser, the 2D metrics, the
+  surface-distance code and STAPLE, in `docs/validation/`.
+- **Portable downloads** for Windows and, new, Linux x86-64, each with the
+  validated compiled engine for the 2D metrics.
+
 ### Added — Linux: the compiled 2D engine and a portable download, October 2026
 - **The 2D contour metrics' compiled engine ships for Linux x86-64.** It was
   built once by a new workflow (`.github/workflows/linux-library.yml`) with

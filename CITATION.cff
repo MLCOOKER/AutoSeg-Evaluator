@@ -8,7 +8,7 @@ authors:
     given-names: Branimir
     email: branimir.rusanov@research.uwa.edu.au
     affiliation: "University of Western Australia"
-    orcid: "https://orcid.org/0000-0000-0000-0000"
+    orcid: "https://orcid.org/0000-0002-3804-5111"
   - family-names: Rowshanfarzad
     given-names: Pejman
     affiliation: "University of Western Australia"
@@ -21,7 +21,8 @@ authors:
   - family-names: Kendrick
     given-names: Jake
     affiliation: "University of Western Australia"
-version: "2.3.0"
+version: "3.0.0"
+date-released: "2026-10-08"
 license: Apache-2.0
 repository-code: "https://github.com/MLCOOKER/AutoSeg-Evaluator"
 url: "https://zenodo.org/records/17383138"

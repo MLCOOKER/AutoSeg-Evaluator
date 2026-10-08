@@ -155,11 +155,52 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: bundle-*
           path: dist
           merge-multiple: true
+
+      # The notes open with the version's summary from CHANGELOG.md - the
+      # text above its first subsection - and a tag without one fails here
+      # rather than publishing a release that says nothing.
+      - name: Write the release notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## [${version}]" '
+            index($0, heading) == 1 { on = 1; next }
+            on && (/^### / || /^## \[/) { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md || { echo "CHANGELOG.md has no summary for ${version}"; exit 1; }
+          cat >> notes.md <<'EOF'
+
+          ### Downloads
+
+          No Python install required; nothing is installed.
+
+          **Windows 10 / 11 (64-bit):** download `AutoSegEvaluator-v….zip`,
+          extract it anywhere (including a USB stick), and double-click
+          `Run AutoSeg Evaluator.bat`.
+
+          **Linux (x86-64):** download `AutoSegEvaluator-v…-linux-x86_64.tar.gz`,
+          extract it (`tar -xzf …`), and run `./run-autoseg-evaluator.sh`.
+          The `README.txt` inside states the oldest glibc it needs.
+
+          Each bundle ships a self-contained CPython 3.11 runtime and every
+          dependency as inspectable files under `site-packages` (no frozen
+          executable), and the validated compiled engine for the 2D contour
+          metrics.
+
+          See the [README](https://github.com/MLCOOKER/AutoSeg-Evaluator/blob/main/README.md)
+          for usage, citation and source installation, and
+          [CHANGELOG.md](https://github.com/MLCOOKER/AutoSeg-Evaluator/blob/main/CHANGELOG.md)
+          for every change.
+          EOF
 
       - name: Attach both bundles to the GitHub Release
         uses: softprops/action-gh-release@v2
@@ -167,21 +208,4 @@ jobs:
           files: dist/*
           draft: false
           generate_release_notes: true
-          body: |
-            **Portable bundles** — no Python install required, nothing installed.
-
-            **Windows 10 / 11 (64-bit):** download `AutoSegEvaluator-v….zip`,
-            extract it anywhere (including a USB stick), and double-click
-            `Run AutoSeg Evaluator.bat`.
-
-            **Linux (x86-64):** download `AutoSegEvaluator-v…-linux-x86_64.tar.gz`,
-            extract it (`tar -xzf …`), and run `./run-autoseg-evaluator.sh`.
-            The `README.txt` inside states the oldest glibc it needs.
-
-            Each bundle ships a self-contained CPython 3.11 runtime and every
-            dependency as inspectable files under `site-packages` — no frozen
-            executable, hospital-IT friendly — and the validated compiled
-            engine for the 2D contour metrics.
-
-            See the [README](https://github.com/MLCOOKER/AutoSeg-Evaluator/blob/main/README.md)
-            for usage, citation, and source installation.
+          body_path: notes.md
