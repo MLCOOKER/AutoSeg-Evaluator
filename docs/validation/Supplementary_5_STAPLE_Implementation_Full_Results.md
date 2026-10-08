@@ -1,6 +1,6 @@
 # Supplementary 5 - STAPLE Implementation: full results
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f · computed 2026-10-02 by `scripts/validate_staple_against_upstream.py`. The summary is [Supplementary 5](Supplementary_5_STAPLE_Implementation.md). Regenerate this file rather than editing it.
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_staple_against_upstream.py`. The summary is [Supplementary 5](Supplementary_5_STAPLE_Implementation.md). Regenerate this file rather than editing it.
 
 **Privacy:** this file contains no PHI. ROI display names (organ names) are shown; no SOPInstanceUIDs, filenames, patient identifiers, dates, or institution metadata are included.
 
@@ -20,7 +20,7 @@ The reconstruction is given AutoSeg's iteration cap, so it checks the wrapper, n
 
 | Component | Version |
 | --- | --- |
-| AutoSeg Evaluator | `2.6.1, commit 9dc078f` |
+| AutoSeg Evaluator | `3.0.0, commit 85e6c28` |
 | Python | `3.12.3` |
 | Operating system | `Windows 10` |
 | SimpleITK | `2.3.1` |
@@ -114,7 +114,7 @@ STAPLE estimates each rater's specificity, and the prior probability of foregrou
 - **Whole-image STAPLE left an organ empty that the crop did not:** 0 / 55; the crop one the whole image did not: 0 / 55.
 - **Padding AutoSeg chose:** 2 voxels.
 - **A 25-voxel box gives the whole image's consensus, voxel for voxel:** 55 / 55 organs.
-- **Time per organ:** median 0.44 s cropped, 7.8 s over the whole image (largest 1.6 s and 60.9 s).
+- **Time per organ:** median 0.45 s cropped, 7.8 s over the whole image (largest 1.6 s and 60.4 s).
 
 Organs whose consensus differs over the whole image:
 

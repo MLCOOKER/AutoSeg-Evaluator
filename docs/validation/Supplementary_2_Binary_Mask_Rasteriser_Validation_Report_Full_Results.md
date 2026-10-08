@@ -1,6 +1,6 @@
 # Supplementary 2 - Binary Mask Rasteriser Validation Report: full results
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f with uncommitted source changes · computed 2026-10-02 by `scripts/validate_rasterisation_fidelity.py` · 108 configurations, 14 shape families. The summary is [Supplementary 2](Supplementary_2_Binary_Mask_Rasteriser_Validation_Report.md). Regenerate this file rather than editing it.
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_rasterisation_fidelity.py` · 108 configurations, 14 shape families. The summary is [Supplementary 2](Supplementary_2_Binary_Mask_Rasteriser_Validation_Report.md). Regenerate this file rather than editing it.
 
 ## The benchmark
 

@@ -1,6 +1,6 @@
 # Supplementary 5 - STAPLE Implementation
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f · computed 2026-10-02 by `scripts/validate_staple_against_upstream.py`. Every table behind this report is in its [full results](Supplementary_5_STAPLE_Implementation_Full_Results.md).
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_staple_against_upstream.py`. Every table behind this report is in its [full results](Supplementary_5_STAPLE_Implementation_Full_Results.md).
 
 ## Aim
 
@@ -53,13 +53,13 @@ Over the whole image, STAPLE gave the same consensus as AutoSeg's crop for 50 of
 | ln_neck_viia_l | 3 | +0.6 % | 0.9971 |
 | larynx | 4 | +0.1 % | 0.9995 |
 
-No organ was left empty either way. A box widened by 25 voxels gave the whole image's consensus, voxel for voxel, for 55 of 55 organs. The margin AutoSeg chose was 2 voxels. Median time per organ: 0.44 s cropped and 7.8 s over the whole image.
+No organ was left empty either way. A box widened by 25 voxels gave the whole image's consensus, voxel for voxel, for 55 of 55 organs. The margin AutoSeg chose was 2 voxels. Median time per organ: 0.45 s cropped and 7.8 s over the whole image.
 
 ## Findings
 
 - **AutoSeg's STAPLE is SimpleITK's STAPLE.** Its consensus matched an independent reconstruction bit for bit on all 55 organs, so the crop, the threshold and the pad-back are implemented as described, and the estimates are SimpleITK's own.
 - **STAPLE runs to convergence.** No organ reached the cap of 500 (the most any needed was 151), so every consensus is the one SimpleITK gives with no limit. The earlier cap of 100 stopped 2 organs short of convergence, without changing their consensus; version 3 raised it to 500, the largest the Compute tab allows, so that STAPLE's estimates are always its converged ones.
-- **The crop changes the consensus slightly, and is kept deliberately.** STAPLE estimates each rater's specificity, and the prior probability that a voxel belongs to the organ, from every voxel it is given. Over a whole CT, both are dominated by background that every rater agrees on, so they depend on how much air and body the scan happens to include, which has nothing to do with the contours. Estimating only in the organ's neighbourhood, where the raters' contours actually differ, makes the consensus depend on the contours. Other approaches restrict STAPLE's estimation differently, for example by ignoring the voxels on which all raters agree [3]. Here the cost was small: 50 of 55 organs were identical, and the other 5 were larger over the whole image by 0.1-8.0 % in volume (Dice at least 0.96). The crop also makes STAPLE about 18 times faster.
+- **The crop changes the consensus slightly, and is kept deliberately.** STAPLE estimates each rater's specificity, and the prior probability that a voxel belongs to the organ, from every voxel it is given. Over a whole CT, both are dominated by background that every rater agrees on, so they depend on how much air and body the scan happens to include, which has nothing to do with the contours. Estimating only in the organ's neighbourhood, where the raters' contours actually differ, makes the consensus depend on the contours. Other approaches restrict STAPLE's estimation differently, for example by ignoring the voxels on which all raters agree [3]. Here the cost was small: 50 of 55 organs were identical, and the other 5 were larger over the whole image by 0.1-8.0 % in volume (Dice at least 0.96). The crop also makes STAPLE about 17 times faster.
 - **The consensus depends on how much background the box holds.** A margin of 25 voxels already gave the whole image's consensus for 55 of 55 organs. AutoSeg's margin stayed at its 2-voxel minimum on every organ, because each already filled less than 50% of its box, so its consensus is STAPLE estimated in the organ's immediate neighbourhood. The specificities AutoSeg reports are therefore relative to that neighbourhood, not to the whole scan.
 - **Limits.** One case, with 2-6 raters per organ. The comparisons test the implementation and the effect of its two settings, not how close any consensus is to the true anatomy.
 

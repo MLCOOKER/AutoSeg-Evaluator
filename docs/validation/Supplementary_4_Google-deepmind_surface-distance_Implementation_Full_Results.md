@@ -1,6 +1,6 @@
 # Supplementary 4 - Google-deepmind/surface-distance Implementation: full results
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f · generated 2026-10-02 by `scripts/validate_surface_distance_equivalence.py` · surface-distance 0.1, NumPy 1.26.4, SciPy 1.13.1, SimpleITK 2.3.1 · 1,000 mask pairs · 29 s. The summary is [Supplementary 4](Supplementary_4_Google-deepmind_surface-distance_Implementation.md). Regenerate this file rather than editing it.
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_surface_distance_equivalence.py` · surface-distance 0.1, NumPy 1.26.4, SciPy 1.13.1, SimpleITK 2.3.1 · 1,000 mask pairs · 28 s. The summary is [Supplementary 4](Supplementary_4_Google-deepmind_surface-distance_Implementation.md). Regenerate this file rather than editing it.
 
 ## What was compared
 

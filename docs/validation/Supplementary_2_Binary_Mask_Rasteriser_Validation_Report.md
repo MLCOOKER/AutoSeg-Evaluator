@@ -1,6 +1,6 @@
 # Supplementary 2 - Binary Mask Rasteriser Validation Report
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f with uncommitted source changes · computed 2026-10-02 by `scripts/validate_rasterisation_fidelity.py`. Every table behind this report is in its [full results](Supplementary_2_Binary_Mask_Rasteriser_Validation_Report_Full_Results.md).
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_rasterisation_fidelity.py`. Every table behind this report is in its [full results](Supplementary_2_Binary_Mask_Rasteriser_Validation_Report_Full_Results.md).
 
 ## Aim
 

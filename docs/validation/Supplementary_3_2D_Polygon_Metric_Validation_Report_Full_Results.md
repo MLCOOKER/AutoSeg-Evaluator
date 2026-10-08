@@ -1,6 +1,6 @@
 # Supplementary 3 - 2D Polygon Metric Validation Report: full results
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f with uncommitted source changes · computed 2026-10-02 by `scripts/validate_polygon_analytic.py` · engine fast 0.2.0.dev2 · 150 pairs from the published DICOM files · 110 s. The summary is [Supplementary 3](Supplementary_3_2D_Polygon_Metric_Validation_Report.md). Regenerate this file rather than editing it.
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_polygon_analytic.py` · engine fast 0.2.0.dev2 · 150 pairs from the published DICOM files · 109 s. The summary is [Supplementary 3](Supplementary_3_2D_Polygon_Metric_Validation_Report.md). Regenerate this file rather than editing it.
 
 ## What is compared
 

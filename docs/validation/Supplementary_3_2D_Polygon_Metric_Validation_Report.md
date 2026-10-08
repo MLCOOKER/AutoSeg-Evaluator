@@ -1,6 +1,6 @@
 # Supplementary 3 - 2D Polygon Metric Validation Report
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f with uncommitted source changes · computed 2026-10-02 by `scripts/validate_polygon_analytic.py`. Every table behind this report is in its [full results](Supplementary_3_2D_Polygon_Metric_Validation_Report_Full_Results.md).
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_polygon_analytic.py`. Every table behind this report is in its [full results](Supplementary_3_2D_Polygon_Metric_Validation_Report_Full_Results.md).
 
 ## Aim
 
@@ -81,4 +81,4 @@ For every quantity on every grid, the high-precision values for the stored conto
 python scripts/validate_polygon_analytic.py --data <folder holding the dataset and the authors' repository>
 ```
 
-The run took 110 s; `--render-only` rewrites this report from the last run's results. Regenerate this report rather than editing it.
+The run took 109 s; `--render-only` rewrites this report from the last run's results. Regenerate this report rather than editing it.

@@ -1,6 +1,6 @@
 # Supplementary 4 - Google-deepmind/surface-distance Implementation
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f · generated 2026-10-02 by `scripts/validate_surface_distance_equivalence.py`. Every table behind this report is in its [full results](Supplementary_4_Google-deepmind_surface-distance_Implementation_Full_Results.md).
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_surface_distance_equivalence.py`. Every table behind this report is in its [full results](Supplementary_4_Google-deepmind_surface-distance_Implementation_Full_Results.md).
 
 ## Aim
 
@@ -82,4 +82,4 @@ Where the test mask is empty, both return an infinite Hausdorff distance and an 
 python scripts/validate_surface_distance_equivalence.py
 ```
 
-It needs the library itself (`pip install git+https://github.com/google-deepmind/surface-distance`). Every input is synthetic; the run took 29 s. Regenerate this report rather than editing it.
+It needs the library itself (`pip install git+https://github.com/google-deepmind/surface-distance`). Every input is synthetic; the run took 28 s. Regenerate this report rather than editing it.

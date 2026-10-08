@@ -1,6 +1,6 @@
 # Supplementary 1 - DVH Validation Report: full results
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f · computed 2026-10-02 by `scripts/validate_dvh_methods.py` and `scripts/validate_dvh_mask_vs_polygon.py`. The summary is [Supplementary 1](Supplementary_1_DVH_Validation_Report.md). Regenerate this file rather than editing it.
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_dvh_methods.py` and `scripts/validate_dvh_mask_vs_polygon.py`. The summary is [Supplementary 1](Supplementary_1_DVH_Validation_Report.md). Regenerate this file rather than editing it.
 
 ## Part A: the DVH method against analytic truth
 
@@ -160,8 +160,8 @@ Median seconds for one structure and one dose, from nothing.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | R = 2.5 mm | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 |
 | R = 5 mm | 0.01 | 0.05 | 0.01 | 0.02 | 0.02 | 0.02 |
-| R = 10 mm | 0.06 | 0.28 | 0.01 | 0.09 | 0.11 | 0.11 |
-| R = 20 mm | 0.23 | 1.88 | 0.03 | 0.63 | 0.57 | 0.57 |
+| R = 10 mm | 0.06 | 0.28 | 0.01 | 0.09 | 0.10 | 0.10 |
+| R = 20 mm | 0.23 | 1.84 | 0.03 | 0.65 | 0.56 | 0.57 |
 
 ### Sub-sample spacing: accuracy against cost
 
@@ -169,11 +169,11 @@ The two sub-sampled methods at three spacings, on the 30 Test 2 datasets (Dmin a
 
 | Method | > 3 % | > 2 % | Worst |%| | Samples | Seconds |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| mask-ss @ 1 mm | 36/195 | 46/195 | 25.4 | 20,088 | 0.05 |
+| mask-ss @ 1 mm | 36/195 | 46/195 | 25.4 | 20,088 | 0.04 |
 | mask-ss @ 0.5 mm | 13/195 | 23/195 | 19.4 | 449,280 | 0.11 |
-| mask-ss @ 0.25 mm | 10/195 | 22/195 | 22.2 | 808,704 | 0.16 |
+| mask-ss @ 0.25 mm | 10/195 | 22/195 | 22.2 | 808,704 | 0.14 |
 | polygon @ 1 mm | 35/195 | 46/195 | 25.4 | 21,572 | 0.02 |
-| polygon @ 0.5 mm | 14/195 | 22/195 | 19.4 | 459,900 | 0.08 |
+| polygon @ 0.5 mm | 14/195 | 22/195 | 19.4 | 459,900 | 0.07 |
 | polygon @ 0.25 mm | 10/195 | 20/195 | 22.2 | 827,820 | 0.12 |
 
 ### Large structures: time against accuracy
@@ -187,11 +187,11 @@ From reading the contours to the statistics, single-threaded, on the machine nam
 | Structure | dicompyler | autoseg | mask | mask-ss @ 1 mm | mask-ss @ 0.5 mm | mask-ss @ 0.25 mm | polygon @ 1 mm | polygon @ 0.5 mm | polygon @ 0.25 mm |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | sphere, R 10 mm (4 cc) | 0.04 | 0.09 (0.5 M) | 0.02 (0.0 M) | 0.02 (0.0 M) | 0.03 (0.1 M) | 0.07 (0.5 M) | 0.02 (0.0 M) | 0.03 (0.1 M) | 0.09 (0.5 M) |
-| sphere, R 20 mm (33 cc) | 0.17 | 0.45 (4.0 M) | 0.03 (0.0 M) | 0.04 (0.1 M) | 0.12 (0.8 M) | 0.54 (3.9 M) | 0.05 (0.1 M) | 0.15 (0.8 M) | 0.45 (4.0 M) |
-| sphere, R 40 mm (268 cc) | 0.93 | 0.80 (6.4 M) | 0.08 (0.1 M) | 0.11 (0.4 M) | 0.86 (6.3 M) | 4.22 (31.6 M) | 0.15 (0.4 M) | 0.80 (6.4 M) | 3.93 (31.8 M) |
-| sphere, R 60 mm (905 cc) | 2.50 | 0.30 (1.5 M) | 0.14 (0.5 M) | 0.22 (1.4 M) | 2.89 (21.3 M) | 14.18 (106.6 M) | 0.31 (1.5 M) | 2.72 (21.5 M) | 14.42 (107.1 M) |
-| cylinder, R 80 mm (3,177 cc) | 6.18 | 0.72 (5.1 M) | 0.28 (1.7 M) | 0.71 (5.0 M) | 10.04 (74.9 M) | 50.06 (374.5 M) | 0.73 (5.1 M) | 11.01 (75.3 M) | 52.06 (375.6 M) |
-| cylinder, R 100 mm (6,220 cc) | 10.97 | 1.25 (9.9 M) | 0.47 (3.3 M) | 1.31 (9.8 M) | 19.66 (146.6 M) | 97.72 (732.9 M) | 1.25 (9.9 M) | 21.25 (147.2 M) | 102.33 (735.0 M) |
+| sphere, R 20 mm (33 cc) | 0.17 | 0.44 (4.0 M) | 0.03 (0.0 M) | 0.04 (0.1 M) | 0.12 (0.8 M) | 0.57 (3.9 M) | 0.05 (0.1 M) | 0.15 (0.8 M) | 0.45 (4.0 M) |
+| sphere, R 40 mm (268 cc) | 0.91 | 0.78 (6.4 M) | 0.07 (0.1 M) | 0.10 (0.4 M) | 0.90 (6.3 M) | 4.33 (31.6 M) | 0.15 (0.4 M) | 0.78 (6.4 M) | 3.78 (31.8 M) |
+| sphere, R 60 mm (905 cc) | 2.46 | 0.30 (1.5 M) | 0.14 (0.5 M) | 0.22 (1.4 M) | 2.90 (21.3 M) | 14.79 (106.6 M) | 0.30 (1.5 M) | 2.62 (21.5 M) | 14.33 (107.1 M) |
+| cylinder, R 80 mm (3,177 cc) | 6.11 | 0.71 (5.1 M) | 0.28 (1.7 M) | 0.69 (5.0 M) | 10.36 (74.9 M) | 51.35 (374.5 M) | 0.71 (5.1 M) | 10.80 (75.3 M) | 52.17 (375.6 M) |
+| cylinder, R 100 mm (6,220 cc) | 10.85 | 1.23 (9.9 M) | 0.46 (3.3 M) | 1.28 (9.8 M) | 20.34 (146.6 M) | 100.91 (732.9 M) | 1.24 (9.9 M) | 21.22 (147.2 M) | 104.44 (735.0 M) |
 
 #### Accuracy
 
@@ -273,7 +273,7 @@ Lowest to highest volume error (%).
 
 ## Part B: DVH from a mask against DVH from the contours
 
-From `scripts/validate_dvh_mask_vs_polygon.py`, a run of 6 minutes.
+From `scripts/validate_dvh_mask_vs_polygon.py`, a run of 5 minutes.
 
 100 structure/dose cases from Nelms et al. 2015, each through both paths.
 

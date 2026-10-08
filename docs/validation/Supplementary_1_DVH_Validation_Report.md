@@ -1,6 +1,6 @@
 # Supplementary 1 - DVH Validation Report
 
-AutoSeg Evaluator 2.6.1, commit 9dc078f · computed 2026-10-02 by `scripts/validate_dvh_methods.py` and `scripts/validate_dvh_mask_vs_polygon.py`. Every table behind this report is in its [full results](Supplementary_1_DVH_Validation_Report_Full_Results.md).
+AutoSeg Evaluator 3.0.0, commit 85e6c28 · computed 2026-10-08 by `scripts/validate_dvh_methods.py` and `scripts/validate_dvh_mask_vs_polygon.py`. Every table behind this report is in its [full results](Supplementary_1_DVH_Validation_Report_Full_Results.md).
 
 ## Aim
 
@@ -81,7 +81,7 @@ How finely to sample. The contour-polygon method at three sub-cell spacings on T
 | Sub-cell spacing | Test 2 beyond 3 % | Worst error (%) | Samples | Seconds |
 | --- | ---: | ---: | ---: | ---: |
 | 1 mm | 35/195 | 25.4 | 21,572 | 0.02 |
-| 0.5 mm | 14/195 | 19.4 | 459,900 | 0.08 |
+| 0.5 mm | 14/195 | 19.4 | 459,900 | 0.07 |
 | 0.25 mm | 10/195 | 22.2 | 827,820 | 0.12 |
 
 For large structures, the time for one structure against one dose, with AutoSeg's rule and with 0.25 mm throughout, and AutoSeg's worst dose error expressed as the boundary shift that would cause it:
@@ -89,11 +89,11 @@ For large structures, the time for one structure against one dose, with AutoSeg'
 | Structure | AutoSeg v3: spacing | AutoSeg v3: seconds | 0.25 mm throughout: seconds | AutoSeg v3: worst error (mm) |
 | --- | ---: | ---: | ---: | ---: |
 | sphere, 4 cc | 0.25 mm | 0.09 | 0.09 | 0.003 |
-| sphere, 33 cc | 0.25 mm | 0.45 | 0.45 | 0.008 |
-| sphere, 268 cc | 0.5 mm | 0.80 | 3.93 | 0.005 |
-| sphere, 905 cc | 1 mm | 0.30 | 14.42 | 0.091 |
-| cylinder, 3,177 cc | 1 mm | 0.72 | 52.06 | 0.006 |
-| cylinder, 6,220 cc | 1 mm | 1.25 | 102.33 | 0.155 |
+| sphere, 33 cc | 0.25 mm | 0.44 | 0.45 | 0.008 |
+| sphere, 268 cc | 0.5 mm | 0.78 | 3.78 | 0.005 |
+| sphere, 905 cc | 1 mm | 0.30 | 14.33 | 0.091 |
+| cylinder, 3,177 cc | 1 mm | 0.71 | 52.17 | 0.006 |
+| cylinder, 6,220 cc | 1 mm | 1.23 | 104.44 | 0.155 |
 
 ### A test contour against a consensus mask
 
@@ -118,7 +118,7 @@ Given three identical masks, STAPLE returned the mask itself for all 50 structur
 - **The v3 DVH method is accurate.** It had fewer statistics beyond 3 % than either commercial system in both tests (0 and 10, against 5 and 18 for PlanIQ and 32 and 53 for Pinnacle³). Its volume error along the whole DVH (-2.0 to +0.7 %) spans 2.7 percentage points, against 2.3 for PlanIQ (-1.5 to +0.8 %) and 19.1 for Pinnacle³ (-11.2 to +7.9 %).
 - **Why dicompyler-core was replaced.** As used in v1-v2 it had 119 and 140 statistics beyond 3 % in Tests 1 and 2, and reported D99 as 0 Gy in 49 of 100 cases. Reading D*x* correctly from its histogram still leaves 83 and 103, because it also samples the dose only once per dose voxel in each contour plane, so correcting it would not have been enough.
 - **Why contour polygons rather than a mask.** On the Nelms data the sub-sampled mask had 0, 10 and 10 statistics beyond 3 % in the three tests, against 0, 10 and 11 for AutoSeg v3; on the disc phantoms its worst error reached 0.64 Gy against 0.11 Gy. A mask includes or leaves out whole voxels where a contour cuts through them, which matters most for small structures; the polygons have no such staircase.
-- **Why the 0.25, 0.5 or 1 mm rule.** 0.25 mm sub-cells were the most accurate tested on Test 2 (10 statistics beyond 3 %, against 14 at 0.5 mm, 35 at 1 mm), but their number grows with a structure's volume. At 0.25 mm throughout, the largest structure (6,220 cc) took 102 s; the rule sampled it at 1 mm in 1.3 s, with a worst dose error equal to a 0.15 mm boundary shift. Every Nelms and disc structure fell within the cap, so the rule sampled each at 0.25 mm and its results there are those of the finest method.
+- **Why the 0.25, 0.5 or 1 mm rule.** 0.25 mm sub-cells were the most accurate tested on Test 2 (10 statistics beyond 3 %, against 14 at 0.5 mm, 35 at 1 mm), but their number grows with a structure's volume. At 0.25 mm throughout, the largest structure (6,220 cc) took 104 s; the rule sampled it at 1 mm in 1.2 s, with a worst dose error equal to a 0.15 mm boundary shift. Every Nelms and disc structure fell within the cap, so the rule sampled each at 0.25 mm and its results there are those of the finest method.
 - **A DVH difference against a consensus carries the consensus's mask error.** When a test structure set is compared with a STAPLE consensus, the error expected on 1.37 mm pixels is up to 2.1 % for Dmean and 12.4 % for D99 (95th percentile; 1.3 % and 8.5 % on 1.07 mm pixels). It comes from representing the consensus on the CT voxel grid: a mask includes or excludes whole voxels where a contour passes through them, which can shift its boundary by up to half a voxel.
 - **So every contour takes its DVH from its contours, and only a consensus from its mask.** Computing the test's DVH from a mask as well (mask vs mask) does not cancel the consensus's error but adds a second, independent one: for copies shifted along the gradient, as any contour that genuinely differs from the consensus is, it had the largest error on every grid and statistic. It helped only for copies shifted across the gradient, which in effect coincide with the reference. Because the consensus's error is the same for every source compared with it, it cancels when sources are compared with each other.
 - **Limits.** These values apply to the Nelms structures (3.6-12.2 cc) in a 1 Gy/mm dose gradient. Smaller structures, such as a cochlea or the optic chiasm, and steeper gradients will show larger errors, and larger structures or shallower gradients smaller ones. The shifts tested are rigid; a test contour differing in shape makes the two masks' errors less alike still. A consensus of raters who disagree is validated in Supplementary 5.
