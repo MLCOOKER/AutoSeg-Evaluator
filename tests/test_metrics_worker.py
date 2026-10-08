@@ -115,3 +115,90 @@ def test_sens_spec_vs_reference_perfect_and_partial():
     s2, sp2 = sensitivity_specificity_vs_reference(ref, test)
     assert abs(s2 - 0.5) < 1e-9  # recovered half the reference voxels
     assert sp2 == 1.0  # no false positives outside the reference
+
+
+# ---- Treatment context stamped on every row -------------------------------
+
+
+def _worker_with(entries, series_for=None):
+    """A worker whose library resolves these RTSS entries for patient P1.
+
+    ``series_for`` maps a structure set UID to the planning series it resolves
+    to, standing in for the linkage layer.
+    """
+    worker = MetricsWorker.__new__(MetricsWorker)
+    worker._library = object()
+    worker._find_rtstruct_entry = lambda patient_id, sop: next(  # type: ignore[method-assign]
+        (e for e in entries if patient_id == "P1" and e.sop_instance_uid == sop), None
+    )
+    lookup = series_for or {}
+
+    def _resolve(_library, _patient_id, sop):
+        uid = lookup.get(sop)
+        return SimpleNamespace(
+            is_resolved=bool(uid), target=SimpleNamespace(series_instance_uid=uid or "")
+        )
+
+    import autoseg_evaluator.workers.metrics_worker as module
+
+    module.resolve_image_series = _resolve
+    return worker
+
+
+def test_a_row_carries_the_linkage_of_its_ground_truth():
+    """The GT structure set fixes the context every source is compared against."""
+    entries = [
+        SimpleNamespace(sop_instance_uid="gt-1", linkage_id="series:course-1"),
+        SimpleNamespace(sop_instance_uid="test-1", linkage_id="series:course-1"),
+    ]
+    worker = _worker_with(entries, {"gt-1": "ct-1", "test-1": "ct-1"})
+    group = {"patient_id": "P1", "gt_sop": "gt-1"}
+    assert worker._linkage_id(group, "test-1") == "series:ct-1"
+
+
+def test_a_staple_consensus_borrows_the_raters_linkage():
+    """The consensus has no structure set of its own, but was built from theirs."""
+    entries = [SimpleNamespace(sop_instance_uid="test-1", linkage_id="link:x")]
+    worker = _worker_with(entries, {"test-1": "ct-2"})
+    group = {"patient_id": "P1", "gt_sop": "", "_gt_synthetic": True}
+    assert worker._linkage_id(group, "test-1") == "series:ct-2"
+
+
+def test_an_unstamped_library_yields_an_empty_linkage():
+    """Which makes the report fall back to one case per patient, as before."""
+    entries = [SimpleNamespace(sop_instance_uid="gt-1")]  # no linkage_id at all
+    worker = _worker_with(entries)
+    assert worker._linkage_id({"patient_id": "P1", "gt_sop": "gt-1"}, "test-1") == ""
+    # Unknown structure set, and missing identifiers, are equally non-fatal.
+    assert worker._linkage_id({"patient_id": "P1", "gt_sop": "absent"}, "") == ""
+    assert worker._linkage_id({"patient_id": "", "gt_sop": ""}, "") == ""
+
+
+def test_two_courses_of_one_patient_get_different_linkages():
+    """The whole point: same PatientID, different treatment context."""
+    entries = [
+        SimpleNamespace(sop_instance_uid="gt-1", linkage_id="link:a"),
+        SimpleNamespace(sop_instance_uid="gt-2", linkage_id="link:b"),
+    ]
+    worker = _worker_with(entries, {"gt-1": "ct-1", "gt-2": "ct-2"})
+    first = worker._linkage_id({"patient_id": "P1", "gt_sop": "gt-1"}, "t")
+    second = worker._linkage_id({"patient_id": "P1", "gt_sop": "gt-2"}, "t")
+    assert first != second
+
+
+def test_a_vendors_wrong_frame_of_reference_does_not_split_the_case():
+    """Found on this project's own cohort, in Pelvis Male / Prostate4.
+
+    One vendor exported its structure set under a different
+    FrameOfReferenceUID for the same CT, so the ingest-time linkage put it in
+    its own component. Keyed on that stamp, the patient would have been split
+    into two cases and then withheld from every comparison involving that
+    vendor. Keyed on the planning image they resolve to, they are one case.
+    """
+    entries = [
+        SimpleNamespace(sop_instance_uid="gt-1", linkage_id="link:cdd22893"),
+        SimpleNamespace(sop_instance_uid="odd-vendor", linkage_id="for:1.2.246.352.221.5258"),
+    ]
+    worker = _worker_with(entries, {"gt-1": "ct-1", "odd-vendor": "ct-1"})
+    assert worker._linkage_id({"patient_id": "P1", "gt_sop": "gt-1"}, "t") == "series:ct-1"
+    assert worker._linkage_id({"patient_id": "P1", "gt_sop": "odd-vendor"}, "t") == "series:ct-1"

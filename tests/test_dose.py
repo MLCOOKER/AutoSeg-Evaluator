@@ -110,3 +110,48 @@ def test_read_dose_image_converts_cgy_to_gy(tmp_path):
     path = _write_rtdose(tmp_path, units="CGY", scaling=1.0)
     arr = sitk.GetArrayFromImage(read_dose_image(str(path)))
     assert arr[0, 0, 10] == pytest.approx(0.10, abs=1e-4)
+
+
+# ---- The viewer shows the dose the DVH integrates ------------------------------
+
+
+@pytest.mark.parametrize(
+    "offsets", [[0.0, 3.0, 6.0, 9.0, 12.0], [0.0, 2.0, 5.0, 9.0, 14.0]], ids=["even", "uneven"]
+)
+def test_the_overlay_is_the_dvhs_dose_at_every_voxel_centre(offsets):
+    """External audit: the viewer read the dose its own way. It now samples the
+    same DoseGrid the DVH integrates, so the overlay is that dose."""
+    from autoseg_evaluator.core.dose import dose_grid_on_reference
+    from autoseg_evaluator.core.dvh import DoseGrid
+
+    rows, columns = 9, 11
+    z, y, x = np.meshgrid(
+        np.asarray(offsets), np.arange(rows) * 2.5, np.arange(columns) * 2.5, indexing="ij"
+    )
+    grid = DoseGrid(
+        values=(10.0 + 0.3 * x + 0.2 * y + 0.5 * z).astype(np.float64),
+        origin=np.array([-5.0, -4.0, 10.0]),
+        row_direction=np.array([1.0, 0.0, 0.0]),
+        column_direction=np.array([0.0, 1.0, 0.0]),
+        normal=np.array([0.0, 0.0, 1.0]),
+        pixel_spacing=(2.5, 2.5),
+        frame_offsets=np.asarray(offsets, dtype=float),
+    )
+    reference = sitk.Image(20, 16, 12, sitk.sitkFloat32)
+    reference.SetSpacing((1.3, 1.1, 1.5))
+    reference.SetOrigin((-8.0, -6.0, 6.0))
+
+    shown = dose_grid_on_reference(grid, reference)
+
+    nx, ny, nz = reference.GetSize()
+    k, j, i = np.meshgrid(np.arange(nz), np.arange(ny), np.arange(nx), indexing="ij")
+    points = np.stack([i.ravel(), j.ravel(), k.ravel()], axis=1) * np.asarray(
+        reference.GetSpacing()
+    ) + np.asarray(reference.GetOrigin())
+    expected = np.nan_to_num(grid.sample(points), nan=0.0).reshape(nz, ny, nx)
+    inside = expected > 0
+    assert inside.sum() > 100
+    # Linear dose, trilinear interpolation: exact wherever both call it inside.
+    both = inside & (shown > 0)
+    assert both.sum() >= 0.95 * inside.sum()
+    np.testing.assert_allclose(shown[both], expected[both], atol=1e-4)

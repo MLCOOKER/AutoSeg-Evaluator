@@ -1,0 +1,36 @@
+{
+  "name": "The Vitruvian Man Dataset of Analytic calculations and synthetic shapes for validation of quantitative contour comparison software",
+  "doi": "10.17632/9xjyrftzth.1",
+  "version": 1,
+  "publish_date": "2022-11-17T14:54:08.153Z",
+  "licence": {
+    "id": "01d9c749-3c4d-4431-9df3-620b2dcfe144",
+    "short_name": "CC BY 4.0",
+    "full_name": "Creative Commons Attribution 4.0 International",
+    "description": "You can share, copy and modify this dataset so long as you give appropriate credit, provide a link to the CC BY license, and indicate if changes were made, but you may not do so in a way that suggests the rights holder has endorsed you or your use of the dataset. Note that further permission may be required for any content within the dataset that is identified as belonging to a third party.",
+    "url": "http://creativecommons.org/licenses/by/4.0",
+    "category": "Creative",
+    "customer_id": null
+  },
+  "contributors": [
+    {
+      "id": "6c807a77-b7c9-3ca8-855d-2b9cfc8b5994",
+      "first_name": "Djamal",
+      "last_name": "Boukerroui",
+      "$ref": "/profiles/6c807a77-b7c9-3ca8-855d-2b9cfc8b5994",
+      "institution": "Mirada Medical"
+    },
+    {
+      "first_name": "Mark",
+      "last_name": "Gooding",
+      "institution": "Mirada Medical"
+    }
+  ],
+  "related_links": [
+    {
+      "relation_type": "related_to",
+      "href": "https://github.com/Vitruvian-phantom-for-RadOnc/VitruvianPhantomPy",
+      "source_type": "software"
+    }
+  ]
+}

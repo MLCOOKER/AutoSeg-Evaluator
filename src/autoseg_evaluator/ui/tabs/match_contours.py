@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pydicom
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
@@ -48,24 +49,33 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from autoseg_evaluator.core.dose import dose_array_on_reference
+from autoseg_evaluator.core.dose import dose_grid_on_reference
+from autoseg_evaluator.core.dvh import DoseGrid
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
-    find_reference_image_folder,
-    read_dicom_image,
+    load_reference_image,
     read_rtstruct,
     truncate_to_gt_z_extent,
 )
 from autoseg_evaluator.core.matching import (
     ReplacementRule,
     best_match,
+    is_mismatch,
     similarity,
+)
+from autoseg_evaluator.core.organ_groups import AUTOMATIC_TIERS, QUALIFIER_OAR
+from autoseg_evaluator.core.staple import StapleConfig, staple_from_structures
+from autoseg_evaluator.data.linkage import (
+    consensus_constituents,
+    planning_series_uid,
+    resolve_dose,
 )
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
     OrganEntry,
     RTSTRUCTEntry,
 )
+from autoseg_evaluator.data.organ_index import drawer_consensus
 from autoseg_evaluator.data.synonyms import flatten_synonyms, load_synonyms
 from autoseg_evaluator.ui.dialogs.replacement_rules import ReplacementRulesDialog
 from autoseg_evaluator.ui.dialogs.template import TemplateDialog
@@ -83,6 +93,10 @@ _STATUS_VISIBLE_MS = 6000
 
 class MatchContoursTab(QWidget):
     """The Match Contours screen — left panel (tree) + right panel (drawers)."""
+
+    #: Emitted when the user asks to label drawers the dictionary could not
+    #: name. MainWindow owns the organ index and the saved labels.
+    organLabelsRequested = Signal()
 
     # Workflow strip signals (kept for back-compat; the tab now handles them itself).
     replacementRulesRequested = Signal()
@@ -104,8 +118,8 @@ class MatchContoursTab(QWidget):
         self._focused_drawer: OrganDrawer | None = None
         self._synonyms_flat: dict[str, str] = flatten_synonyms(load_synonyms(synonyms_path()))
         # Remember the last Auto-Match GT identifier so we can detect a
-        # manufacturer/filename change between runs and clear stale drawers.
-        self._last_auto_match_identifier: tuple[str, str] | None = None
+        # source-label change between runs and clear stale drawers.
+        self._last_auto_match_identifier: str | None = None
         # Bounded undo history of session_state() snapshots; pushed before
         # every drawer-mutating operation. Most recent state on top.
         self._undo_stack: list[list[dict[str, Any]]] = []
@@ -118,6 +132,10 @@ class MatchContoursTab(QWidget):
         # Persisted in the session JSON so the rejection memory survives
         # save/load cycles.
         self._test_denylist: dict[tuple[str, str], set[tuple[str, int]]] = {}
+        # ``(patient_id, sop_uid)`` of structure sets auto-match passed over
+        # because they were drawn on a different planning image from the GT.
+        # Reset per matching pass and reported in its status line.
+        self._skipped_other_image: set[tuple[str, str]] = set()
 
         self._build_ui()
 
@@ -142,6 +160,82 @@ class MatchContoursTab(QWidget):
             return
         self._tree.populate(library)
         self._set_empty_state(False)
+
+    def unrecognised_drawers(self) -> list:
+        """Drawers whose ground-truth name the dictionary could not place.
+
+        The worklist for Label Organs, and the count shown on its button.
+        """
+        index = getattr(self, "_organ_index", None)
+        if index is None:
+            return []
+        out = []
+        for drawer in self._drawers.values():
+            gt_names = [s.gt_roi_name for s in drawer.all_subsections() if s.gt_roi_name]
+            if not gt_names:
+                continue
+            recognised = any(
+                (placed := index.assignments.get(name)) is not None
+                and placed.tier in AUTOMATIC_TIERS
+                for name in gt_names
+            )
+            if recognised:
+                continue
+            # Same rule the dialog uses, so the count on the button matches
+            # what opening it actually shows.
+            first = next(
+                (index.assignments.get(n) for n in gt_names if index.assignments.get(n)),
+                None,
+            )
+            if first is not None and first.key.qualifier != QUALIFIER_OAR:
+                continue
+            out.append(drawer)
+        return out
+
+    def drawers(self) -> list:
+        return list(self._drawers.values())
+
+    def set_organ_index(self, index) -> None:
+        """Supply canonical organ grouping so drawers can show what they hold.
+
+        A drawer is named after whichever ground-truth ROI created it, so two
+        drawers can be the same organ spelled differently. The badge says which
+        organ a drawer will be grouped under, and flags a drawer whose patients
+        do not agree with each other.
+        """
+        self._organ_index = index
+        self._refresh_organ_badges()
+
+    def _refresh_organ_badges(self) -> None:
+        """Stamp every drawer with the organ it will be grouped under."""
+        index = getattr(self, "_organ_index", None)
+        for drawer in self._drawers.values():
+            if index is None:
+                drawer.set_canonical_organ("")
+                continue
+            gt_names = [sub.gt_roi_name for sub in drawer.all_subsections() if sub.gt_roi_name]
+            key, mixed = drawer_consensus(index, gt_names)
+            # Recognised only if the ground-truth name that produced this key
+            # came from the dictionary rather than standing alone.
+            recognised = any(
+                (assignment := index.get(name)) is not None
+                and assignment.key == key
+                and assignment.tier in AUTOMATIC_TIERS
+                for name in gt_names
+            )
+            drawer.set_canonical_organ(
+                key.label() if key else "", mixed=mixed, recognised=recognised
+            )
+        self._refresh_label_button()
+
+    def _refresh_label_button(self) -> None:
+        """Badge the Label Organs button with how many drawers still need one."""
+        button = getattr(self, "_label_organs_btn", None)
+        if button is None:
+            return
+        outstanding = len(self.unrecognised_drawers())
+        button.setText(f"4. Label Organs… ({outstanding})" if outstanding else "4. Label Organs…")
+        button.setEnabled(bool(outstanding))
 
     def drawer_for_organ(self, organ_name: str) -> OrganDrawer | None:
         return self._drawers.get(organ_name)
@@ -410,6 +504,18 @@ class MatchContoursTab(QWidget):
         self._run_match_btn.clicked.connect(self._on_run_auto_match_clicked)
         layout.addWidget(self._run_match_btn)
 
+        layout.addWidget(QLabel("→"))
+
+        self._label_organs_btn = QPushButton("4. Label Organs…")
+        self._label_organs_btn.setToolTip(
+            "The last step, once the drawers are clean: say which organ each drawer "
+            "holds where its ground-truth name is not one TG-263 recognises. "
+            "Suggestions come from the contours already matched into it. "
+            "This labels only - no drawer is merged, renamed or moved."
+        )
+        self._label_organs_btn.clicked.connect(self.organLabelsRequested.emit)
+        layout.addWidget(self._label_organs_btn)
+
         layout.addStretch(1)
 
         # Nuke-it-all button — wipes every drawer + clears the per-drawer
@@ -664,7 +770,13 @@ class MatchContoursTab(QWidget):
         tree's ✓ marks always reflect what is *actually* in the drawers right
         now. Cheaper and more correct than threading per-organ mark/unmark
         calls through every code path.
+
+        Organ badges are refreshed here for the same reason. The organ index
+        arrives when a folder loads, which is *before* auto-match has created
+        any drawer, so stamping badges only when the index is set leaves every
+        drawer blank forever.
         """
+        self._refresh_organ_badges()
         marks: set[tuple[str, str, int]] = set()
         for drawer in self._drawers.values():
             for triple in drawer.all_assigned_organs():
@@ -766,6 +878,7 @@ class MatchContoursTab(QWidget):
         self._push_undo_snapshot()
         skipped: list[str] = []
         new_subsections = 0
+        self._skipped_other_image = set()
         for patient_id, sop_uid, roi_number, roi_name in organs:
             rtss = _find_rtstruct(self._library, patient_id, sop_uid)
             if rtss is None:
@@ -826,6 +939,12 @@ class MatchContoursTab(QWidget):
             bits.append(f"Set {new_subsections} ground truth(s) and auto-matched tests.")
         if skipped:
             bits.append("Skipped: " + ", ".join(skipped))
+        if self._skipped_other_image:
+            count = len(self._skipped_other_image)
+            bits.append(
+                f"{count} structure set(s) drawn on a different planning image from "
+                "their patient's ground truth were not matched."
+            )
         if bits:
             self._show_status(" ".join(bits))
 
@@ -890,6 +1009,15 @@ class MatchContoursTab(QWidget):
             return []
         threshold = self._similarity_threshold()
         rules = self._replacement_rules()
+        # Only structure sets drawn on the GT's planning image are candidates.
+        # An external audit found a second course's structure set matched to
+        # the first course's GT with a perfect, unflagged name score, and then
+        # rasterised on the wrong CT. The test is the resolved planning series,
+        # not the Frame of Reference: a vendor in this project's own cohort
+        # wrote a different FrameOfReferenceUID for the same CT. Where either
+        # link is unresolved, Load Data has already raised it, so the match
+        # goes ahead as before.
+        gt_series = planning_series_uid(self._library, patient_id, gt_sop_uid)
         tests: list[TestRow] = []
         for ctx in patient.contexts:
             for rtss in ctx.rtstructs:
@@ -897,6 +1025,11 @@ class MatchContoursTab(QWidget):
                     continue
                 if not rtss.organs:
                     continue
+                if gt_series is not None:
+                    series = planning_series_uid(self._library, patient_id, rtss.sop_instance_uid)
+                    if series is not None and series != gt_series:
+                        self._skipped_other_image.add((patient_id, rtss.sop_instance_uid))
+                        continue
                 chosen, match = best_match(
                     gt_roi_name,
                     rtss.organs,
@@ -913,7 +1046,7 @@ class MatchContoursTab(QWidget):
                         rtstruct_sop_uid=rtss.sop_instance_uid,
                         roi_number=chosen.roi_number,
                         similarity=match.score,
-                        below_threshold=match.score < threshold,
+                        below_threshold=match.score < threshold or is_mismatch(match.method),
                         match_method=match.method,
                     )
                 )
@@ -971,13 +1104,22 @@ class MatchContoursTab(QWidget):
             if any(t.rtstruct_sop_uid == sop_uid and t.roi_number == roi_number for t in sub.tests):
                 skipped.append(f"{patient_id}/{roi_name} (already added)")
                 continue
+            gt_series = planning_series_uid(self._library, patient_id, sub.gt_rtstruct_sop_uid)
+            series = planning_series_uid(self._library, patient_id, sop_uid)
+            if gt_series is not None and series is not None and series != gt_series:
+                skipped.append(
+                    f"{patient_id}/{roi_name} (drawn on a different planning image from the GT)"
+                )
+                continue
             match = similarity(
                 roi_name,
                 sub.gt_roi_name,
                 rules=self._replacement_rules(),
                 synonyms_flat=self._synonyms_flat,
             )
-            below = match.score < self._similarity_threshold()
+            # A structural mismatch is flagged however well it scored — a high
+            # score is precisely when the warning matters.
+            below = match.score < self._similarity_threshold() or is_mismatch(match.method)
             sub.tests.append(
                 TestRow(
                     source_label=rtss.source_label,
@@ -998,11 +1140,14 @@ class MatchContoursTab(QWidget):
 
     # ---- Remove handlers --------------------------------------------------
 
-    def _on_remove_drawer(self, organ_name: str) -> None:
-        drawer = self._drawers.pop(organ_name, None)
-        if drawer is None:
+    def _on_remove_drawer(self, organ_name: str, *, snapshot: bool = True) -> None:
+        if organ_name not in self._drawers:
             return
-        self._push_undo_snapshot()
+        # Snapshot while the drawer is still present, or Undo has nothing to
+        # bring back.
+        if snapshot:
+            self._push_undo_snapshot()
+        drawer = self._drawers.pop(organ_name)
         if self._focused_drawer is drawer:
             self._focused_drawer = None
             self._add_selected_btn.setText("Add Selected → (auto)")
@@ -1019,12 +1164,12 @@ class MatchContoursTab(QWidget):
             return
         self._push_undo_snapshot()
         drawer.remove_patient(patient_id)
-        # Auto-cleanup: if the drawer is now empty, remove the drawer too.
+        # Auto-cleanup: if the drawer is now empty, remove the drawer too. The
+        # snapshot above already holds the drawer with its patient, so one Undo
+        # restores both; a second snapshot would make the first Undo bring back
+        # an empty drawer.
         if drawer.patient_count() == 0:
-            # Note: _on_remove_drawer also pushes a snapshot, but the second
-            # push is a no-op for undo correctness — the user just sees one
-            # extra step that quickly resolves to the same state.
-            self._on_remove_drawer(organ_name)
+            self._on_remove_drawer(organ_name, snapshot=False)
         else:
             self._resync_tree_marks()
 
@@ -1113,15 +1258,20 @@ class MatchContoursTab(QWidget):
         ``None`` when no dose is available / it fails to load (the overlay is
         optional and never blocks the viewer).
         """
-        folder = find_reference_image_folder(self._library, patient_id, sub.gt_rtstruct_sop_uid)
-        if folder is None:
-            raise RuntimeError(f"No reference image folder found for patient {patient_id}.")
-        ct = read_dicom_image(folder)
-        gt_path = self._rtstruct_path(patient_id, sub.gt_rtstruct_sop_uid)
-        if gt_path is None:
-            raise RuntimeError("GT RTSTRUCT file not found in loaded folder.")
-        gt_rtss = read_rtstruct(gt_path)
-        gt_mask = extract_mask_for_roi(ct, gt_rtss, sub.gt_roi_number)
+        ct = load_reference_image(self._library, patient_id, sub.gt_rtstruct_sop_uid)
+        if ct is None:
+            raise RuntimeError(f"No reference image found for patient {patient_id}.")
+        gt_entry = _find_rtstruct(self._library, patient_id, sub.gt_rtstruct_sop_uid)
+        if gt_entry is not None and gt_entry.is_synthetic_consensus:
+            # No file of its own: built from its raters exactly as Compute
+            # builds it, with the same STAPLE parameters.
+            gt_mask = self._consensus_mask(patient_id, gt_entry, sub.gt_roi_number, ct)
+        else:
+            gt_path = self._rtstruct_path(patient_id, sub.gt_rtstruct_sop_uid)
+            if not gt_path:
+                raise RuntimeError("GT RTSTRUCT file not found in loaded folder.")
+            gt_rtss = read_rtstruct(gt_path)
+            gt_mask = extract_mask_for_roi(ct, gt_rtss, sub.gt_roi_number)
         test_pairs: list[tuple[str, object]] = []
         for t in sub.tests:
             path = self._rtstruct_path(patient_id, t.rtstruct_sop_uid)
@@ -1143,46 +1293,42 @@ class MatchContoursTab(QWidget):
         dose_path = self._find_dose_path_for_viz(patient_id, sub.gt_rtstruct_sop_uid)
         if dose_path:
             try:
-                dose_arr = dose_array_on_reference(dose_path, ct)
+                grid = DoseGrid.from_dataset(pydicom.dcmread(dose_path, force=True))
+                dose_arr = dose_grid_on_reference(grid, ct)
             except Exception:  # noqa: BLE001 — dose overlay is optional; never block the viewer
                 dose_arr = None
         return ct, gt_mask, test_pairs, dose_arr
 
-    def _find_dose_path_for_viz(self, patient_id: str, gt_sop_uid: str) -> str | None:
-        """Locate an RT Dose file for the overlay.
+    def _consensus_mask(self, patient_id: str, entry: RTSTRUCTEntry, roi_number: int, ct):
+        """A synthetic consensus ROI's mask, built from its raters on ``ct``."""
+        structures = []
+        for sop, roi in consensus_constituents(self._library, patient_id, entry, roi_number):
+            path = self._rtstruct_path(patient_id, sop)
+            if not path:
+                continue
+            try:
+                structures.append((read_rtstruct(path), roi))
+            except Exception:  # noqa: BLE001 — one unreadable rater leaves the rest
+                continue
+        config = StapleConfig.from_dict(self._settings.get("staple", {}) or {})
+        result = staple_from_structures(ct, structures, config)
+        return result.consensus_mask if result is not None else None
 
-        Prefers a dose sharing the GT's frame of reference (so it resamples
-        onto the CT cleanly) and a ``PLAN`` summation type; falls back to any
-        dose the patient has. Returns ``None`` when the patient has no dose.
+    def _find_dose_path_for_viz(self, patient_id: str, gt_sop_uid: str) -> str | None:
+        """The RT Dose file Compute uses for this GT, or ``None``.
+
+        The same resolver as the metrics — explicit references first, the
+        user's own answers in Load Data winning over everything — so the overlay
+        shows the dose the DVH was computed from. An external audit found the
+        viewer choosing by its own rule and showing a different dose. When the
+        link is ambiguous or absent there is no overlay, as there is no DVH.
         """
-        patient = self._library.patients.get(patient_id) if self._library else None
-        if patient is None:
+        if self._library is None:
             return None
-        gt_for: str | None = None
-        for ctx in patient.contexts:
-            for rtss in ctx.rtstructs:
-                if rtss.sop_instance_uid == gt_sop_uid:
-                    gt_for = rtss.frame_of_reference_uid
-                    break
-            if gt_for is not None:
-                break
-        # (same-FoR, is-PLAN, path) — sort so the most preferred candidate wins.
-        candidates: list[tuple[bool, bool, str]] = []
-        for ctx in patient.contexts:
-            for dose in ctx.rtdoses:
-                if not dose.file_path:
-                    continue
-                candidates.append(
-                    (
-                        dose.frame_of_reference_uid == gt_for,
-                        dose.dose_summation_type == "PLAN",
-                        dose.file_path,
-                    )
-                )
-        if not candidates:
+        found = resolve_dose(self._library, patient_id, gt_sop_uid)
+        if not found.is_resolved:
             return None
-        candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-        return candidates[0][2]
+        return getattr(found.target, "file_path", None) or None
 
     def _rtstruct_path(self, patient_id: str, sop_uid: str) -> str | None:
         patient = self._library.patients.get(patient_id) if self._library else None
@@ -1234,27 +1380,26 @@ class MatchContoursTab(QWidget):
             .strip()
             .lower()
         )
-        gt_filename = str(template.get("gt_filename", "") or "").strip().lower()
         if not organs:
             self._show_status(
                 "No template defined. Click '2. Define Template…' first to specify "
                 "the organs and GT identifier."
             )
             return
-        if not gt_source and not gt_filename:
+        if not gt_source:
             self._show_status(
-                "Template needs a source-label or filename criterion to identify "
-                "the GT RTSS file. Edit the template and try again."
+                "Template needs a source label to identify the GT RTSS. "
+                "Edit the template and try again."
             )
             return
 
-        # If the GT identifier (source-label + filename criteria) has changed
+        # If the GT identifier (the source-label criterion) has changed
         # since the previous Auto-Match run, wipe existing drawers first.
         # Otherwise stale GTs from the previous source label linger on patients
         # the new source label doesn't cover. Same-identifier re-runs (e.g.
         # the user added another organ to the template) keep existing drawers
         # and merge in the new organs.
-        current_identifier = (gt_source, gt_filename)
+        current_identifier = gt_source
         previous_identifier = getattr(self, "_last_auto_match_identifier", None)
         if previous_identifier is not None and previous_identifier != current_identifier:
             self._reset_drawers()
@@ -1271,7 +1416,7 @@ class MatchContoursTab(QWidget):
         missing_organs: list[str] = []
 
         for patient_id, patient in self._library.patients.items():
-            gt_rtss = _find_gt_rtss(patient, gt_source, gt_filename)
+            gt_rtss = _find_gt_rtss(patient, gt_source)
             if gt_rtss is None:
                 no_gt_patients.append(patient_id)
                 continue
@@ -1375,8 +1520,8 @@ def _short_sop(sop: str) -> str:
     return f"{sop[:8]}…{sop[-6:]}"
 
 
-def _find_gt_rtss(patient, gt_source: str, gt_filename: str) -> RTSTRUCTEntry | None:
-    """Return the first RTSS in ``patient`` whose source label or filename matches.
+def _find_gt_rtss(patient, gt_source: str) -> RTSTRUCTEntry | None:
+    """Return the first RTSS in ``patient`` whose source label contains ``gt_source``.
 
     ``gt_source`` is matched against ``rtss.source_label`` — the cascade-resolved
     display name (Manufacturer → StructureSetLabel → SoftwareVersions → … →
@@ -1386,27 +1531,20 @@ def _find_gt_rtss(patient, gt_source: str, gt_filename: str) -> RTSTRUCTEntry | 
     overrides — a single substring catches both ``Manufacturer="Limbus AI"``
     and an override ``"Limbus"`` on an RTSS where Manufacturer was empty.
 
-    Either substring may be empty (the criterion is then ignored). When both
-    are non-empty, ANY match wins (OR semantics).
+    ``gt_source`` is lower-case. An empty one matches nothing.
     """
+    if not gt_source:
+        return None
     for ctx in patient.contexts:
         for rtss in ctx.rtstructs:
-            if gt_source and gt_source in (rtss.source_label or "").lower():
-                return rtss
-            if gt_filename and gt_filename in rtss.filename.lower():
+            if gt_source in (rtss.source_label or "").lower():
                 return rtss
     return None
 
 
-def _fmt_identifier(identifier: tuple[str, str]) -> str:
-    """Human-readable rendering of the (gt_source, gt_filename) tuple for status messages."""
-    source, fname = identifier
-    parts = []
-    if source:
-        parts.append(f"source~='{source}'")
-    if fname:
-        parts.append(f"file~='{fname}'")
-    return " + ".join(parts) if parts else "(unset)"
+def _fmt_identifier(identifier: str) -> str:
+    """The GT source-label criterion as status messages show it."""
+    return f"source~='{identifier}'" if identifier else "(unset)"
 
 
 def _h_divider() -> QFrame:

@@ -1,20 +1,55 @@
 """In-memory store of computed metric rows.
 
-Results accumulate across multiple compute runs so the user can iterate
-(add a vendor, recompute, view both runs) without losing previous work.
-The :class:`ResultsManager` is owned by :class:`MainWindow` and read by
-the Results tab (step 9) for table display + CSV export.
+**One computation per results table.** The metrics are chosen once and computed
+once; computing again replaces the table, after the user confirms. Rows are never
+updated or merged, so every row in a table was produced by the same run with the
+same settings, and a tolerance can never be attributed to another run's values.
+
+Likert scores are kept separately, keyed by the contour they were given to, and
+overlaid onto that contour's row when the table is read. They are not part of a
+computation: replacing the metric rows leaves them untouched, and scoring can
+continue over several sessions against a table computed once and saved with the
+session.
+
+The :class:`ResultsManager` is owned by :class:`MainWindow` and read by the
+Results tab for display and CSV export.
 """
 
 from __future__ import annotations
 
 import csv
+import math
 from pathlib import Path
 from typing import Any
+
+from autoseg_evaluator.core.tolerance_keys import (
+    POLYGON_TOLERANCE_METRICS,
+    SURFACE_DICE_METRICS,
+    TOLERANCE_METRICS,
+    base_metric,
+    split_tolerance,
+    tolerance_of,
+)
+from autoseg_evaluator.utils.timestamps import now_local
+
+#: Metric-column prefix for when a rater gave their score: ``scored_at_<rater>``.
+SCORED_AT_PREFIX = "scored_at_"
+
+#: Version of the results payload a session carries.
+RESULTS_SESSION_VERSION = 1
 
 # Order of the fixed metadata columns shown before the dynamic metric columns.
 META_COLUMNS: list[tuple[str, str]] = [
     ("drawer", "Drawer"),
+    # Canonical organ grouping. ``drawer`` is whatever the ground-truth ROI
+    # happened to be called, so two patients whose manual contours were named
+    # differently sit in different drawers; these columns say which organ those
+    # drawers are actually of, which is what a cohort statistic groups on.
+    # Laterality and qualifier are broken out as their own columns because the
+    # downstream analysis pivots on them.
+    ("canonical_organ", "Organ"),
+    ("organ_laterality", "Side"),
+    ("organ_qualifier", "Structure type"),
     ("patient_id", "Patient"),
     ("comparison_mode", "Mode"),
     ("was_designated_gt", "Designated GT"),
@@ -28,6 +63,11 @@ META_COLUMNS: list[tuple[str, str]] = [
     ("truncated_slices", "Truncated slices"),
     ("truncated_extent_mm", "Truncated extent (mm)"),
     ("similarity", "Name similarity"),
+    ("organ_tier", "Organ match"),
+    # When this row was produced. Likert scores carry their own time, in a
+    # Scored at column beside each rater's score, because scoring can happen
+    # sessions after the computation.
+    ("computed_at", "Computed at"),
     ("error", "Error"),
 ]
 
@@ -40,14 +80,29 @@ META_COLUMNS: list[tuple[str, str]] = [
 CANONICAL_METRIC_COLUMNS: list[str] = [
     # Volumetric overlap
     "dice",
+    "precision",
+    "recall",
     "surface_dice",
     # Surface distances
     "hausdorff100",
     "hausdorff95",
     "mean_surface_distance",
-    # Added Path Length
-    "apl_mean",
-    "apl_total",
+    # 2D contour metrics, measured on the RTSTRUCT polygons rather than on a
+    # rasterised mask. Kept together and after the mask block, because the two
+    # streams answer the same question by different means and a reader has to be
+    # able to see which is which at a glance.
+    "poly_apl_mm",
+    "poly_napl",
+    "poly_apl_reverse_mm",
+    "poly_napl_reverse",
+    "poly_hd100_mm",
+    "poly_hd95_mm",
+    "poly_mean_distance_mm",
+    "poly_median_distance_mm",
+    "poly_planes_joint",
+    "poly_planes_gt_only",
+    "poly_planes_test_only",
+    "poly_status",
     # Volume + centre-of-mass
     "volume_gt_cc",
     "volume_test_cc",
@@ -57,6 +112,13 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
     "com_dx_mm",
     "com_dy_mm",
     "com_dz_mm",
+    # Overlap with the PTV: the ground truth's, the test's, and test − GT.
+    "gt_ptv_overlap_cc",
+    "test_ptv_overlap_cc",
+    "ptv_overlap_diff_cc",
+    "test_only_ptv_overlap",
+    # Whether the test contour skips a slice.
+    "contour_discontinuity",
     # STAPLE per-rater
     "staple_sensitivity",
     "staple_specificity",
@@ -74,6 +136,14 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
     # DVH (static built-ins) — kept at the very right so all dose-related
     # columns cluster together and dynamic D{X}/V{X} columns naturally
     # follow without being separated from Dmin/Dmean/Dmax by other metrics.
+    # Coverage is the share of the structure inside the dose grid, which is
+    # what every dose statistic in the row describes; the status says when a
+    # D{X}cc is larger than that part, and is blank otherwise.
+    "dose_coverage_pct",
+    "dvh_status",
+    # Whether the row's dose statistics come from the structure's contours or
+    # from its mask: from the mask when the reference is a consensus mask.
+    "dvh_basis",
     "dmin_gy",
     "dmean_gy",
     "dmax_gy",
@@ -86,14 +156,28 @@ CANONICAL_METRIC_COLUMNS: list[str] = [
 _METRIC_LABELS: dict[str, str] = {
     # Volumetric overlap
     "dice": "Dice",
+    "precision": "Precision",
+    "recall": "Recall",
     "surface_dice": "Surface Dice",
     # Surface distances
-    "hausdorff100": "Hausdorff 100% (mm)",
-    "hausdorff95": "Hausdorff 95% (mm)",
+    "hausdorff100": "3D Hausdorff 100% (mm)",
+    "hausdorff95": "3D Hausdorff 95% (mm)",
     "mean_surface_distance": "Mean Surface Distance (mm)",
-    # Added Path Length
-    "apl_mean": "Mean APL (mm)",
-    "apl_total": "Total APL (mm)",
+    # 2D contour metrics. Every one says "2D" because the mask stream reports
+    # metrics with the same names, and in a table there is no group heading
+    # between them.
+    "poly_apl_mm": "2D APL (mm)",
+    "poly_napl": "2D NAPL",
+    "poly_apl_reverse_mm": "2D APL reverse (mm)",
+    "poly_napl_reverse": "2D NAPL reverse",
+    "poly_hd100_mm": "2D Hausdorff 100% (mm)",
+    "poly_hd95_mm": "2D Hausdorff 95% (mm)",
+    "poly_mean_distance_mm": "2D Mean Contour Distance (mm)",
+    "poly_median_distance_mm": "2D Median Contour Distance (mm)",
+    "poly_planes_joint": "2D planes compared",
+    "poly_planes_gt_only": "2D planes GT only",
+    "poly_planes_test_only": "2D planes test only",
+    "poly_status": "2D status",
     # Volume + centre-of-mass
     "volume_gt_cc": "Volume GT (cc)",
     "volume_test_cc": "Volume Test (cc)",
@@ -103,7 +187,16 @@ _METRIC_LABELS: dict[str, str] = {
     "com_dx_mm": "COM Δx (mm)",
     "com_dy_mm": "COM Δy (mm)",
     "com_dz_mm": "COM Δz (mm)",
+    # PTV overlap
+    "gt_ptv_overlap_cc": "GT overlap with PTV (cc)",
+    "test_ptv_overlap_cc": "Test overlap with PTV (cc)",
+    "ptv_overlap_diff_cc": "PTV overlap difference (cc)",
+    "test_only_ptv_overlap": "Test-only PTV overlap",
+    "contour_discontinuity": "Contour Discontinuity",
     # DVH (static)
+    "dose_coverage_pct": "Dose grid coverage (%)",
+    "dvh_status": "Dose status",
+    "dvh_basis": "DVH from",
     "dmin_gy": "Dmin (Gy)",
     "dmean_gy": "Dmean (Gy)",
     "dmax_gy": "Dmax (Gy)",
@@ -128,7 +221,7 @@ def metric_display_label(
     key: str,
     *,
     sd_tau_mm: float | None = None,
-    apl_tau_mm: float | None = None,
+    poly_tau_mm: float | None = None,
 ) -> str:
     """Return the user-facing column header for a metric key (with units).
 
@@ -137,26 +230,32 @@ def metric_display_label(
     and ``v{X}gy_cc`` → ``V{X}Gy (cc)``. Anything else falls through as-is
     so non-standard keys are still visible.
 
-    When ``sd_tau_mm`` / ``apl_tau_mm`` are supplied, the Surface Dice and
-    APL headers are decorated with the tolerance value so two CSVs
-    computed at different tolerances can't be silently mixed up (e.g.
-    ``Surface Dice @ 3.00 mm`` vs ``Surface Dice @ 5.00 mm``).
+    A key carrying its tolerance — ``surface_dice@3mm`` — is labelled with it:
+    ``Surface Dice @ 3.00 mm``. The tolerance comes from the key, so every
+    column says what its own numbers were measured at. ``sd_tau_mm`` and
+    ``poly_tau_mm`` decorate a bare ``surface_dice`` or 2D APL key the same way,
+    for the Build Consensus table, which measures at one tolerance of its own.
 
     DVH difference columns (``{base}_diff``, e.g. ``d2cc_gy_diff``) reuse the
     base metric's label suffixed with ``Δ vs GT`` (the value is test − GT).
     """
     if key.endswith("_diff"):
-        base = metric_display_label(key[:-5], sd_tau_mm=sd_tau_mm, apl_tau_mm=apl_tau_mm)
+        base = metric_display_label(key[:-5], sd_tau_mm=sd_tau_mm, poly_tau_mm=poly_tau_mm)
         return f"{base} Δ vs GT"
+    base, tolerance = split_tolerance(key)
+    if tolerance is not None and base in TOLERANCE_METRICS:
+        return f"{_METRIC_LABELS[base]} @ {tolerance:.2f} mm"
     if key == "surface_dice" and sd_tau_mm is not None:
         return f"Surface Dice @ {sd_tau_mm:.2f} mm"
-    if key == "apl_mean" and apl_tau_mm is not None:
-        return f"Mean APL @ {apl_tau_mm:.2f} mm"
-    if key == "apl_total" and apl_tau_mm is not None:
-        return f"Total APL @ {apl_tau_mm:.2f} mm"
+    # The 2D stream keeps its own tolerance, separate from Surface Dice's.
+    if key in POLYGON_TOLERANCE_METRICS and poly_tau_mm is not None:
+        return f"{_METRIC_LABELS[key]} @ {poly_tau_mm:.2f} mm"
     if key in _METRIC_LABELS:
         return _METRIC_LABELS[key]
-    # Qualitative (Likert) columns: a score per rater + assessed / blinded flags.
+    # Qualitative (Likert) columns: a score per rater, when each was given, and
+    # the assessed / blinded flags.
+    if key.startswith(SCORED_AT_PREFIX):
+        return f"Scored at — {key[len(SCORED_AT_PREFIX) :]}"
     if key.startswith("likert_"):
         return f"Likert — {key[len('likert_') :]}"
     if key == "qualitative_assessed":
@@ -241,33 +340,68 @@ def _first_dvh_index(columns: list[str]) -> int:
 
 
 class ResultsManager:
-    """Accumulating store of per-row metric results."""
+    """The rows of one computation, and the Likert scores given to its contours."""
 
     def __init__(self) -> None:
         self._rows: list[dict[str, Any]] = []
         # Qualitative (Likert) scores, stored against the contour and overlaid
         # onto its metric row at read time so each contour stays a single row.
-        # Keyed by (patient_id, drawer, source_label, roi_number).
-        self._qualitative: dict[tuple[str, str, str, int], dict[str, Any]] = {}
-        # Tolerance values that produced this batch of results — surfaced
-        # in the Surface Dice / APL column headers so two CSVs computed
-        # at different tolerances can't be silently merged in Excel.
-        self._sd_tau_mm: float | None = None
-        self._apl_tau_mm: float | None = None
+        # Keyed by (patient_id, drawer, source_label, structure set UID,
+        # roi_number): an external audit found two structure sets from one
+        # source sharing an ROI number, and the second score landing on the
+        # first file's row, when the structure set was not part of the key.
+        self._qualitative: dict[tuple[str, str, str, str, int], dict[str, Any]] = {}
+        # ``{roi_name: OrganAssignment}``. Applied at read time rather than
+        # baked into rows when they are computed, so changing an organ
+        # assignment in the review dialog re-labels existing results instead of
+        # requiring the whole cohort to be recomputed.
+        self._organ_index: dict[str, Any] = {}
+        self._revision = 0
 
-    def set_tolerances(self, sd_tau_mm: float | None, apl_tau_mm: float | None) -> None:
-        """Record the τ values active for the *next* batch of rows added.
+    @property
+    def revision(self) -> int:
+        """Changes whenever rows already read could read differently.
 
-        Called by MainWindow when a Compute run starts. The values are
-        forwarded into :func:`metric_display_label` whenever headers are
-        rendered (UI + CSV export), so the heading reads e.g.
-        ``Surface Dice @ 3.00 mm`` instead of ambiguously ``Surface Dice``.
+        Adding a computed row leaves it alone, because every row read before
+        is still there, first and unchanged. That lets a view append the new
+        rows instead of rebuilding — unless Likert scores exist, since a new
+        row can then take over a score-only row (see :meth:`has_scores`).
         """
-        self._sd_tau_mm = sd_tau_mm
-        self._apl_tau_mm = apl_tau_mm
+        return self._revision
 
-    def tolerances(self) -> tuple[float | None, float | None]:
-        return (self._sd_tau_mm, self._apl_tau_mm)
+    def has_scores(self) -> bool:
+        """Whether any Likert score is stored."""
+        return bool(self._qualitative)
+
+    def set_organ_index(self, index: Any | None) -> None:
+        """Supply canonical organ assignments, keyed by raw ROI name.
+
+        Accepts either an :class:`~autoseg_evaluator.data.organ_index.OrganIndex`
+        or a plain mapping. Passing ``None`` clears the tagging, which simply
+        leaves the organ columns blank — results remain valid, they just are
+        not grouped.
+        """
+        self._revision += 1
+        if index is None:
+            self._organ_index = {}
+            return
+        mapping = getattr(index, "assignments", index)
+        self._organ_index = dict(mapping or {})
+
+    def organ_index(self) -> dict[str, Any]:
+        return dict(self._organ_index)
+
+    def _overlay_organ(self, row: dict[str, Any]) -> None:
+        """Label a row with the organ its ground-truth contour belongs to."""
+        if not self._organ_index:
+            return
+        found = self._organ_index.get(str(row.get("gt_roi_name") or ""))
+        if found is None:
+            return
+        row["canonical_organ"] = found.key.label()
+        row["organ_laterality"] = found.key.laterality
+        row["organ_qualifier"] = found.key.qualifier
+        row["organ_tier"] = found.tier
 
     def add_row(self, row: dict[str, Any]) -> None:
         self._rows.append(dict(row))
@@ -275,6 +409,29 @@ class ResultsManager:
     def add_rows(self, rows: list[dict[str, Any]]) -> None:
         for r in rows:
             self.add_row(r)
+
+    def computed_row_count(self) -> int:
+        """Rows produced by a computation — not counting score-only rows."""
+        return len(self._rows)
+
+    def tolerances_in_use(self) -> dict[str, list[float]]:
+        """Every tolerance the table's columns were computed at, by stream.
+
+        Read from the column keys themselves, which carry their tolerance, so
+        this can never disagree with the numbers it describes.
+        """
+        surface: set[float] = set()
+        polygon: set[float] = set()
+        for row in self._rows:
+            for key in row.get("metrics") or {}:
+                base, tolerance = split_tolerance(key)
+                if tolerance is None:
+                    continue
+                if base in SURFACE_DICE_METRICS:
+                    surface.add(tolerance)
+                elif base in POLYGON_TOLERANCE_METRICS:
+                    polygon.add(tolerance)
+        return {"surface_dice_mm": sorted(surface), "polygon_apl_mm": sorted(polygon)}
 
     # ---- Qualitative (Likert) scores -------------------------------------
 
@@ -290,32 +447,52 @@ class ResultsManager:
         rater: str,
         score: int,
         blinded: bool,
+        rtstruct_sop_uid: str = "",
+        scored_at: str | None = None,
     ) -> None:
         """Record one rater's Likert score for one contour.
 
-        The score is stored against the contour (patient, drawer, source, roi)
-        and overlaid onto that contour's metric row at read time, so the Likert
-        score sits on the **same row** as the geometric / dose metrics. A
-        synthetic row is emitted only when no metric row exists for the contour
-        (e.g. the qualitative pass ran before Compute). A single
+        The score is stored against the contour (patient, drawer, source,
+        structure set, roi) and overlaid onto that contour's metric row at read
+        time, so the Likert score sits on the **same row** as the geometric /
+        dose metrics. A synthetic row is emitted only when no metric row exists
+        for the contour (e.g. the qualitative pass ran before Compute). A single
         ``qualitative_blinded`` flag records whether the run was blinded (True)
         or transparent (False); re-rating overwrites in place.
+
+        ``scored_at`` is when the score was given — kept with the session, since
+        scoring can span several — and defaults to now.
+
+        ``rtstruct_sop_uid`` is part of the contour's identity; see the key.
         """
-        key = (str(patient_id), str(drawer), str(source_label), int(roi_number))
+        self._revision += 1
+        key = (
+            str(patient_id),
+            str(drawer),
+            str(source_label),
+            str(rtstruct_sop_uid or ""),
+            int(roi_number),
+        )
         entry = self._qualitative.get(key)
         if entry is None:
             entry = {
                 "patient_id": patient_id,
                 "drawer": drawer,
                 "source_label": source_label,
+                "rtstruct_sop_uid": str(rtstruct_sop_uid or ""),
                 "roi_name": roi_name,
                 "roi_number": int(roi_number),
                 "is_gt": bool(is_gt),
                 "scores": {},
+                "scored_at": {},
                 "blinded": None,
             }
             self._qualitative[key] = entry
-        entry["scores"][_safe_rater(rater)] = int(score)
+        name = _safe_rater(rater)
+        entry["scores"][name] = int(score)
+        # ``None`` means "now"; an empty string is a score restored from a
+        # session saved before times were kept, and stays blank.
+        entry["scored_at"][name] = now_local() if scored_at is None else str(scored_at)
         entry["blinded"] = bool(blinded)
 
     def _qualitative_metric_keys(self) -> set[str]:
@@ -325,12 +502,13 @@ class ResultsManager:
         for entry in self._qualitative.values():
             for rater in entry["scores"]:
                 keys.add(f"likert_{rater}")
+                keys.add(f"{SCORED_AT_PREFIX}{rater}")
             if entry.get("blinded") is not None:
                 keys.add("qualitative_blinded")
         return keys
 
     @staticmethod
-    def _row_contour_key(row: dict[str, Any]) -> tuple[str, str, str, int] | None:
+    def _row_contour_key(row: dict[str, Any]) -> tuple[str, str, str, str, int] | None:
         """Contour identity for a *primary* test-comparison row, else None.
 
         Excludes GT-only rows (gt_dose, the designated-GT STAPLE rater, STAPLE
@@ -347,6 +525,7 @@ class ResultsManager:
             str(row.get("patient_id", "")),
             str(row.get("drawer", "")),
             str(row.get("test_source_label", "")),
+            str(row.get("test_rtstruct_sop_uid", "") or ""),
             roi,
         )
 
@@ -354,15 +533,14 @@ class ResultsManager:
     def _overlay_qualitative(row: dict[str, Any], entry: dict[str, Any]) -> None:
         for rater, score in entry["scores"].items():
             row["metrics"][f"likert_{rater}"] = int(score)
+            row["metrics"][f"{SCORED_AT_PREFIX}{rater}"] = str(
+                (entry.get("scored_at") or {}).get(rater, "")
+            )
         if entry.get("blinded") is not None:
             row["metrics"]["qualitative_blinded"] = bool(entry["blinded"])
 
     def _synthetic_qualitative_row(self, entry: dict[str, Any]) -> dict[str, Any]:
-        metrics: dict[str, Any] = {f"likert_{r}": int(s) for r, s in entry["scores"].items()}
-        metrics["qualitative_assessed"] = True
-        if entry.get("blinded") is not None:
-            metrics["qualitative_blinded"] = bool(entry["blinded"])
-        return {
+        row: dict[str, Any] = {
             "drawer": entry["drawer"],
             "patient_id": entry["patient_id"],
             "comparison_mode": "Qualitative",
@@ -372,20 +550,39 @@ class ResultsManager:
             "gt_roi_name": "",
             "test_source_label": entry["source_label"],
             "test_rtstruct_filename": "",
+            "test_rtstruct_sop_uid": entry.get("rtstruct_sop_uid", ""),
             "test_organ": entry["roi_name"],
             "test_roi_number": int(entry["roi_number"]),
             "truncated": False,
             "similarity": "",
+            "computed_at": "",
             "error": "",
-            "metrics": metrics,
+            "metrics": {"qualitative_assessed": True},
         }
+        self._overlay_qualitative(row, entry)
+        return row
+
+    # ---- Clearing ----------------------------------------------------------
+
+    def clear_computed(self) -> None:
+        """Discard the computed rows and keep every Likert score.
+
+        What replacing a computation does. The scores belong to the contours,
+        not to a run: they were given in the Qualitative tab, often over several
+        sessions, and the next computation's rows pick them up again.
+        """
+        self._revision += 1
+        self._rows.clear()
 
     def clear(self) -> None:
+        """Discard the rows and the scores — for loading a different cohort."""
+        self._revision += 1
         self._rows.clear()
         self._qualitative.clear()
-        # Tolerances are batch-scoped — drop them when the batch is cleared.
-        self._sd_tau_mm = None
-        self._apl_tau_mm = None
+        # The organ index belongs to the loaded cohort, not to a batch of
+        # results, so it deliberately survives a clear.
+
+    # ---- Reading -------------------------------------------------------------
 
     def rows(self) -> list[dict[str, Any]]:
         """Snapshot of all rows, with qualitative scores overlaid.
@@ -397,11 +594,12 @@ class ResultsManager:
         ``Qualitative`` rows so nothing is lost.
         """
         has_qual = bool(self._qualitative)
-        consumed: set[tuple[str, str, str, int]] = set()
+        consumed: set[tuple[str, str, str, str, int]] = set()
         out: list[dict[str, Any]] = []
         for row in self._rows:
             r = dict(row)
             r["metrics"] = dict(row.get("metrics") or {})
+            self._overlay_organ(r)
             key = self._row_contour_key(row)
             if key is not None and has_qual:
                 assessed = key in self._qualitative
@@ -414,7 +612,9 @@ class ResultsManager:
             out.append(r)
         for key, entry in self._qualitative.items():
             if key not in consumed:
-                out.append(self._synthetic_qualitative_row(entry))
+                synthetic = self._synthetic_qualitative_row(entry)
+                self._overlay_organ(synthetic)
+                out.append(synthetic)
         return out
 
     def __len__(self) -> int:
@@ -428,23 +628,46 @@ class ResultsManager:
 
         Every column in :data:`CANONICAL_METRIC_COLUMNS` is always included
         (even when no row populated it) so the table layout is identical
-        across runs and Excel paste stays aligned. Dynamic DVH points
-        (``d95_gy`` / ``v20gy_cc``) are appended after the canonical block.
-        The qualitative columns (``likert_<rater>`` then ``qualitative_blinded``)
-        are inserted immediately before the first dose (DVH) column.
+        across runs and Excel paste stays aligned. A tolerance-dependent metric
+        computed at one or more tolerances takes its canonical place once per
+        tolerance, ascending — ``surface_dice@1mm``, ``surface_dice@2mm`` — and
+        keeps an empty placeholder when it was not computed. Dynamic DVH points
+        (``d95_gy`` / ``v20gy_cc``) are appended after the canonical block. The
+        qualitative columns — each rater's score and when it was given, then the
+        assessed and blinded flags — are inserted immediately before the first
+        dose (DVH) column.
         """
         seen: set[str] = set()
         for row in self._rows:
             seen.update((row.get("metrics") or {}).keys())
         seen.update(self._qualitative_metric_keys())
 
-        canonical = list(CANONICAL_METRIC_COLUMNS)
-        dynamic = seen - set(canonical)
-        qual_dynamic = sorted(
-            k
-            for k in dynamic
-            if k.startswith("likert_") or k in ("qualitative_assessed", "qualitative_blinded")
+        canonical: list[str] = []
+        placed: set[str] = set()
+        for column in CANONICAL_METRIC_COLUMNS:
+            if column in TOLERANCE_METRICS:
+                variants = sorted(
+                    (k for k in seen if base_metric(k) == column and tolerance_of(k) is not None),
+                    key=lambda k: tolerance_of(k) or 0.0,
+                )
+                if variants:
+                    canonical.extend(variants)
+                    placed.update(variants)
+                    continue
+            canonical.append(column)
+            placed.add(column)
+        dynamic = seen - placed
+        raters = sorted(k[len("likert_") :] for k in dynamic if k.startswith("likert_"))
+        qual_dynamic: list[str] = []
+        for rater in raters:
+            qual_dynamic.append(f"likert_{rater}")
+            if f"{SCORED_AT_PREFIX}{rater}" in dynamic:
+                qual_dynamic.append(f"{SCORED_AT_PREFIX}{rater}")
+        qual_dynamic += [k for k in ("qualitative_assessed", "qualitative_blinded") if k in dynamic]
+        stray_scored = sorted(
+            k for k in dynamic if k.startswith(SCORED_AT_PREFIX) and k not in qual_dynamic
         )
+        qual_dynamic += stray_scored
         other_dynamic = sorted(dynamic - set(qual_dynamic), key=_dynamic_metric_sort_key)
         dvh_at = _first_dvh_index(canonical)
         return canonical[:dvh_at] + qual_dynamic + canonical[dvh_at:] + other_dynamic
@@ -460,10 +683,7 @@ class ResultsManager:
         metrics = self.metric_columns()
         meta_keys = [k for k, _label in META_COLUMNS]
         meta_labels = [label for _k, label in META_COLUMNS]
-        headers = meta_labels + [
-            metric_display_label(k, sd_tau_mm=self._sd_tau_mm, apl_tau_mm=self._apl_tau_mm)
-            for k in metrics
-        ]
+        headers = meta_labels + [metric_display_label(k) for k in metrics]
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -477,11 +697,63 @@ class ResultsManager:
                 writer.writerow(meta + metric_cells)
         return len(rows)
 
+    # ---- Session ---------------------------------------------------------------
+
+    def session_state(self) -> dict[str, Any]:
+        """The computed rows, for saving with the session.
+
+        Saved so that qualitative scoring can continue over several sessions
+        against a table computed once. The Likert scores are not included: the
+        Qualitative tab saves them with each rater's progress, and re-sends them
+        when the session is restored.
+        """
+        return {
+            "version": RESULTS_SESSION_VERSION,
+            "rows": [_json_safe(row) for row in self._rows],
+        }
+
+    def apply_session_state(self, data: dict[str, Any] | None) -> int:
+        """Replace the computed rows with a saved table. Returns the row count.
+
+        The Likert scores are left alone; the Qualitative tab restores them.
+        """
+        self._revision += 1
+        self._rows.clear()
+        for row in (data or {}).get("rows", []) or []:
+            if isinstance(row, dict):
+                restored = dict(row)
+                restored["metrics"] = dict(restored.get("metrics") or {})
+                self._rows.append(restored)
+        return len(self._rows)
+
+
+def _json_safe(value: Any) -> Any:
+    """A copy of a row that JSON can hold and give back unchanged.
+
+    NumPy scalars become Python numbers, arrays and tuples become lists, sets
+    become sorted lists. Non-finite floats are kept: an infinite Hausdorff
+    distance is a result, and Python's JSON reads it back as written.
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_json_safe(v) for v in value), key=str)
+    item = getattr(value, "item", None)
+    if callable(item) and not isinstance(value, (str, bytes)):
+        try:
+            return _json_safe(item())
+        except (TypeError, ValueError):
+            pass
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist) and not isinstance(value, (str, bytes)):
+        return _json_safe(tolist())
+    return value
+
 
 def _format_cell(value: Any) -> str:
     """Format a cell value for CSV output (no trailing-zero issues, no NaN noise)."""
-    import math
-
     if value is None or value == "":
         return ""
     if isinstance(value, bool):

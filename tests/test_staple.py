@@ -28,15 +28,23 @@ def _cube(shape_xyz, lo_xyz, hi_xyz, spacing=(1.0, 1.0, 1.0)) -> sitk.Image:
 
 def test_staple_config_defaults():
     cfg = StapleConfig()
-    # MICCAI consensus pipeline defaults: 100 iterations, adaptive bbox
-    # targeting a <= 0.50 foreground-to-bbox ratio (upper target only).
-    assert cfg.max_iterations == 100
+    # An iteration cap high enough to converge (SimpleITK sets none), and an
+    # adaptive bbox targeting a <= 0.50 foreground-to-bbox ratio (upper only).
+    assert cfg.max_iterations == 500
     assert cfg.confidence_weight == 1.0
     assert cfg.target_fg_ratio_max == 0.50
     assert cfg.bbox_padding_min_voxels == 2
     assert cfg.bbox_padding_max_voxels == 25
     # The unused lower-ratio knob was removed (padding can only lower the ratio).
     assert not hasattr(cfg, "target_fg_ratio_min")
+
+
+def test_the_compute_tab_offers_the_same_iteration_default():
+    """The Reset button and an unset config must give the core's default."""
+    from autoseg_evaluator.ui.tabs.compute import _STAPLE_DEFAULTS
+
+    assert _STAPLE_DEFAULTS["max_iterations"] == StapleConfig().max_iterations
+    assert StapleConfig.from_dict({}).max_iterations == StapleConfig().max_iterations
 
 
 def test_staple_config_from_dict_round_trip():
@@ -190,16 +198,17 @@ def test_staple_converged_flag_set_when_elapsed_below_cap():
     assert result.elapsed_iterations < 100
 
 
-# ---- Bounding-box small-structure workaround ----------------------------
+# ---- Bounding-box crop ----------------------------------------------------
 
 
 def test_staple_bbox_crop_keeps_small_structures_visible():
-    """Small structures with a generous image around them shouldn't get
-    collapsed to zero — the union-bbox crop should rescale the prior.
+    """A small structure in a large image keeps a non-empty consensus, and the
+    adaptive sizer pads its box into the target foreground ratio.
 
-    A 3×3×3 cube in a 60×60×60 image — without the crop, STAPLE's prior
-    would be ~0.0005, plenty small enough to make the EM kill it. With the
-    crop the prior becomes ~5–10% of the cropped region, which is workable.
+    A 3×3×3 cube in a 60×60×60 image. The crop is a choice of estimation
+    domain (the structure's neighbourhood, not the field of view); whole-image
+    STAPLE does not empty small organs on the HN1 sample either, so this
+    checks the sizer, not a rescue.
     """
     a = _cube((60, 60, 60), (28, 28, 28), (31, 31, 31))
     b = _cube((60, 60, 60), (28, 28, 28), (31, 31, 31))
@@ -213,3 +222,59 @@ def test_staple_bbox_crop_keeps_small_structures_visible():
     assert result.bbox_fg_ratio <= 0.50
     # And it should have used SOME padding (not zero) since the cube is small.
     assert result.bbox_padding_used >= 2
+
+
+# ---- Summaries read from the cropped images -------------------------------------
+
+
+def _blob(shape_zyx, centre, radii, spacing=(0.98, 0.98, 3.0)) -> sitk.Image:
+    zz, yy, xx = np.mgrid[: shape_zyx[0], : shape_zyx[1], : shape_zyx[2]]
+    inside = sum(((g - c) / r) ** 2 for g, c, r in zip((zz, yy, xx), centre, radii)) <= 1
+    img = sitk.GetImageFromArray(inside.astype(np.uint8))
+    img.SetSpacing(spacing)
+    return img
+
+
+@pytest.mark.parametrize(
+    "centres",
+    [
+        # Well inside the image.
+        [(15, 40, 40), (16, 42, 38), (14, 39, 43), (15, 44, 41)],
+        # Against the image edge, so the padded box is clipped by the image.
+        [(3, 5, 60), (2, 7, 62), (4, 4, 58)],
+    ],
+)
+def test_staple_summaries_equal_those_of_the_whole_volume(centres):
+    """Cropping changes no summary: outside the box every image is zero."""
+    from autoseg_evaluator.core.staple import _rater_disagreement, _uncertainty_metrics, _volume_cc
+
+    masks = [
+        _blob((30, 80, 70), c, (6 + i, 12 - i, 10 + (i % 2) * 3)) for i, c in enumerate(centres)
+    ]
+    result = compute_staple(masks)
+    assert result is not None
+    assert result.mean_entropy > 0  # the raters disagree, so there is something to measure
+
+    full_map = result.probability_map
+    assert (result.uncertain_band_cc, result.mean_entropy) == _uncertainty_metrics(full_map)
+    assert result.consensus_volume_cc == _volume_cc(result.consensus_mask)
+    assert (result.rater_disagreement_cc, result.rater_volume_range_cc) == _rater_disagreement(
+        masks
+    )
+
+
+def test_the_whole_probability_map_is_the_cropped_one_in_place():
+    masks = [
+        _blob((30, 80, 70), (15, 40, 40), (6, 12, 10)),
+        _blob((30, 80, 70), (16, 41, 42), (7, 11, 11)),
+    ]
+    result = compute_staple(masks)
+    full = sitk.GetArrayFromImage(result.probability_map)
+    x0, y0, z0, x1, y1, z1 = result.probability_bbox
+    inside = full[z0 : z1 + 1, y0 : y1 + 1, x0 : x1 + 1]
+    assert full.dtype == np.float32
+    assert np.array_equal(inside, sitk.GetArrayFromImage(result.probability_cropped))
+    outside = full.copy()
+    outside[z0 : z1 + 1, y0 : y1 + 1, x0 : x1 + 1] = 0
+    assert np.count_nonzero(outside) == 0
+    assert result.probability_map.GetOrigin() == masks[0].GetOrigin()

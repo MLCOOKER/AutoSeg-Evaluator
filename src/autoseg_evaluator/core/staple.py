@@ -8,21 +8,29 @@ For each ``compute_staple`` call we:
 
 1. Compute the union bounding box of all input masks, pad it (so the
    probabilistic edges aren't clipped), and crop every mask to that ROI.
-   This is the "small-structure" workaround — STAPLE's automatic prior is
-   the average per-rater volume fraction of the whole image; for small
-   organs (lens, optic chiasm, cochlea) that fraction is so tiny the EM
-   algorithm collapses the consensus to zero. Cropping rescales the prior
-   to a more reasonable fraction of the relevant region.
+   STAPLE estimates each rater's specificity and the foreground prior from
+   every voxel it is given. Over a whole CT those are dominated by background
+   all raters agree on, so they depend on the scan's field of view rather than
+   on the contours: specificity tends to 1 and the prior to 0. Estimating in
+   the neighbourhood of the structure, where the raters' delineations differ,
+   keeps both about the contours. It is a choice of estimation domain, in the
+   spirit of STAPLE's consensus-region variants (Asman & Landman 2011), not a
+   rescue: on the HN1 sample whole-image STAPLE leaves no organ empty, the
+   cochleae included, and gives the same consensus for 50 of 55 organs; the
+   other five are larger by up to 8 % (Supplementary 5, docs/validation/).
 2. Run STAPLE on the cropped stack and read back per-rater
    sensitivity / specificity and the probabilistic truth.
 3. Threshold the probability map at 0.5 → binary consensus mask.
-4. Pad both the probability map and the binary consensus back to the
-   original image extent so downstream metric code can compare them with
-   the rater masks unchanged.
+4. Pad the binary consensus back to the original image extent so downstream
+   metric code can compare it with the rater masks unchanged.
 
 The returned :class:`StapleResult` also carries scalar uncertainty
 summaries (uncertain-band volume, mean entropy) that the worker dumps into
-the consensus summary row.
+the consensus summary row. They are read from the cropped images: everything
+outside the box is zero in every one of them, so it adds nothing to a count or
+to a mean over voxels above a threshold. Padding the probability map back to
+the whole CT first cost a float32 volume and a float64 copy of it per call,
+several hundred megabytes on a large CT, for no difference in any value.
 """
 
 from __future__ import annotations
@@ -35,15 +43,44 @@ import SimpleITK as sitk
 # ---- Configuration -------------------------------------------------------
 
 
+# ---- Reference labels ------------------------------------------------------
+#
+# Two different things get called a STAPLE consensus, and they answer different
+# questions. They lived as bare literals in two modules differing only in the
+# case of one letter — "STAPLE Consensus" against "STAPLE consensus" — so
+# telling them apart rested on nobody tidying the capitalisation, and the
+# Report tab's reference selector showed two entries a reader could not
+# distinguish.
+
+#: Tab 2's multi-observer consensus, pooled from several *observers'* structure
+#: sets and then designated as the ground truth. The sources being evaluated
+#: are not in the pool.
+MULTI_OBSERVER_LABEL = "STAPLE Consensus"
+
+#: Tab 3's per-drawer consensus, pooled from the contours in one drawer — which
+#: always includes the test contours being scored against it. A different
+#: analysis with a different caveat, so it gets a name that says so.
+DRAWER_POOL_LABEL = "STAPLE (drawer pool)"
+
+#: What :data:`DRAWER_POOL_LABEL` was called before it had a distinguishing
+#: name. Sessions saved earlier carry it, and the report maps it forward so
+#: those results do not appear as a third, phantom reference.
+LEGACY_DRAWER_POOL_LABEL = "STAPLE consensus"
+
+
 @dataclass(frozen=True)
 class StapleConfig:
     """User-facing STAPLE knobs surfaced in the Compute tab.
 
     Defaults are aligned with published MICCAI consensus-contour pipelines:
 
-    * ``max_iterations=100`` matches the BraTS / MICCAI consensus challenges
-      (Bakas 2018; Asman & Landman 2011); SimpleITK's default of 5 is too
-      few to converge for clinical OARs.
+    * ``max_iterations=500`` is a safeguard, not part of the method. SimpleITK
+      itself sets no practical limit (its default is the largest unsigned
+      integer) and stops when the estimates converge, which is STAPLE as
+      published. A cap of 100 stopped 2 of the 55 organs of the HN1 sample
+      short of convergence (one needs 151 iterations); 500 lets every one
+      converge, so the result is SimpleITK's own, and a run that does reach it
+      says so in the *STAPLE converged* column. The Compute tab allows 1-500.
     * ``confidence_weight=1.0`` — "leave it alone" per the ITK docstring.
     * ``target_fg_ratio_max=0.50`` is the upper target for the adaptive
       bounding box. The padder grows the union bbox one voxel-ring at a
@@ -53,8 +90,11 @@ class StapleConfig:
       rather than trivially ~1.0. Only the upper bound is enforced:
       growing the box can only *lower* the ratio, and the box is never
       cropped inside the union, so a sparse structure simply keeps its
-      natural (low) ratio. Rationale: Iglesias & Sabuncu 2015; Asman &
-      Landman 2011.
+      natural (low) ratio. The value is a heuristic, not taken from the
+      literature. On the HN1 sample the union's own box is already below it
+      for every organ, so the padding stays at its 2-voxel minimum; a
+      25-voxel margin instead gives whole-image STAPLE's consensus on the five
+      organs where that differs (Supplementary 5, docs/validation/).
     * ``bbox_padding_min_voxels=2`` — always include this much boundary
       headroom regardless of ratio, so STAPLE has room to estimate the
       probabilistic edge.
@@ -62,7 +102,7 @@ class StapleConfig:
       expansion on tiny / sparse contours.
     """
 
-    max_iterations: int = 100
+    max_iterations: int = 500
     confidence_weight: float = 1.0
     target_fg_ratio_max: float = 0.50
     bbox_padding_min_voxels: int = 2
@@ -72,7 +112,7 @@ class StapleConfig:
     def from_dict(cls, d: dict | None) -> StapleConfig:
         d = dict(d or {})
         return cls(
-            max_iterations=int(d.get("max_iterations", 100)),
+            max_iterations=int(d.get("max_iterations", 500)),
             confidence_weight=float(d.get("confidence_weight", 1.0)),
             target_fg_ratio_max=float(d.get("target_fg_ratio_max", 0.50)),
             bbox_padding_min_voxels=int(d.get("bbox_padding_min_voxels", 2)),
@@ -93,7 +133,8 @@ class StapleResult:
     """
 
     consensus_mask: sitk.Image  # uint8 binary, P ≥ 0.5
-    probability_map: sitk.Image  # float32 in [0, 1]
+    probability_cropped: sitk.Image  # float32 in [0, 1], over probability_bbox only
+    probability_bbox: tuple[int, int, int, int, int, int]  # (x0, y0, z0, x1, y1, z1)
     sensitivities: list[float]
     specificities: list[float]
     elapsed_iterations: int
@@ -111,6 +152,21 @@ class StapleResult:
     def converged(self) -> bool:
         """``True`` when STAPLE stopped before hitting the iteration cap."""
         return self.elapsed_iterations < self.max_iterations
+
+    @property
+    def probability_map(self) -> sitk.Image:
+        """The probability map over the whole image (float32), built on request.
+
+        Zero outside the box STAPLE ran in. Nothing in the computation needs
+        it at this size, so it is not built unless asked for.
+        """
+        return _pad_back(
+            self.probability_cropped,
+            self.consensus_mask,
+            self.probability_bbox,
+            default=0.0,
+            pixel_type=sitk.sitkFloat32,
+        )
 
 
 # ---- Main entry point ----------------------------------------------------
@@ -139,11 +195,11 @@ def compute_staple(
         if m.GetSize() != reference.GetSize() or m.GetSpacing() != reference.GetSpacing():
             raise ValueError("STAPLE requires all masks to share geometry.")
 
-    # Crop to the union bounding box. Padding is chosen adaptively so the
-    # foreground-to-bbox ratio falls inside the target band (Iglesias 2015,
-    # Asman 2011) — keeps specificity informative for small structures
-    # without squeezing the boundary on large ones. Build the union once
-    # and reuse it for both the adaptive sizer and the final bbox.
+    # Crop to the union bounding box, so STAPLE estimates in the structure's
+    # neighbourhood rather than over the scan's field of view (see the module
+    # docstring). Padding is chosen adaptively against the foreground-ratio
+    # target. Build the union once and reuse it for both the adaptive sizer
+    # and the final bbox.
     image_size_xyz = reference.GetSize()
     union_mask = _build_union_mask(valid)
     chosen_padding, fg_ratio_after = _choose_adaptive_padding(
@@ -169,24 +225,29 @@ def compute_staple(
     specificities = [float(s) for s in f.GetSpecificity()]
     elapsed = int(f.GetElapsedIterations())
 
-    # Build the binary consensus (cropped), then pad both back to the
-    # original image extent so downstream code can compare against masks
-    # that were never cropped.
+    # Build the binary consensus (cropped), then pad it back to the original
+    # image extent so downstream code can compare against masks that were
+    # never cropped.
     bin_cropped = sitk.BinaryThreshold(prob_cropped, lowerThreshold=0.5, upperThreshold=1.0)
     bin_cropped = sitk.Cast(bin_cropped, sitk.sitkUInt8)
-    probability_map = _pad_back(
-        prob_cropped, reference, bbox, default=0.0, pixel_type=sitk.sitkFloat32
-    )
     consensus_mask = _pad_back(bin_cropped, reference, bbox, default=0, pixel_type=sitk.sitkUInt8)
+    # The probabilities are kept at float32, the precision the full map always
+    # had, and rounded the same way, so the summaries below read the same values.
+    probability_cropped = sitk.GetImageFromArray(
+        sitk.GetArrayFromImage(prob_cropped).astype(np.float32)
+    )
+    probability_cropped.CopyInformation(prob_cropped)
 
-    # Scalar uncertainty summaries
-    consensus_volume_cc = _volume_cc(consensus_mask)
-    uncertain_band_cc, mean_entropy = _uncertainty_metrics(probability_map)
-    rater_disagreement_cc, rater_volume_range_cc = _rater_disagreement(valid)
+    # Scalar uncertainty summaries, over the box: outside it every image here
+    # is zero, which no count or above-threshold mean includes.
+    consensus_volume_cc = _volume_cc(bin_cropped)
+    uncertain_band_cc, mean_entropy = _uncertainty_metrics(probability_cropped)
+    rater_disagreement_cc, rater_volume_range_cc = _rater_disagreement(cropped)
 
     return StapleResult(
         consensus_mask=consensus_mask,
-        probability_map=probability_map,
+        probability_cropped=probability_cropped,
+        probability_bbox=bbox,
         sensitivities=sensitivities,
         specificities=specificities,
         elapsed_iterations=elapsed,
@@ -200,6 +261,30 @@ def compute_staple(
         bbox_padding_used=int(chosen_padding),
         bbox_fg_ratio=float(fg_ratio_after),
     )
+
+
+def staple_from_structures(
+    image: sitk.Image,
+    structures: list[tuple[object, int]],
+    config: StapleConfig | None = None,
+) -> StapleResult | None:
+    """Rasterise each ``(RTSTRUCT dataset, ROI number)`` on ``image``, then STAPLE.
+
+    The one route from a synthetic consensus's constituents to its mask, so the
+    metrics, the Match Contours viewer and the qualitative viewer all show the
+    same consensus. Returns ``None`` when fewer than two constituents yield a
+    mask, as :func:`compute_staple` does.
+    """
+    from autoseg_evaluator.core.masks import extract_mask_for_roi
+
+    masks = []
+    for rtss, roi_number in structures:
+        mask = extract_mask_for_roi(image, rtss, int(roi_number))
+        if mask is not None:
+            masks.append(mask)
+    if len(masks) < 2:
+        return None
+    return compute_staple(masks, config)
 
 
 def sensitivity_specificity_vs_reference(

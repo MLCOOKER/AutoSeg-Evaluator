@@ -348,7 +348,6 @@ def test_run_auto_match_populates_drawers_for_template_organs(qapp, populated_li
     tab._settings["last_template"] = {
         "organs": ["Prostate", "Bladder"],
         "gt_manufacturer": "Varian",
-        "gt_filename": "",
         "similarity_threshold": 0.6,
     }
     tab._on_run_auto_match_clicked()
@@ -366,7 +365,7 @@ def test_run_auto_match_populates_drawers_for_template_organs(qapp, populated_li
 
 def test_run_auto_match_warns_when_no_template_defined(qapp, populated_library):
     tab = _make_tab(qapp, populated_library)
-    tab._settings["last_template"] = {"organs": [], "gt_manufacturer": "", "gt_filename": ""}
+    tab._settings["last_template"] = {"organs": [], "gt_manufacturer": ""}
     tab._on_run_auto_match_clicked()
     assert tab._drawers == {}
     assert "No template defined" in tab._status_label.text()
@@ -377,12 +376,48 @@ def test_run_auto_match_warns_when_no_gt_criterion(qapp, populated_library):
     tab._settings["last_template"] = {
         "organs": ["Prostate"],
         "gt_manufacturer": "",
-        "gt_filename": "",
         "similarity_threshold": 0.6,
     }
     tab._on_run_auto_match_clicked()
     assert tab._drawers == {}
-    assert "source-label or filename criterion" in tab._status_label.text()
+    assert "needs a source label" in tab._status_label.text()
+
+
+def test_a_filename_criterion_no_longer_identifies_the_gt(qapp, populated_library):
+    """The GT RTSS is identified by source label only.
+
+    A template saved before the filename field was removed still holds one; it
+    must not be used, so a template with nothing else is refused.
+    """
+    tab = _make_tab(qapp, populated_library)
+    tab._settings["last_template"] = {
+        "organs": ["Prostate"],
+        "gt_source_label": "",
+        "gt_filename": "dcm",
+        "similarity_threshold": 0.6,
+    }
+    tab._on_run_auto_match_clicked()
+    assert tab._drawers == {}
+    assert "needs a source label" in tab._status_label.text()
+
+
+def test_the_template_dialog_offers_only_the_source_label(qapp):
+    from PySide6.QtWidgets import QLabel
+
+    from autoseg_evaluator.ui.dialogs.template import TemplateDialog
+
+    dialog = TemplateDialog({"organs": ["Bladder"], "gt_filename": "manual"})
+    labels = " ".join(label.text() for label in dialog.findChildren(QLabel))
+    assert "Source label contains" in labels
+    assert "ilename" not in labels
+    dialog._mfr_edit.setText("Varian")
+    dialog._on_accept()
+    assert dialog.template() == {
+        "organs": ["Bladder"],
+        "gt_source_label": "Varian",
+        "similarity_threshold": 0.6,
+    }
+    dialog.deleteLater()
 
 
 def test_find_gt_rtss_matches_source_label_not_just_manufacturer():
@@ -410,9 +445,9 @@ def test_find_gt_rtss_matches_source_label_not_just_manufacturer():
     )
     patient = SimpleNamespace(contexts=[SimpleNamespace(rtstructs=[rtss])])
     # Matches against source_label even though Manufacturer is empty.
-    assert _find_gt_rtss(patient, "inhouse", "") is rtss
+    assert _find_gt_rtss(patient, "inhouse") is rtss
     # Negative: a substring that doesn't appear in source_label fails.
-    assert _find_gt_rtss(patient, "limbus", "") is None
+    assert _find_gt_rtss(patient, "limbus") is None
 
 
 def test_find_gt_rtss_honours_user_override_on_source_label():
@@ -438,7 +473,7 @@ def test_find_gt_rtss_honours_user_override_on_source_label():
         study_instance_uid="study-1",
     )
     patient = SimpleNamespace(contexts=[SimpleNamespace(rtstructs=[rtss])])
-    assert _find_gt_rtss(patient, "limbus", "") is rtss
+    assert _find_gt_rtss(patient, "limbus") is rtss
 
 
 def test_run_auto_match_skips_patients_with_no_gt_rtss(qapp, populated_library):
@@ -446,7 +481,6 @@ def test_run_auto_match_skips_patients_with_no_gt_rtss(qapp, populated_library):
     tab._settings["last_template"] = {
         "organs": ["Prostate"],
         "gt_manufacturer": "NonExistentVendor",
-        "gt_filename": "",
         "similarity_threshold": 0.6,
     }
     tab._on_run_auto_match_clicked()

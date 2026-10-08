@@ -1,9 +1,14 @@
-"""Voxel-exact equivalence between AutoSeg's mask rasteriser and PlatiPy's.
+"""Voxel-exact equivalence between AutoSeg's **legacy** rasteriser and PlatiPy's.
 
-AutoSeg Evaluator's :func:`extract_mask_for_roi` is a port of PlatiPy's
+AutoSeg Evaluator's ``legacy`` backend is a port of PlatiPy's
 ``transform_point_set_from_dicom_struct``. This test pins the two
 implementations as bit-for-bit identical so future refactors of
 ``core/masks.py`` can't silently drift away from PlatiPy semantics —
+
+The default backend is now ``continuous`` (sub-voxel vertex coordinates), which
+deliberately differs from PlatiPy, so every call here passes
+``backend=RASTERISER_LEGACY`` explicitly. Conformance of the *default* backend
+is covered by ``test_rasteriser_backends.py``.
 in particular the XOR slice-combination that produces correct hole
 behaviour for donut-shaped structures.
 
@@ -34,6 +39,7 @@ from pydicom.uid import (
 )
 
 from autoseg_evaluator.core.masks import (
+    RASTERISER_LEGACY,
     extract_mask_for_roi,
     read_dicom_image,
     read_rtstruct,
@@ -270,7 +276,7 @@ def test_autoseg_rasteriser_matches_platipy(synthetic_dataset, roi_number, roi_n
     image = read_dicom_image(str(folder))
     ds = read_rtstruct(str(rtss_path))
 
-    autoseg_mask = extract_mask_for_roi(image, ds, roi_number)
+    autoseg_mask = extract_mask_for_roi(image, ds, roi_number, backend=RASTERISER_LEGACY)
     assert autoseg_mask is not None, f"AutoSeg failed to rasterise ROI {roi_number}"
 
     platipy_masks, platipy_names = transform_point_set_from_dicom_struct(image, ds)
@@ -301,7 +307,7 @@ def test_donut_xor_actually_produces_hole(synthetic_dataset):
     folder, rtss_path = synthetic_dataset
     image = read_dicom_image(str(folder))
     ds = read_rtstruct(str(rtss_path))
-    mask = extract_mask_for_roi(image, ds, roi_number=2)
+    mask = extract_mask_for_roi(image, ds, roi_number=2, backend=RASTERISER_LEGACY)
     assert mask is not None
     arr = sitk.GetArrayFromImage(mask).astype(bool)
     # The slice containing the donut is z_index=5 (z = 10mm, slice thickness 2mm).

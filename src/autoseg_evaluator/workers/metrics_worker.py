@@ -15,26 +15,64 @@ from __future__ import annotations
 
 import gc
 import traceback
+from collections import Counter
+from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import pydicom
+import SimpleITK as sitk
 from PySide6.QtCore import QObject, Signal, Slot
 
-from autoseg_evaluator.core.dvh import DVHConfig, DVHError, _fmt_num, compute_dvh_metrics
+from autoseg_evaluator.core.contour_grid import GridUnavailableError, build_grid
+from autoseg_evaluator.core.dvh import (
+    DoseGrid,
+    DVHConfig,
+    DVHError,
+    DVHResult,
+    mask_dvh,
+    structure_dvh,
+)
 from autoseg_evaluator.core.masks import (
-    extract_mask_for_roi,
-    find_reference_image_folder,
+    MaskConversionError,
+    find_reference_image_series,
     gt_z_extent_mm,
-    read_dicom_image,
+    mask_with_reading,
+    read_image_series,
     read_rtstruct,
+    skipped_slice_positions,
     truncate_to_gt_z_extent,
 )
-from autoseg_evaluator.core.metrics import compute_geometric_metrics
+from autoseg_evaluator.core.metrics import (
+    bounding_box,
+    compute_geometric_metrics,
+    geometric_metrics_with_audit,
+    overlap_cc,
+)
+from autoseg_evaluator.core.organ_groups import is_ptv
+from autoseg_evaluator.core.polygon_metrics import (
+    MISSING_PLANE_POLICY,
+    STATUS_NO_CONTOURS,
+    ContoursUnavailableError,
+    PolygonConfig,
+    parse_structure,
+    select_engine,
+)
 from autoseg_evaluator.core.staple import (
+    DRAWER_POOL_LABEL,
     StapleConfig,
     compute_staple,
     sensitivity_specificity_vs_reference,
+    staple_from_structures,
 )
+from autoseg_evaluator.data.linkage import (
+    consensus_constituents,
+    planning_series_uid,
+    resolve_dose,
+    resolve_image_series,
+    series_uid_of,
+)
+from autoseg_evaluator.utils.timestamps import now_local
 
 # "Mode" value for the per-organ STAPLE summary row (sensitivity/specificity
 # live on the per-rater rows; this row carries the aggregate consensus metrics
@@ -44,6 +82,31 @@ _STAPLE_DETAILS_MODE = "STAPLE Details"
 _MODE_MULTI_OBSERVER = "Multi-observer STAPLE"
 _MODE_GENERIC_STAPLE_GT = "Generic STAPLE with GT"
 _MODE_GENERIC_STAPLE_NO_GT = "Generic STAPLE no GT"
+
+#: What a row's dose statistics were integrated over, in its ``dvh_basis``
+#: column. Every structure with contours takes its DVH from them, whatever it
+#: is compared against; only a consensus, which exists only as a mask, is
+#: sampled over its voxels. Against a consensus, then, the one mask error in a
+#: difference is the consensus's own: the same for every contour compared with
+#: it, so it cancels between sources. Taking the test from its own mask as well
+#: (tried in 2026-09 and reverted) cancels that error only when the test's
+#: boundary falls among the voxels as the consensus's does, as for an identical
+#: contour; a boundary even half a voxel away along the dose gradient carries an
+#: independent error, and on the Nelms benchmark the 95th-percentile error in a
+#: Dmean difference rose from 2.1 % to 3.0 % on 1.37 mm pixels, and every dose
+#: statistic's with it (Supplementary 1, docs/validation/). The cost of the choice: a
+#: contour identical to the consensus differs from it by the mask's error, up to
+#: 2.2 % in Dmean there.
+DVH_FROM_CONTOURS = "contours"
+DVH_FROM_MASK = "mask"
+
+
+#: What the audit record says about a row's PTV overlap columns.
+PTV_STATUS_MEASURED = "measured"
+PTV_STATUS_NONE = "not measured: no structure in the ground truth's structure set is typed PTV"
+PTV_STATUS_CONSENSUS = (
+    "not measured: a consensus ground truth has no structure set of its own, so no PTV"
+)
 
 
 class MetricsWorker(QObject):
@@ -82,12 +145,65 @@ class MetricsWorker(QObject):
         self._config = dict(config or {})
         self._dvh_config = DVHConfig.from_dict(self._config.get("dvh", {}) or {})
         self._staple_config = StapleConfig.from_dict(self._config.get("staple", {}) or {})
+        self._polygon_config = PolygonConfig.from_dict(self._config.get("polygon", {}))
+        # Overlap with the PTV, recorded on every run for every test contour
+        # against a ground truth. See docs/V3_PTV_OVERLAP_SPEC.md. Per patient
+        # and structure set: the PTVs combined, cut to their bounding box, the
+        # names combined, and the status the audit records.
+        self._ptv_cache: dict[tuple[str, str], tuple[Any, list[str], str]] = {}
+        # Contour Discontinuity: whether a test contour skips a slice, checked
+        # on every run on the contour as stored. See
+        # docs/V3_SKIPPED_SLICE_SPEC.md. Per structure, ``(flag, skipped slices
+        # in mm)`` or why it was not checked.
+        self._discontinuity_cache: dict[tuple[str, str, int], Any] = {}
+        # Audit detail cannot be reconstructed from a finished table, so whether
+        # to keep it is decided before computing rather than at export time.
+        self._audit = bool((self._config.get("audit") or {}).get("sidecar", False))
+        # Resolved once on first use, then reused: selection reads an
+        # environment variable and probes for a compiled library, and doing that
+        # per ROI pair would be noise in a profile and noise in a log.
+        self._polygon_engine: Any = None
+        self._polygon_engine_error = ""
         self._cancelled = False
         # Caches keyed by SOP UID / patient ID to avoid redundant DICOM I/O
         self._rtstruct_cache: dict[str, Any] = {}
-        self._ct_cache: dict[str, Any] = {}
+        # Keyed by (patient_id, image SeriesInstanceUID) and (patient_id, dose
+        # SOP UID) rather than by patient alone: one patient can legitimately have more
+        # than one CT and more than one dose (re-irradiation, replans), and a
+        # patient-level key silently served the first one to every structure
+        # set that followed.
+        self._ct_cache: dict[tuple[str, str], Any] = {}
         self._mask_cache: dict[tuple[str, str, int], Any] = {}
-        self._dose_cache: dict[str, Any] = {}
+        # How many groups still to be computed use each mask. A mask is a
+        # full-CT volume; one leaves the cache after its last use, where it used
+        # to stay until its patient finished — every organ against every
+        # contour set at once, many gigabytes on a head and neck case.
+        self._mask_uses: Counter[tuple[str, str, int]] = Counter()
+        # One group's contour DVHs, or why each failed, keyed as
+        # :meth:`_dose_into_row` describes. Emptied after every group.
+        self._dvh_cache: dict[tuple[str, int, Any], DVHResult | DVHError] = {}
+        # Polygon stream. Grids are per image series and structures are per ROI,
+        # so both outlive the pair that first needed them: one ROI compared
+        # against five sources is parsed and prepared once, not five times.
+        # Failures are cached as their reason string, because a series that
+        # cannot yield a grid will not yield one on the next attempt either.
+        self._grid_cache: dict[tuple[str, str], Any] = {}
+        self._polygon_cache: dict[tuple[str, str, int], Any] = {}
+        # What had to be interpreted to read each structure, for the audit
+        # record: planes composed from nested rings, and references that pointed
+        # at nothing and were set aside. A structure read on anything other than
+        # its own declarations is worth being able to find later.
+        self._structure_notes: dict[tuple[str, str, int], dict[str, Any]] = {}
+        # The 3D side of the same record, and why a structure got no mask. Both
+        # keyed like ``_mask_cache``: a row should say what refused its mask,
+        # not only that something did.
+        self._mask_reading: dict[tuple[str, str, int], tuple[str, ...]] = {}
+        self._mask_failure: dict[tuple[str, str, int], str] = {}
+        self._pending_polygon_audit: dict[str, Any] | None = None
+        self._dose_cache: dict[tuple[str, str], Any] = {}
+        # The same doses as grids in Gy, or the DVHError that says why one
+        # cannot be used; keyed by (patient_id, dose SOPInstanceUID).
+        self._dose_grid_cache: dict[tuple[str, str], DoseGrid | DVHError] = {}
         # STAPLE summary scalars captured while synthesising a multi-observer
         # consensus GT (Tab 2), keyed by (patient_id, synthetic_sop, roi_number).
         # Lets the GT branch emit a "STAPLE Details" row without re-running EM.
@@ -137,6 +253,7 @@ class MetricsWorker(QObject):
         last_group_idx_for_patient: dict[str, int] = {}
         for i, g in enumerate(groups):
             last_group_idx_for_patient[g["patient_id"]] = i
+        self._mask_uses = Counter(key for g in groups for key in self._group_mask_keys(g))
 
         for i, group in enumerate(groups):
             if self._cancelled:
@@ -164,11 +281,19 @@ class MetricsWorker(QObject):
             self.progress.emit(units_done, total, state)
 
             is_last_for_patient = i == last_group_idx_for_patient[group["patient_id"]]
-            for row in self._compute_group(
-                group, state, units_done, total, drop_ct_after_masks=is_last_for_patient
-            ):
+            try:
+                rows = self._compute_group(
+                    group, state, units_done, total, drop_ct_after_masks=is_last_for_patient
+                )
+            finally:
+                self._release_group_masks(group)
+                self._dvh_cache.clear()
+            for row in rows:
                 if row.get("error"):
                     errors += 1
+                # When the row was produced: shown in the Results table and
+                # kept with the session, since scoring may come days later.
+                row.setdefault("computed_at", now_local())
                 self.result.emit(row)
 
             units_done += self._group_weight(group)
@@ -235,8 +360,9 @@ class MetricsWorker(QObject):
                 )
         # Sort patient-major so we finish every drawer for a patient before
         # moving on. Lets ``_do_run`` evict that patient's caches in one
-        # block and keeps peak RAM bounded by a single patient's worth of
-        # CT + masks instead of the entire cohort's worth.
+        # block and keeps peak RAM bounded by a single patient's CT and
+        # datasets instead of the entire cohort's; masks go sooner, after
+        # their last group (``_release_group_masks``).
         groups.sort(key=lambda g: (g["patient_id"], g["organ_name"]))
         return groups
 
@@ -249,6 +375,27 @@ class MetricsWorker(QObject):
         Floored at 1 so every group makes the bar move.
         """
         return max(1, len(group["tests"]))
+
+    @staticmethod
+    def _group_mask_keys(group: dict[str, Any]) -> set[tuple[str, str, int]]:
+        """The ``_mask_cache`` keys of every mask one group uses: its GT and tests."""
+        patient = group["patient_id"]
+        keys = {(patient, group["gt_sop"], int(group["gt_roi_number"]))}
+        keys.update((patient, t["rtstruct_sop_uid"], int(t["roi_number"])) for t in group["tests"])
+        return keys
+
+    def _release_group_masks(self, group: dict[str, Any]) -> None:
+        """Drop each of a finished group's masks that no later group uses.
+
+        A mask shared by two drawers — one ground truth for two organ drawers,
+        say — stays until the second is done. Were a count ever short, the
+        next group would rasterise the mask again: slower, never different.
+        """
+        for key in self._group_mask_keys(group):
+            self._mask_uses[key] -= 1
+            if self._mask_uses[key] <= 0:
+                del self._mask_uses[key]
+                self._mask_cache.pop(key, None)
 
     # ---- Per-group computation -------------------------------------------
 
@@ -296,16 +443,24 @@ class MetricsWorker(QObject):
             if gt_mask is None:
                 raise RuntimeError(
                     f"GT ROI #{group['gt_roi_number']} ('{group['gt_roi_name']}') "
-                    f"could not be rasterised."
+                    f"could not be rasterised"
+                    + self._mask_failure_reason(
+                        group["patient_id"], group["gt_sop"], group["gt_roi_number"]
+                    )
                 )
         except Exception as exc:  # noqa: BLE001
             error_text = f"{type(exc).__name__}: {exc}"
             return self._error_rows_for_group(group, error_text)
 
+        # The PTV is rasterised on the CT, so it is taken now, before the CT can
+        # be released below. Only the comparisons with the ground truth use it.
+        ptv = self._ptv_basis(group, ct, gt_rtss, gt_mask) if group["gt_comparison"] else None
+
         # Per-rater mask loads. Each may fail independently; failed raters
         # get a stub error row and are dropped from the STAPLE pool.
         test_records: list[dict[str, Any]] = []
         load_errors: list[dict[str, Any]] = []
+        gt_series = planning_series_uid(self._library, group["patient_id"], group["gt_sop"])
         for test in group["tests"]:
             if self._cancelled:
                 # Bail mid-group when cancelled. Whatever masks loaded so far
@@ -315,6 +470,19 @@ class MetricsWorker(QObject):
                 # on its next iteration and stop dispatching new groups.
                 return list(load_errors)
             try:
+                # Every test is rasterised on the GT's CT, so a structure set
+                # drawn on another planning image — a second course — would be
+                # measured in the wrong patient coordinates and still produce
+                # plausible numbers. Matching already refuses these; this also
+                # catches sessions saved before it did.
+                test_series = planning_series_uid(
+                    self._library, group["patient_id"], test["rtstruct_sop_uid"]
+                )
+                if gt_series is not None and test_series is not None and test_series != gt_series:
+                    raise RuntimeError(
+                        "this structure set was drawn on a different planning image "
+                        "from the ground truth, so the two cannot be compared"
+                    )
                 test_rtss = self._load_rtstruct(group["patient_id"], test["rtstruct_sop_uid"])
                 test_mask = self._get_mask(
                     group["patient_id"],
@@ -326,13 +494,25 @@ class MetricsWorker(QObject):
                 if test_mask is None:
                     raise RuntimeError(
                         f"Test ROI #{test['roi_number']} ('{test['organ_name']}') "
-                        f"could not be rasterised."
+                        f"could not be rasterised"
+                        + self._mask_failure_reason(
+                            group["patient_id"], test["rtstruct_sop_uid"], test["roi_number"]
+                        )
                     )
             except Exception as exc:  # noqa: BLE001
                 load_errors.append(
                     self._make_test_error_row(group, test, f"{type(exc).__name__}: {exc}")
                 )
                 continue
+            # Checked on the contour as stored, so before truncation and
+            # whatever truncation does.
+            discontinuity = self._contour_discontinuity(
+                group["patient_id"],
+                test["rtstruct_sop_uid"],
+                test["roi_number"],
+                ct,
+                test_rtss,
+            )
             # Truncation applies before STAPLE (per user spec) — store both forms
             if group["truncate"]:
                 truncated_mask, extent_info = truncate_to_gt_z_extent(test_mask, gt_mask)
@@ -345,6 +525,7 @@ class MetricsWorker(QObject):
                     "rtss": test_rtss,
                     "mask": truncated_mask,
                     "extent_info": extent_info,
+                    "discontinuity": discontinuity,
                 }
             )
 
@@ -355,7 +536,7 @@ class MetricsWorker(QObject):
         # doesn't hold the extra ~200 MB. The dose dataset stays cached — it
         # is consulted by the DVH branch below.
         if drop_ct_after_masks:
-            self._ct_cache.pop(group["patient_id"], None)
+            self._release_ct(group["patient_id"], group["gt_sop"])
             del ct  # noqa: F841 — drop the local ref too so refcount can hit 0
             gc.collect()
 
@@ -370,7 +551,7 @@ class MetricsWorker(QObject):
             if self._dvh_config.any_enabled():
                 if self._cancelled:
                     return rows
-                gt_dvh_row = self._compute_gt_dvh_row(group, gt_rtss)
+                gt_dvh_row = self._compute_gt_dvh_row(group, gt_rtss, gt_mask)
                 if gt_dvh_row is not None:
                     rows.append(gt_dvh_row)
                     # Reuse the GT's own dose statistics so each test row can
@@ -397,7 +578,7 @@ class MetricsWorker(QObject):
                 # show per-rater activity; the bar advances by the group's
                 # weight once the whole group finishes (keeps it monotonic).
                 self.progress.emit(idx, total, state)
-                rows.append(self._compute_gt_row(group, rec, gt_mask, gt_dvh, dvh_z_extent))
+                rows.append(self._compute_gt_row(group, rec, gt_mask, gt_dvh, dvh_z_extent, ptv))
 
         # When the GT is a multi-observer synthetic consensus (Tab 2), emit a
         # "STAPLE Details" row describing the consensus that backs this GT.
@@ -427,8 +608,12 @@ class MetricsWorker(QObject):
         gt_mask,
         gt_dvh: dict[str, float] | None = None,
         z_extent_mm: tuple[float, float] | None = None,
+        ptv: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """One row: a single test vs the designated GT.
+
+        ``ptv`` is the group's PTV and the ground truth's overlap with it
+        (:meth:`_ptv_basis`).
 
         ``gt_dvh`` carries the GT contour's own dose statistics (computed once
         per group); when present, each DVH metric also gets a ``{key}_diff``
@@ -457,7 +642,17 @@ class MetricsWorker(QObject):
         row["truncated_slices"] = int(record["extent_info"]["slices_removed"])
         row["truncated_extent_mm"] = float(record["extent_info"]["extent_removed_mm"])
         try:
-            row["metrics"].update(compute_geometric_metrics(gt_mask, record["mask"], self._config))
+            # With the audit on, its record comes from the same pass, reusing
+            # the surface distances rather than computing them a second time.
+            if self._audit:
+                geometric, mask_detail = geometric_metrics_with_audit(
+                    gt_mask, record["mask"], self._config
+                )
+            else:
+                geometric = compute_geometric_metrics(gt_mask, record["mask"], self._config)
+            row["metrics"].update(geometric)
+            self._ptv_into_row(row, ptv, record["mask"])
+            self._discontinuity_into_row(row, record.get("discontinuity"))
             # When the GT is a multi-observer STAPLE consensus, also report each
             # test's sensitivity / specificity against that consensus (treating
             # the consensus as truth) — alongside the geometric metrics.
@@ -469,20 +664,57 @@ class MetricsWorker(QObject):
                     row["metrics"]["staple_sensitivity"] = ss[0]
                     row["metrics"]["staple_specificity"] = ss[1]
             if self._dvh_config.any_enabled():
-                dose_ds = self._load_dose(group["patient_id"])
-                if dose_ds is not None:
-                    try:
-                        row["metrics"].update(
-                            compute_dvh_metrics(
-                                record["rtss"],
-                                dose_ds,
-                                test["roi_number"],
-                                self._dvh_config,
-                                z_extent_mm=z_extent_mm,
-                            )
-                        )
-                    except DVHError as dvh_exc:
-                        row["error"] = f"DVH: {dvh_exc}"
+                # From the test's contours, whatever the ground truth is: see
+                # DVH_FROM_CONTOURS for why not from its mask against a consensus.
+                self._structure_dose_into_row(
+                    row,
+                    group,
+                    sop=test["rtstruct_sop_uid"],
+                    roi_number=test["roi_number"],
+                    rtss=record["rtss"],
+                    mask=record["mask"],
+                    z_extent_mm=z_extent_mm,
+                    from_mask=False,
+                )
+            # The polygon stream, measured on the stored contours rather than
+            # on the rasterised masks above. It is a separate measurement of the
+            # same pair, so a failure here leaves the mask metrics standing and
+            # lands in its own status column instead of the row's error.
+            if self._polygon_config.any_enabled():
+                self._pending_polygon_audit = None
+                values, status = self._polygon_metrics(group, record)
+                row["metrics"].update(values)
+                row["metrics"]["poly_status"] = status
+                if self._audit and self._pending_polygon_audit is not None:
+                    row.setdefault("audit", {})["polygon"] = self._pending_polygon_audit
+            if self._audit:
+                # Kept off row["metrics"], so it never becomes a column.
+                reading = {
+                    side: list(notes)
+                    for side, notes in (
+                        (
+                            "ground_truth",
+                            self._mask_reading.get(
+                                (group["patient_id"], group["gt_sop"], group["gt_roi_number"]), ()
+                            ),
+                        ),
+                        (
+                            "test",
+                            self._mask_reading.get(
+                                (
+                                    group["patient_id"],
+                                    record["meta"]["rtstruct_sop_uid"],
+                                    record["meta"]["roi_number"],
+                                ),
+                                (),
+                            ),
+                        ),
+                    )
+                    if notes
+                }
+                if reading:
+                    mask_detail["contour_reading"] = reading
+                row.setdefault("audit", {})["mask"] = mask_detail
             # Per-DVH-metric difference from the GT (test − GT), so the table
             # carries both absolutes and the deviation from the reference.
             if gt_dvh:
@@ -492,6 +724,260 @@ class MetricsWorker(QObject):
         except Exception as exc:  # noqa: BLE001
             row["error"] = f"{type(exc).__name__}: {exc}"
         return row
+
+    # ---- PTV overlap -------------------------------------------------------
+
+    def _ptv_region(
+        self, patient_id: str, sop_uid: str, ct: Any, rtss: Any
+    ) -> tuple[Any, list[str], str]:
+        """One structure set's PTVs combined: ``(region, names, status)``.
+
+        Every structure typed PTV (D10: the name is not read), rasterised on the
+        CT and combined, so a voxel inside two PTVs counts once. ``region`` is
+        the union cut to its bounding box, with the box: ``(cropped, box)``, for
+        :func:`overlap_cc`. It is ``None`` when there is no PTV, or when one
+        cannot be rasterised: a union missing a PTV would understate the
+        overlap, which is worse than giving no value. Cached per patient and
+        structure set, so every organ of the patient reuses one union.
+        """
+        key = (patient_id, sop_uid)
+        if key in self._ptv_cache:
+            return self._ptv_cache[key]
+        entry = self._find_rtstruct_entry(patient_id, sop_uid)
+        ptvs = sorted(
+            (int(organ.roi_number), organ.roi_name)
+            for organ in getattr(entry, "organs", None) or []
+            if is_ptv(organ.interpreted_type)
+        )
+        names = [name for _number, name in ptvs]
+        region = None
+        status = PTV_STATUS_MEASURED if ptvs else PTV_STATUS_NONE
+        for roi_number, name in ptvs:
+            try:
+                mask, _notes = mask_with_reading(ct, rtss, roi_number)
+            except MaskConversionError as exc:
+                region = None
+                status = f"not measured: the PTV '{name}' could not be rasterised ({exc})"
+                break
+            filled = sitk.GetArrayFromImage(mask).astype(bool)
+            region = filled if region is None else np.logical_or(region, filled, out=region)
+        if region is not None:
+            box = bounding_box(region)
+            region = (region[box].copy(), box)  # the full-size union is let go
+        result = (region, names, status)
+        self._ptv_cache[key] = result
+        return result
+
+    def _ptv_basis(self, group: dict[str, Any], ct: Any, gt_rtss: Any, gt_mask: Any) -> Any:
+        """What each test row of a group is measured against.
+
+        The PTV region, the ground truth's overlap with it, and the account the
+        audit records. Only the ground truth's own structure set supplies a PTV
+        (D5), so a consensus ground truth, which has none, gets no value.
+        """
+        if group.get("_gt_synthetic"):
+            return {"region": None, "structures": [], "status": PTV_STATUS_CONSENSUS}
+        region, names, status = self._ptv_region(group["patient_id"], group["gt_sop"], ct, gt_rtss)
+        basis: dict[str, Any] = {"region": region, "structures": names, "status": status}
+        if region is not None:
+            try:
+                basis["gt_cc"] = overlap_cc(gt_mask, *region)
+            except ValueError as exc:
+                basis.update(region=None, status=f"not measured: {exc}")
+        return basis
+
+    def _ptv_into_row(self, row: dict[str, Any], basis: Any, test_mask: Any) -> None:
+        """The three PTV columns, or none, with the reason in the audit record.
+
+        ``test_mask`` is the mask the other 3D metrics used: cut to the ground
+        truth's extent when the drawer truncates (D6). A blank says why only in
+        the audit record, there being no status column (D7).
+        """
+        if basis is None:
+            return
+        if basis["region"] is not None:
+            test_cc = overlap_cc(test_mask, *basis["region"])
+            row["metrics"]["gt_ptv_overlap_cc"] = basis["gt_cc"]
+            row["metrics"]["test_ptv_overlap_cc"] = test_cc
+            row["metrics"]["ptv_overlap_diff_cc"] = test_cc - basis["gt_cc"]
+            # The case worth flagging (D9), as the Report tab counts it.
+            row["metrics"]["test_only_ptv_overlap"] = bool(test_cc > 0 and basis["gt_cc"] == 0)
+        if self._audit:
+            row.setdefault("audit", {})["ptv"] = {
+                "status": basis["status"],
+                "structures": list(basis["structures"]),
+            }
+
+    # ---- Contour Discontinuity ---------------------------------------------
+
+    def _contour_discontinuity(
+        self, patient_id: str, sop_uid: str, roi_number: int, ct: Any, rtss: Any
+    ) -> Any:
+        """Whether a test contour skips a slice: ``(flag, skipped z in mm)``.
+
+        Or, as a string, why it could not be checked. The contour as stored,
+        never truncated, and the test contour only; the ground truth is not
+        checked. Cached per structure.
+        """
+        key = (patient_id, sop_uid, int(roi_number))
+        if key not in self._discontinuity_cache:
+            try:
+                skipped = skipped_slice_positions(ct, rtss, roi_number)
+                self._discontinuity_cache[key] = (bool(skipped), skipped)
+            except MaskConversionError as exc:
+                self._discontinuity_cache[key] = f"not checked: {exc}"
+        return self._discontinuity_cache[key]
+
+    def _discontinuity_into_row(self, row: dict[str, Any], result: Any) -> None:
+        """The Contour Discontinuity column, and the skipped slices for the audit."""
+        if result is None:
+            return
+        if isinstance(result, str):
+            if self._audit:
+                row.setdefault("audit", {})["discontinuity"] = {"status": result}
+            return
+        flag, skipped = result
+        row["metrics"]["contour_discontinuity"] = flag
+        if self._audit:
+            row.setdefault("audit", {})["discontinuity"] = {
+                "status": "checked",
+                "skipped_slices_mm": list(skipped),
+            }
+
+    # ---- Polygon stream ---------------------------------------------------
+
+    def _polygon_engine_for_run(self) -> Any:
+        """The engine for this run, chosen once.
+
+        A failure to choose one is cached as well. If no compiled library exists
+        and the environment demanded one, every pair fails the same way, and
+        saying so once per pair is more useful than raising out of the run.
+        """
+        if self._polygon_engine is None and not self._polygon_engine_error:
+            try:
+                self._polygon_engine = select_engine()
+            except Exception as exc:  # noqa: BLE001 — becomes a per-row status
+                self._polygon_engine_error = f"unavailable: {exc}"
+        return self._polygon_engine
+
+    def _polygon_grid(self, patient_id: str, rtstruct_sop_uid: str) -> Any:
+        """The contour frame for the series this structure set was drawn on.
+
+        Resolved through the same linkage the rest of the run uses, so a
+        two-course patient gets the frame belonging to the course in hand rather
+        than whichever series happened to be first.
+        """
+        key = (patient_id, rtstruct_sop_uid)
+        if key in self._grid_cache:
+            return self._grid_cache[key]
+        try:
+            resolution = resolve_image_series(self._library, patient_id, rtstruct_sop_uid)
+            series = resolution.target
+            if series is None or not getattr(series, "files", None):
+                raise GridUnavailableError(
+                    "No image series resolved for this structure set, so contours "
+                    "cannot be placed in a frame."
+                )
+            grid = build_grid(list(series.files))
+        except GridUnavailableError as exc:
+            grid = f"unavailable: {exc}"
+        self._grid_cache[key] = grid
+        return grid
+
+    def _polygon_structure(
+        self, patient_id: str, sop_uid: str, roi_number: int, dataset: Any, grid: Any
+    ) -> Any:
+        """One ROI as prepared regions, cached across every pair that uses it."""
+        key = (patient_id, sop_uid, roi_number)
+        if key in self._polygon_cache:
+            return self._polygon_cache[key]
+        try:
+            regions = parse_structure(dataset, roi_number, grid)
+            if regions.empty:
+                prepared = "undefined: this structure has no contours on any plane"
+            else:
+                prepared = self._polygon_engine_for_run().prepare(regions)
+                self._structure_notes[key] = {
+                    "nested_planes": int(regions.nested_planes),
+                    "references_set_aside": list(regions.references_set_aside),
+                    "reading": list(regions.reading_notes),
+                }
+        except ContoursUnavailableError as exc:
+            prepared = f"unavailable: {exc}"
+        except Exception as exc:  # noqa: BLE001 — becomes a per-row status
+            prepared = f"unavailable: {type(exc).__name__}: {exc}"
+        self._polygon_cache[key] = prepared
+        return prepared
+
+    def _polygon_metrics(self, group: dict[str, Any], record: dict[str, Any]) -> tuple[dict, str]:
+        """Polygon metrics for one GT-versus-test pair, or why there are none.
+
+        Availability is a property of the **pair**, not of either structure: a
+        consensus ground truth is born as a binary mask and has no contours at
+        all, so no amount of parsing the test side makes the comparison defined.
+        """
+        if group.get("_gt_synthetic"):
+            return {}, STATUS_NO_CONTOURS
+        engine = self._polygon_engine_for_run()
+        if engine is None:
+            return {}, self._polygon_engine_error
+
+        grid = self._polygon_grid(group["patient_id"], group["gt_sop"])
+        if isinstance(grid, str):
+            return {}, grid
+
+        test = record["meta"]
+        gt_rtss = self._load_rtstruct(group["patient_id"], group["gt_sop"])
+        reference_key = (group["patient_id"], group["gt_sop"], group["gt_roi_number"])
+        reference = self._polygon_structure(*reference_key, gt_rtss, grid)
+        if isinstance(reference, str):
+            return {}, reference
+        reference_notes = self._structure_notes.get(reference_key, {})
+        candidate_key = (group["patient_id"], test["rtstruct_sop_uid"], test["roi_number"])
+        candidate = self._polygon_structure(*candidate_key, record["rtss"], grid)
+        if isinstance(candidate, str):
+            return {}, candidate
+        candidate_notes = self._structure_notes.get(candidate_key, {})
+
+        result = engine.compare(
+            reference, candidate, tolerance_mm=self._polygon_config.tolerances_mm
+        )
+        if self._audit:
+            record = dict(engine.settings)
+            record["tolerances_mm"] = list(self._polygon_config.tolerances_mm)
+            record["missing_plane_policy"] = MISSING_PLANE_POLICY
+            record["nested_planes_composed"] = reference_notes.get(
+                "nested_planes", 0
+            ) + candidate_notes.get("nested_planes", 0)
+            set_aside = {
+                side: notes["references_set_aside"]
+                for side, notes in (("ground_truth", reference_notes), ("test", candidate_notes))
+                if notes.get("references_set_aside")
+            }
+            if set_aside:
+                record["references_set_aside"] = set_aside
+            reading = {
+                side: notes["reading"]
+                for side, notes in (("ground_truth", reference_notes), ("test", candidate_notes))
+                if notes.get("reading")
+            }
+            if reading:
+                record["contour_reading"] = reading
+            if result.detail:
+                record["measurements"] = result.detail
+            if result.status:
+                record["status"] = result.status
+            if result.undefined:
+                record["undefined"] = dict(result.undefined)
+            self._pending_polygon_audit = record
+        if not result.available:
+            return {}, result.status
+        # A metric the contours leave undetermined is blank and says why; the
+        # rest of the row stands. Only reasons for metrics the user selected are
+        # shown — an unselected blank is not a finding.
+        shown = self._polygon_config.columns()
+        notes = [reason for column, reason in result.undefined.items() if column in shown]
+        return self._polygon_config.select(result.values), "; ".join(notes)
 
     @staticmethod
     def _dvh_diff_metrics(
@@ -514,6 +1000,7 @@ class MetricsWorker(QObject):
         self,
         group: dict[str, Any],
         gt_rtss,
+        gt_mask,
     ) -> dict[str, Any] | None:
         """Emit a row carrying the GT contour's own dose statistics.
 
@@ -523,8 +1010,7 @@ class MetricsWorker(QObject):
         GT vs itself is degenerate. Returns ``None`` if no dose is
         available for the patient (silently skipped).
         """
-        dose_ds = self._load_dose(group["patient_id"])
-        if dose_ds is None:
+        if self._load_dose(group["patient_id"], group["gt_sop"]) is None:
             return None
         row = self._make_row_skeleton(
             group,
@@ -536,24 +1022,18 @@ class MetricsWorker(QObject):
             comparison_mode="gt_dose",
             was_designated_gt=True,
         )
-        try:
-            # Synthetic STAPLE-consensus GT: there is no RTSS dataset to feed
-            # dicompyler-core, so we DVH straight off the synthesised binary
-            # mask via the same code path used by STAPLE consensus rows.
-            if gt_rtss is None:
-                gt_mask = self._mask_cache.get(
-                    (group["patient_id"], group["gt_sop"], group["gt_roi_number"])
-                )
-                if gt_mask is None:
-                    row["error"] = "DVH: synthetic GT mask missing — cannot evaluate dose."
-                else:
-                    row["metrics"].update(self._dvh_for_consensus_mask(gt_mask, dose_ds))
-            else:
-                row["metrics"].update(
-                    compute_dvh_metrics(gt_rtss, dose_ds, group["gt_roi_number"], self._dvh_config)
-                )
-        except DVHError as exc:
-            row["error"] = f"DVH: {exc}"
+        # A Tab 2 consensus used as ground truth exists only as a mask, so its
+        # voxels are sampled, as the STAPLE consensus rows are.
+        self._structure_dose_into_row(
+            row,
+            group,
+            sop=group["gt_sop"],
+            roi_number=group["gt_roi_number"],
+            rtss=gt_rtss,
+            mask=gt_mask,
+            z_extent_mm=None,
+            from_mask=gt_rtss is None or bool(group.get("_gt_synthetic")),
+        )
         return row
 
     # ---- STAPLE branch -----------------------------------------------------
@@ -602,6 +1082,7 @@ class MetricsWorker(QObject):
                     "rtstruct_sop_uid": t["rtstruct_sop_uid"],
                     "rtss": rec["rtss"],
                     "mask": rec["mask"],
+                    "discontinuity": rec.get("discontinuity"),
                     "was_designated_gt": False,
                     "similarity": t["similarity"],
                     "in_pool": True,
@@ -640,9 +1121,13 @@ class MetricsWorker(QObject):
         # lookup so raters outside the pool can still appear in results
         # (with empty sens/spec) compared against the consensus.
         pool_idx_by_id = {id(r): i for i, r in enumerate(staple_pool)}
-        # Dose is computed per rater (each source label's own contour), so the
-        # results carry dose for every rater — not just the consensus.
-        dose_ds = self._load_dose(group["patient_id"]) if self._dvh_config.any_enabled() else None
+        # Dose is computed per rater, so the results carry dose for every rater,
+        # not just the consensus.
+        dose_ds = (
+            self._load_dose(group["patient_id"], group["gt_sop"])
+            if self._dvh_config.any_enabled()
+            else None
+        )
         # When truncation is active the test raters' masks were cropped to the
         # GT extent, so truncate their DVH contour planes to match. The GT
         # rater is never truncated.
@@ -668,7 +1153,7 @@ class MetricsWorker(QObject):
             # Override GT metadata: the reference is the STAPLE consensus,
             # not the manual GT — no file, no ROI number, but keep the
             # organ name so the row still reads naturally.
-            row["gt_source_label"] = "STAPLE consensus"
+            row["gt_source_label"] = DRAWER_POOL_LABEL
             row["gt_rtstruct_filename"] = ""
             row["gt_roi_name"] = group["organ_name"]
             row["gt_roi_number"] = 0
@@ -678,6 +1163,8 @@ class MetricsWorker(QObject):
                 row["metrics"].update(
                     compute_geometric_metrics(consensus_mask, rater["mask"], self._config)
                 )
+                # Test raters only: the ground truth is never checked.
+                self._discontinuity_into_row(row, rater.get("discontinuity"))
                 pool_idx = pool_idx_by_id.get(id(rater))
                 if pool_idx is not None:
                     row["metrics"]["staple_sensitivity"] = float(result.sensitivities[pool_idx])
@@ -685,22 +1172,21 @@ class MetricsWorker(QObject):
                 # else: GT excluded from pool — sens/spec stay empty since the
                 # EM never saw this rater's mask. Geometric vs consensus still
                 # populated so the user can quantify GT-vs-AI-ensemble agreement.
-                # Per-rater dose (this source label's own contour), truncated to
-                # the GT extent for test raters (not the GT rater itself).
-                if dose_ds is not None and rater.get("rtss") is not None:
-                    rater_z_extent = None if rater["was_designated_gt"] else dvh_z_extent
-                    try:
-                        row["metrics"].update(
-                            compute_dvh_metrics(
-                                rater["rtss"],
-                                dose_ds,
-                                rater["roi_number"],
-                                self._dvh_config,
-                                z_extent_mm=rater_z_extent,
-                            )
-                        )
-                    except DVHError as dvh_exc:
-                        row["error"] = f"DVH: {dvh_exc}"
+                # Per-rater dose, from the rater's contours, as against a manual
+                # ground truth; only the consensus itself is taken from a mask.
+                # Test raters are cut to the GT's extent when truncating; the
+                # GT rater never is.
+                if dose_ds is not None:
+                    self._structure_dose_into_row(
+                        row,
+                        group,
+                        sop=rater["rtstruct_sop_uid"],
+                        roi_number=rater["roi_number"],
+                        rtss=rater.get("rtss"),
+                        mask=rater["mask"],
+                        z_extent_mm=None if rater["was_designated_gt"] else dvh_z_extent,
+                        from_mask=False,
+                    )
             except Exception as exc:  # noqa: BLE001
                 row["error"] = f"{type(exc).__name__}: {exc}"
             out.append(row)
@@ -711,100 +1197,105 @@ class MetricsWorker(QObject):
 
         # Consensus dose row (gt_dose): DVH of the binary thresholded consensus.
         if self._dvh_config.any_enabled():
-            dose_ds = self._load_dose(group["patient_id"])
-            if dose_ds is not None:
-                out.append(self._make_consensus_dose_row(group, consensus_mask, dose_ds))
+            if self._load_dose(group["patient_id"], group["gt_sop"]) is not None:
+                out.append(self._make_consensus_dose_row(group, consensus_mask))
         return out
 
-    def _dvh_for_consensus_mask(self, consensus_mask, dose_ds) -> dict[str, float]:
-        """DVH metrics for the binary thresholded STAPLE consensus.
+    def _structure_dose_into_row(
+        self,
+        row: dict[str, Any],
+        group: dict[str, Any],
+        *,
+        sop: str,
+        roi_number: int,
+        rtss: Any,
+        mask: Any,
+        z_extent_mm: tuple[float, float] | None,
+        from_mask: bool,
+    ) -> None:
+        """One structure's dose statistics: from its contours, or from its mask.
 
-        dicompyler-core's ``get_dvh`` expects an RTSTRUCT dataset + ROI number,
-        not a raw mask — so we use the mask's voxel-by-voxel dose statistics
-        directly via SimpleITK + numpy. This keeps the implementation honest
-        for the consensus case and avoids fabricating a synthetic RTSTRUCT.
+        ``from_mask`` when the structure itself exists only as a mask: a
+        consensus, which has no contours to read (see :data:`DVH_FROM_MASK`).
+        ``mask`` is the one the geometric metrics used, already cut to the
+        ground truth's extent when the drawer truncates; ``z_extent_mm`` cuts
+        the contours to the same range.
         """
-        import numpy as np
-        import SimpleITK as sitk
-
-        # Resample dose onto the mask's grid
-        dose_image = self._dose_image_from_ds(dose_ds)
-        if dose_image is None:
-            return {}
-        dose_resampled = sitk.Resample(
-            dose_image,
-            consensus_mask,
-            sitk.Transform(),
-            sitk.sitkLinear,
-            0.0,
-            dose_image.GetPixelID(),
-        )
-        mask_arr = sitk.GetArrayFromImage(consensus_mask) > 0
-        dose_arr = sitk.GetArrayFromImage(dose_resampled).astype(float)
-        if not mask_arr.any():
-            return {}
-        # Dose grid in Gy: pydicom DoseGridScaling × pixel data; we re-derive
-        # via the dataset attributes.
-        scaling = float(getattr(dose_ds, "DoseGridScaling", 1.0))
-        dose_units = str(getattr(dose_ds, "DoseUnits", "GY")).upper()
-        if dose_units != "GY":  # convert cGy → Gy if needed
-            scaling *= 0.01
-        # The dose image already carries scaled values when read by SimpleITK
-        # if the dataset's RescaleSlope/Intercept are present. To be safe,
-        # bake the scaling in once more only when the dose image was clearly
-        # un-scaled. Heuristic: if max dose > 200 (way above typical Gy) and
-        # the DoseGridScaling looks like it would bring it into range, apply.
-        voxel_doses = dose_arr[mask_arr]
-        if voxel_doses.size == 0:
-            return {}
-        # Voxel volume (cc)
-        sx, sy, sz = consensus_mask.GetSpacing()
-        voxel_cc = float(sx * sy * sz) / 1000.0
-        out: dict[str, float] = {}
-        if self._dvh_config.include_dmean:
-            out["dmean_gy"] = float(voxel_doses.mean())
-        if self._dvh_config.include_dmin:
-            out["dmin_gy"] = float(voxel_doses.min())
-        if self._dvh_config.include_dmax:
-            out["dmax_gy"] = float(voxel_doses.max())
-        total_vox = int(voxel_doses.size)
-        for v_pct in self._dvh_config.d_at_volumes_pct:
-            # D at the hottest v% of volume: percentile of dose at (100 - v).
-            q = max(0.0, min(100.0, 100.0 - float(v_pct)))
-            out[f"d{_fmt_num(v_pct)}_gy"] = float(np.percentile(voxel_doses, q))
-        for v_cc in self._dvh_config.d_at_volumes_cc:
-            # D at the hottest v cc of volume: convert the cc to a volume
-            # fraction of the mask, then take the dose at that upper percentile.
-            if voxel_cc <= 0:
-                continue
-            frac = min(1.0, (float(v_cc) / voxel_cc) / total_vox)
-            q = max(0.0, min(100.0, 100.0 * (1.0 - frac)))
-            out[f"d{_fmt_num(v_cc)}cc_gy"] = float(np.percentile(voxel_doses, q))
-        for d_gy in self._dvh_config.v_at_doses_gy:
-            v_received = float((voxel_doses >= float(d_gy)).sum()) * voxel_cc
-            out[f"v{_fmt_num(d_gy)}gy_cc"] = v_received
-        return out
-
-    def _dose_image_from_ds(self, dose_ds):
-        """Load an RTDOSE as a SimpleITK image with proper Gy scaling."""
-        import SimpleITK as sitk
-
-        try:
-            reader = sitk.ImageFileReader()
-            reader.SetFileName(
-                str(getattr(dose_ds, "filename", "")) or self._dose_path_for(dose_ds)
+        if from_mask or rtss is None:
+            self._dose_into_row(
+                row,
+                group,
+                lambda dose: mask_dvh(mask, dose, self._dvh_config),
+                contour=(sop, int(roi_number), z_extent_mm),
+                basis=DVH_FROM_MASK,
             )
-            img = reader.Execute()
-        except Exception:  # noqa: BLE001 — fall back to pydicom pixel array
-            return None
-        # Apply DoseGridScaling
-        scaling = float(getattr(dose_ds, "DoseGridScaling", 1.0))
-        if scaling != 1.0:
-            img = sitk.Cast(img, sitk.sitkFloat32) * scaling
-        return img
+            return
+        self._dose_into_row(
+            row,
+            group,
+            lambda dose: structure_dvh(
+                rtss, roi_number, dose, mask, self._dvh_config, z_extent_mm=z_extent_mm
+            ),
+            contour=(sop, int(roi_number), z_extent_mm),
+            basis=DVH_FROM_CONTOURS,
+        )
 
-    def _dose_path_for(self, dose_ds) -> str:
-        return str(getattr(dose_ds, "filename", "") or "")
+    def _dose_into_row(
+        self,
+        row: dict[str, Any],
+        group: dict[str, Any],
+        compute: Callable[[DoseGrid], DVHResult],
+        *,
+        contour: tuple[str, int, tuple[float, float] | None] | None = None,
+        basis: str = DVH_FROM_CONTOURS,
+    ) -> None:
+        """Put one structure's dose statistics into ``row``.
+
+        ``compute`` takes the group's dose grid and returns the DVH. The share
+        of the structure inside the dose grid, which the statistics describe,
+        goes in its own column on every row; a D{x}cc larger than that part goes
+        in the dose status. A failure goes in the row's error, prefixed
+        ``DVH:``, and leaves the rest of the row standing.
+
+        ``contour`` — ``(structure set UID, ROI number, truncation extent)`` —
+        names a DVH integrated over stored contours, so that the group computes
+        it once. Within a group the dose and the CT are the ground truth's, so
+        those three are everything the result depends on; a contour compared
+        both against the ground truth and against the drawer's STAPLE consensus
+        used to be integrated twice. Its failure is kept too, so both rows say
+        the same thing. A consensus mask has no contour to name and is not kept.
+
+        ``basis`` — :data:`DVH_FROM_CONTOURS` or :data:`DVH_FROM_MASK` — goes in
+        the row's ``dvh_basis`` column, and in the kept result's key: one
+        contour's DVH from its contours and from its mask are different numbers.
+        """
+        key = (basis, *contour) if contour is not None else None
+        try:
+            dose = self._load_dose_grid(group["patient_id"], group["gt_sop"])
+            if dose is None:
+                return
+            result = self._dvh_cache.get(key) if key is not None else None
+            if result is None:
+                try:
+                    result = compute(dose)
+                except DVHError as exc:
+                    result = exc
+                if key is not None:
+                    self._dvh_cache[key] = result
+            if isinstance(result, DVHError):
+                raise result
+        except DVHError as exc:
+            row["error"] = f"DVH: {exc}"
+            return
+        row["metrics"].update(result.metrics)
+        # On every dose row, so a structure the dose grid only partly covers
+        # cannot pass for one it covers: the statistics describe that part.
+        row["metrics"]["dose_coverage_pct"] = result.coverage_pct
+        row["metrics"]["dvh_basis"] = basis
+        if result.status:
+            row["metrics"]["dvh_status"] = result.status
+        if self._audit:
+            row.setdefault("audit", {})["dvh"] = result.audit()
 
     # ---- Row factories -----------------------------------------------------
 
@@ -826,10 +1317,16 @@ class MetricsWorker(QObject):
             # GT RTSS is blank when the GT is a synthetic consensus (no file);
             # STAPLE branch rows blank it explicitly too.
             "gt_rtstruct_filename": "" if group.get("_gt_synthetic") else group["gt_filename"],
+            "gt_rtstruct_sop_uid": "" if group.get("_gt_synthetic") else group.get("gt_sop", ""),
             "gt_source_label": group["gt_source"],
             "gt_roi_name": group["gt_roi_name"],
             "gt_roi_number": group["gt_roi_number"],
+            # Which treatment context this row belongs to. A patient with two
+            # courses produces two groups with the same patient id, and without
+            # this the downstream analysis cannot tell them apart.
+            "linkage_id": self._linkage_id(group, test_sop),
             "test_rtstruct_filename": self._rtstruct_filename(group["patient_id"], test_sop),
+            "test_rtstruct_sop_uid": test_sop,
             "test_source_label": source_label,
             "test_organ": test_organ,
             "test_roi_number": test_roi_number,
@@ -882,7 +1379,7 @@ class MetricsWorker(QObject):
             comparison_mode=mode_label,
             was_designated_gt=bool(rater["was_designated_gt"]),
         )
-        row["gt_source_label"] = "STAPLE consensus"
+        row["gt_source_label"] = DRAWER_POOL_LABEL
         row["gt_rtstruct_filename"] = ""
         row["gt_roi_name"] = group["organ_name"]
         row["gt_roi_number"] = 0
@@ -925,15 +1422,15 @@ class MetricsWorker(QObject):
         """
         row = self._make_row_skeleton(
             group,
-            source_label="STAPLE consensus",
-            test_organ="STAPLE consensus",
+            source_label=DRAWER_POOL_LABEL,
+            test_organ=DRAWER_POOL_LABEL,
             test_roi_number=0,
             test_sop="",
             similarity=0.0,
             comparison_mode=_STAPLE_DETAILS_MODE,
             was_designated_gt=False,
         )
-        row["gt_source_label"] = "STAPLE consensus"
+        row["gt_source_label"] = DRAWER_POOL_LABEL
         row["gt_rtstruct_filename"] = ""
         row["gt_roi_name"] = group["organ_name"]
         row["gt_roi_number"] = 0
@@ -950,7 +1447,7 @@ class MetricsWorker(QObject):
             group, self._staple_summary_metrics(result), error_text
         )
 
-    def _make_consensus_dose_row(self, group: dict[str, Any], consensus_mask, dose_ds):
+    def _make_consensus_dose_row(self, group: dict[str, Any], consensus_mask):
         """A gt_dose row carrying the STAPLE consensus's own dose statistics.
 
         Separates the consensus dose from the STAPLE Details row so dose lives
@@ -958,7 +1455,7 @@ class MetricsWorker(QObject):
         """
         row = self._make_row_skeleton(
             group,
-            source_label="STAPLE consensus",
+            source_label=DRAWER_POOL_LABEL,
             test_organ=group["organ_name"],
             test_roi_number=0,
             test_sop="",
@@ -966,16 +1463,18 @@ class MetricsWorker(QObject):
             comparison_mode="gt_dose",
             was_designated_gt=True,
         )
-        row["gt_source_label"] = "STAPLE consensus"
+        row["gt_source_label"] = DRAWER_POOL_LABEL
         row["gt_rtstruct_filename"] = ""
         row["gt_roi_name"] = group["organ_name"]
         row["gt_roi_number"] = 0
         row["truncated_slices"] = 0
         row["truncated_extent_mm"] = 0.0
-        try:
-            row["metrics"].update(self._dvh_for_consensus_mask(consensus_mask, dose_ds))
-        except DVHError as exc:
-            row["error"] = f"DVH: {exc}"
+        self._dose_into_row(
+            row,
+            group,
+            lambda dose: mask_dvh(consensus_mask, dose, self._dvh_config),
+            basis=DVH_FROM_MASK,
+        )
         return row
 
     def _error_rows_for_group(self, group: dict[str, Any], error_text: str) -> list[dict[str, Any]]:
@@ -1015,6 +1514,53 @@ class MetricsWorker(QObject):
 
     # ---- Caches ----------------------------------------------------------
 
+    def _linkage_id(self, group: dict[str, Any], test_sop: str) -> str:
+        """The treatment context this comparison sits in.
+
+        **The planning image the contours are drawn on**, which is what actually
+        separates one course of treatment from another. A re-irradiation or a
+        replan has its own CT, so it gets its own case; everything contoured on
+        one CT belongs to one case however the structure sets were written.
+
+        That last point is the reason this resolves the series rather than
+        reading the ``linkage_id`` stamped at ingest. Linkage unions only on
+        strong reference tiers and otherwise falls back to Frame of Reference —
+        and vendors get Frame of Reference wrong. Measured on this project's own
+        cohort: of 60 patients, one (``Prostate4``) had a vendor emit a
+        structure set under a different FrameOfReferenceUID for the same CT.
+        Keyed on the linkage stamp that patient would have been split into two
+        cases and then dropped from every comparison involving that vendor.
+        Resolving the series reunites all seven structure sets on the one
+        planning CT, which is the truth of it.
+
+        Taken from the ground-truth structure set, which every source in a
+        drawer is compared against and which therefore fixes the context for the
+        whole row. A STAPLE consensus has no file of its own, so the rater's
+        structure set stands in — the consensus was built from those, so they
+        share a context by construction.
+
+        Empty when nothing resolves, which keeps rows behaving as one case per
+        patient exactly as they did before this existed.
+        """
+        patient_id = str(group.get("patient_id", "") or "")
+        sop_uid = str(group.get("gt_sop", "") or "")
+        if group.get("_gt_synthetic") or not sop_uid:
+            sop_uid = str(test_sop or "")
+        if not (patient_id and sop_uid):
+            return ""
+        try:
+            resolved = resolve_image_series(self._library, patient_id, sop_uid)
+        except Exception:  # noqa: BLE001 — an unresolvable link must not stop metrics
+            resolved = None
+        if resolved is not None and resolved.is_resolved:
+            series_uid = series_uid_of(resolved.target)
+            if series_uid:
+                return f"series:{series_uid}"
+        # No image series to key on: fall back to the ingest-time linkage, which
+        # at least separates components of the explicit reference graph.
+        entry = self._find_rtstruct_entry(patient_id, sop_uid)
+        return str(getattr(entry, "linkage_id", "") or "") if entry is not None else ""
+
     def _load_rtstruct(self, patient_id: str, sop_uid: str):
         # Synthetic STAPLE-consensus RTSSes have no DICOM file on disk;
         # their masks are produced on-the-fly in ``_get_mask`` by running
@@ -1052,19 +1598,26 @@ class MetricsWorker(QObject):
         return None
 
     def _load_ct(self, patient_id: str, rtstruct_sop_uid: str):
-        if patient_id in self._ct_cache:
-            return self._ct_cache[patient_id]
-        folder = find_reference_image_folder(self._library, patient_id, rtstruct_sop_uid)
-        if folder is None:
-            self._ct_cache[patient_id] = None
+        series = find_reference_image_series(self._library, patient_id, rtstruct_sop_uid)
+        if series is None:
             return None
+        # Keyed by series, not folder: two series in one folder are two images.
+        key = (patient_id, series_uid_of(series))
+        if key in self._ct_cache:
+            return self._ct_cache[key]
         try:
-            image = read_dicom_image(folder)
-        except Exception:  # noqa: BLE001 — corrupt CT folder shouldn't crash the batch
-            self._ct_cache[patient_id] = None
+            image = read_image_series(series)
+        except Exception:  # noqa: BLE001 — corrupt CT series shouldn't crash the batch
+            self._ct_cache[key] = None
             return None
-        self._ct_cache[patient_id] = image
+        self._ct_cache[key] = image
         return image
+
+    def _release_ct(self, patient_id: str, rtstruct_sop_uid: str) -> None:
+        """Drop one cached CT volume — the counterpart to :meth:`_load_ct`."""
+        series = find_reference_image_series(self._library, patient_id, rtstruct_sop_uid)
+        if series is not None:
+            self._ct_cache.pop((patient_id, series_uid_of(series)), None)
 
     def _get_mask(self, patient_id: str, sop_uid: str, roi_number: int, ct, rtss):
         key = (patient_id, sop_uid, roi_number)
@@ -1079,9 +1632,19 @@ class MetricsWorker(QObject):
             mask = self._synthesise_consensus_mask(patient_id, entry, roi_number, ct)
             self._mask_cache[key] = mask
             return mask
-        mask = extract_mask_for_roi(ct, rtss, roi_number)
+        try:
+            mask, notes = mask_with_reading(ct, rtss, roi_number)
+        except MaskConversionError as exc:
+            mask, notes = None, ()
+            self._mask_failure[key] = str(exc)
         self._mask_cache[key] = mask
+        self._mask_reading[key] = notes
         return mask
+
+    def _mask_failure_reason(self, patient_id: str, sop_uid: str, roi_number: int) -> str:
+        """``": <reason>"`` for a structure that got no mask, or nothing."""
+        reason = self._mask_failure.get((patient_id, sop_uid, roi_number))
+        return f": {reason}" if reason else "."
 
     def _synthesise_consensus_mask(self, patient_id: str, entry, roi_number: int, ct):
         """Build a binary STAPLE consensus mask for one synthetic ROI on the fly.
@@ -1092,23 +1655,20 @@ class MetricsWorker(QObject):
         when fewer than 2 constituent masks could be built (STAPLE needs
         at least 2 raters).
         """
-        constituents = entry.constituent_groups.get(roi_number) or []
+        constituents = consensus_constituents(self._library, patient_id, entry, roi_number)
         if len(constituents) < 2:
             return None
-        masks = []
+        structures = []
         for real_sop, real_roi in constituents:
             try:
                 real_rtss = self._load_rtstruct(patient_id, real_sop)
             except Exception:  # noqa: BLE001 — missing constituent shouldn't crash the batch
                 continue
-            if real_rtss is None:
-                continue
-            real_mask = extract_mask_for_roi(ct, real_rtss, int(real_roi))
-            if real_mask is not None:
-                masks.append(real_mask)
-        if len(masks) < 2:
+            if real_rtss is not None:
+                structures.append((real_rtss, real_roi))
+        if len(structures) < 2:
             return None
-        result = compute_staple(masks, self._staple_config)
+        result = staple_from_structures(ct, structures, self._staple_config)
         consensus = result.consensus_mask if result is not None else None
         # Capture the aggregate consensus scalars (cheap) so the GT branch can
         # emit a "STAPLE Details" row without re-running EM.
@@ -1121,36 +1681,60 @@ class MetricsWorker(QObject):
         # pressure), so release them explicitly + collect now rather than
         # letting them stack with the test masks loaded next. This caps the
         # synthetic-GT transient at the STAPLE call itself.
-        del masks
         result = None
         gc.collect()
         return consensus
 
-    def _load_dose(self, patient_id: str):
-        if patient_id in self._dose_cache:
-            return self._dose_cache[patient_id]
-        patient = self._library.patients.get(patient_id) if self._library else None
-        if patient is None:
-            self._dose_cache[patient_id] = None
+    def _load_dose(self, patient_id: str, rtstruct_sop_uid: str):
+        """The dose belonging to one structure set, or ``None``.
+
+        v2 picked a dose per *patient* — it walked every imaging context and
+        kept the first PLAN-summation dose it saw, never consulting the
+        structure set at all. On a patient with two courses that silently
+        applied one course's dose to both. Resolution now goes through
+        :func:`~autoseg_evaluator.data.linkage.resolve_dose`, which follows the
+        dose's own ``ReferencedStructureSetSequence`` first and returns nothing
+        when two doses are equally plausible. The Load Data tab blocks on those
+        ambiguities before a run can start, so reaching ``None`` here means the
+        patient genuinely has no dose for this structure set.
+        """
+        if self._library is None:
             return None
-        # Prefer PLAN-summation dose; otherwise any dose
-        chosen = None
-        for ctx in patient.contexts:
-            for dose in ctx.rtdoses:
-                if chosen is None or (
-                    dose.dose_summation_type == "PLAN" and chosen.dose_summation_type != "PLAN"
-                ):
-                    chosen = dose
-        if chosen is None:
-            self._dose_cache[patient_id] = None
+        res = resolve_dose(self._library, patient_id, rtstruct_sop_uid)
+        if not res.is_resolved:
             return None
+        chosen = res.target
+        key = (patient_id, chosen.sop_instance_uid)
+        if key in self._dose_cache:
+            return self._dose_cache[key]
         try:
             ds = pydicom.dcmread(chosen.file_path, force=True)
         except Exception:  # noqa: BLE001
-            self._dose_cache[patient_id] = None
+            self._dose_cache[key] = None
             return None
-        self._dose_cache[patient_id] = ds
+        self._dose_cache[key] = ds
         return ds
+
+    def _load_dose_grid(self, patient_id: str, rtstruct_sop_uid: str) -> DoseGrid | None:
+        """The structure set's dose as a grid in Gy, or ``None`` if it has no dose.
+
+        Raises :class:`DVHError` when a dose exists but cannot be used, for
+        example one stored in relative units. Either answer is cached per dose.
+        """
+        ds = self._load_dose(patient_id, rtstruct_sop_uid)
+        if ds is None:
+            return None
+        key = (patient_id, str(getattr(ds, "SOPInstanceUID", "") or id(ds)))
+        grid = self._dose_grid_cache.get(key)
+        if grid is None:
+            try:
+                grid = DoseGrid.from_dataset(ds)
+            except DVHError as exc:
+                grid = exc
+            self._dose_grid_cache[key] = grid
+        if isinstance(grid, DVHError):
+            raise grid
+        return grid
 
     def _evict_patient_caches(self, patient_id: str) -> None:
         """Release every cached image / mask / dataset belonging to ``patient_id``.
@@ -1162,12 +1746,16 @@ class MetricsWorker(QObject):
         cohorts. Without eviction, peak RAM grows linearly with the cohort
         size; with it, peak RAM is bounded by a single patient's data.
         """
-        self._ct_cache.pop(patient_id, None)
-        self._dose_cache.pop(patient_id, None)
+        for key in [k for k in self._ct_cache if k[0] == patient_id]:
+            self._ct_cache.pop(key, None)
+        for key in [k for k in self._dose_cache if k[0] == patient_id]:
+            self._dose_cache.pop(key, None)
+        for key in [k for k in self._dose_grid_cache if k[0] == patient_id]:
+            self._dose_grid_cache.pop(key, None)
         # Drop every mask whose key starts with this patient_id.
-        mask_keys = [k for k in self._mask_cache if k[0] == patient_id]
-        for k in mask_keys:
-            self._mask_cache.pop(k, None)
+        for cache in (self._mask_cache, self._mask_reading, self._mask_failure):
+            for k in [k for k in cache if k[0] == patient_id]:
+                cache.pop(k, None)
         # Drop pydicom RTSTRUCT datasets we loaded for this patient.
         if self._library is not None:
             patient = self._library.patients.get(patient_id)
@@ -1175,6 +1763,16 @@ class MetricsWorker(QObject):
                 for ctx in patient.contexts:
                     for rtss in ctx.rtstructs:
                         self._rtstruct_cache.pop(rtss.sop_instance_uid, None)
+        # The PTV union is a full CT volume, like a mask.
+        for cache in (self._ptv_cache, self._discontinuity_cache):
+            for key in [k for k in cache if k[0] == patient_id]:
+                cache.pop(key, None)
+        # The polygon caches key on the same patient, and a prepared structure
+        # holds its edge arrays; dropping them here keeps peak memory tied to
+        # one patient rather than to the whole cohort.
+        for cache in (self._grid_cache, self._polygon_cache, self._structure_notes):
+            for key in [k for k in cache if k[0] == patient_id]:
+                cache.pop(key, None)
         # Encourage Python to actually reclaim the C++-backed SimpleITK
         # image memory before the next patient's CT loads.
         gc.collect()

@@ -1,43 +1,55 @@
 """Tab 2 — Build Consensus GT (Optional).
 
-This tab lets the user combine 2+ RTSSes that share a source label (e.g. multiple
-manual contours from different clinicians, or repeat exports from the same TPS)
-into a single STAPLE-derived synthetic ground truth, *before* the GT/test
-matching workflow on the Match Contours tab.
+Combines several manual observers' contours into a STAPLE consensus that the
+Match Contours tab (Tab 3) can then use as the ground truth.
 
-The tab is greyed out unless the library contains at least one patient with
-two or more RTSSes sharing a source label. When active, the user:
+**Observers are source labels.** Each manual observer is identified by a
+distinct source label, assigned in Tab 1, and the user picks which labels are
+observers with **Manual observers…** (persisted as
+``consensus_observer_labels``). The consensus unit is the patient: a patient
+is eligible when two or more of its structure sets carry observer labels. An
+observer with more than one structure set for a patient is a labelling error:
+the first is used and a warning names the rest, rather than letting one rater
+count twice. Synthetic consensus entries never take part, so no consensus is
+built from another.
 
-1. Selects an eligible group (patient + source-label combination) from the
-   left panel.
-2. Reviews the auto-matched organ drawers on the right. Each drawer lists
-   the 2+ contributing ROIs (one from each RTSS in the group), grouped by
-   the existing Levenshtein+cosine matcher + TG-263 dictionary.
-3. Edits the drawers if the auto-match got something wrong (drag-drop and
-   per-row remove buttons, same UX as Match Contours).
-4. Clicks **Generate Consensus GT** — a synthetic RTSS entry is registered
-   in the library with manufacturer ``STAPLE Consensus``. The Match
-   Contours tab can then designate this synthetic entry as the GT just
-   like any other RTSS.
+For each eligible patient, the observers' ROIs are grouped into organs by the
+same matcher Match Contours uses (Levenshtein + cosine similarity, TG-263
+synonyms), with a per-patient similarity threshold. ROIs that did not cluster
+wait in an unmatched tray, from which they can be assigned by hand; a patient
+edited by hand keeps its grouping until reset. An organ needs at least two
+raters, and every rater must have contoured the same planning image, since
+STAPLE fuses voxels; raters on another image are left out and named.
 
-Single-rater organs (only one of the RTSSes contains them) are excluded
-silently per the spec — STAPLE requires at least 2 raters per organ.
+**Generate STAPLE for selected patients / for all patients** registers one
+synthetic structure set per patient, labelled ``STAPLE Consensus``
+(:data:`~autoseg_evaluator.core.staple.MULTI_OBSERVER_LABEL`), which Match
+Contours designates as the ground truth like any other. "All patients" first
+removes every earlier consensus entry; "selected" replaces only those
+patients'. Nothing is fused yet: STAPLE runs per organ when a computation needs
+the consensus, from the raters' masks, so the entry has no contours of its own
+and the 2D contour metrics cannot be measured against it. Before generating, **Compute
+inter-observer variability** reports pairwise geometric metrics between every
+pair of observers.
 
-The tab does not replace Tab 3's existing per-drawer "vs STAPLE" mode — the
-two features answer different questions:
+This is not Tab 3's per-drawer "vs STAPLE" mode, which answers a different
+question:
 
-* This tab: "Build a consensus ground truth from N manual contours."
-* Tab 3 STAPLE: "Treat all contours (GT + tests) as raters and report each
-  against the resulting consensus."
+* This tab: "Build a ground truth from N manual observers, apart from the
+  contours being evaluated."
+* Tab 3 "vs STAPLE": "Treat the contours in one drawer (optionally including
+  the ground truth) as raters, and report each against their consensus,"
+  labelled ``STAPLE (drawer pool)``. The contours scored helped build it.
 
-Both can co-exist in different drawers; only mixing them on the same drawer
-is disallowed (handled by Match Contours).
+The two can be used in different drawers of one analysis, but not in the same
+drawer (Match Contours prevents it).
 """
 
 from __future__ import annotations
 
 import csv
 import gc
+import hashlib
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -75,12 +87,14 @@ from PySide6.QtWidgets import (
 
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
-    find_reference_image_folder,
-    read_dicom_image,
+    load_reference_image,
     read_rtstruct,
 )
 from autoseg_evaluator.core.matching import ReplacementRule, similarity
 from autoseg_evaluator.core.metrics import compute_geometric_metrics
+from autoseg_evaluator.core.staple import MULTI_OBSERVER_LABEL
+from autoseg_evaluator.core.tolerance_keys import normalise_tolerances, tolerance_key
+from autoseg_evaluator.data.linkage import reference_image_series
 from autoseg_evaluator.data.metadata import (
     MetadataLibrary,
     OrganEntry,
@@ -91,7 +105,9 @@ from autoseg_evaluator.data.synonyms import flatten_synonyms, load_synonyms
 from autoseg_evaluator.utils.paths import synonyms_path
 
 # Source label assigned to every synthetic consensus RTSS we generate.
-CONSENSUS_SOURCE_LABEL = "STAPLE Consensus"
+#: Re-exported so existing call sites keep working; the definition lives
+#: beside its drawer-pool counterpart so the two cannot drift apart again.
+CONSENSUS_SOURCE_LABEL = MULTI_OBSERVER_LABEL
 
 # Default per-patient organ-matching similarity threshold.
 _DEFAULT_THRESHOLD = 0.60
@@ -346,6 +362,7 @@ class BuildConsensusTab(QWidget):
                     "observer_labels": observer_labels,
                     "for_uid": for_uid,
                     "synthetic_sop_uid": syn.sop_instance_uid,
+                    "series_uids": sorted(getattr(syn, "referenced_series_uids", set()) or ()),
                     "organs": organs_payload,
                 }
             )
@@ -395,6 +412,14 @@ class BuildConsensusTab(QWidget):
                 constituent_groups[roi_number] = constituents
             if not organs:
                 continue
+            # The planning image the consensus was built on. Sessions saved
+            # before it was recorded take it from a constituent's own link.
+            series_uids = {str(uid) for uid in group.get("series_uids", []) or [] if uid}
+            if not series_uids:
+                first_sop = next(iter(constituent_groups.values()))[0][0]
+                series = reference_image_series(self._library, patient_id, first_sop)
+                if series is not None:
+                    series_uids = {series.series_instance_uid}
             entry = RTSTRUCTEntry(
                 sop_instance_uid=synthetic_sop,
                 file_path="",
@@ -406,6 +431,7 @@ class BuildConsensusTab(QWidget):
                 organs=organs,
                 is_synthetic_consensus=True,
                 constituent_groups=constituent_groups,
+                referenced_series_uids=series_uids,
             )
             if self._library.register_synthetic_consensus(patient_id, for_uid, entry):
                 restored += 1
@@ -1204,9 +1230,11 @@ class BuildConsensusTab(QWidget):
             if not buckets:
                 skipped.append(f"{pid}: no matched organs")
                 continue
-            entry = self._build_synthetic_entry(pid, buckets)
+            dropped: list[str] = []
+            entry = self._build_synthetic_entry(pid, buckets, dropped)
+            skipped.extend(dropped)
             if entry is None:
-                skipped.append(f"{pid}: no organ with 2+ raters (or no shared FrameOfReferenceUID)")
+                skipped.append(f"{pid}: no organ with 2+ raters on one planning image")
                 continue
             ok = self._library.register_synthetic_consensus(
                 pid, entry.frame_of_reference_uid, entry
@@ -1233,30 +1261,69 @@ class BuildConsensusTab(QWidget):
         self,
         patient_id: str,
         buckets: dict[str, list[tuple[str, int, str]]],
+        dropped: list[str] | None = None,
     ) -> RTSTRUCTEntry | None:
-        """Assemble the synthetic RTSTRUCTEntry representing this patient's consensus."""
+        """Assemble the synthetic RTSTRUCTEntry representing this patient's consensus.
+
+        Every rater must have contoured the same planning image: STAPLE fuses
+        masks voxel by voxel on one CT. The image with the most structure sets
+        is used, and raters on any other image are left out, each named in
+        ``dropped`` when given. An external audit found the previous version
+        chose a majority Frame of Reference but then fused every rater anyway.
+        """
         if self._library is None:
             return None
-        # Only organs with 2+ raters are valid STAPLE inputs. After manual
-        # edits a bucket can drop below 2 — exclude those here.
-        buckets = {organ: raters for organ, raters in buckets.items() if len(raters) >= 2}
-        if not buckets:
-            return None
-        # All constituent RTSSes must share a FrameOfReferenceUID for STAPLE to
-        # work. The observers could in principle span contexts — pick the FoR
-        # with the most contributors here.
-        for_uid_counts: dict[str, int] = defaultdict(int)
-        constituent_uids = {sop for raters in buckets.values() for (sop, _, _) in raters}
         patient = self._library.patients.get(patient_id)
         if patient is None:
             return None
-        for ctx in patient.contexts:
-            for r in ctx.rtstructs:
-                if r.sop_instance_uid in constituent_uids:
-                    for_uid_counts[ctx.frame_of_reference_uid] += 1
-        if not for_uid_counts:
+        # One planning image per structure set. The resolved series decides,
+        # not the Frame of Reference, which vendors are known to get wrong for
+        # the same CT; a structure set whose image cannot be resolved falls back
+        # to its Frame of Reference.
+        entries = {r.sop_instance_uid: (ctx, r) for ctx in patient.contexts for r in ctx.rtstructs}
+        constituent_uids = {sop for raters in buckets.values() for (sop, _, _) in raters}
+        image_of: dict[str, str] = {}
+        series_of: dict[str, Any] = {}
+        for sop in constituent_uids:
+            found = entries.get(sop)
+            if found is None:
+                continue
+            series = reference_image_series(self._library, patient_id, sop)
+            if series is not None:
+                image_of[sop] = f"series:{series.series_instance_uid}"
+                series_of[image_of[sop]] = series
+            else:
+                image_of[sop] = f"for:{found[0].frame_of_reference_uid}"
+        if not image_of:
             return None
-        chosen_for = max(for_uid_counts.items(), key=lambda kv: kv[1])[0]
+        counts: dict[str, int] = defaultdict(int)
+        for image in image_of.values():
+            counts[image] += 1
+        # Most structure sets first; ties broken by key so the choice is stable.
+        chosen_image = min(counts, key=lambda key: (-counts[key], key))
+        kept: dict[str, list[tuple[str, int, str]]] = {}
+        for organ, raters in buckets.items():
+            on_image = [rater for rater in raters if image_of.get(rater[0]) == chosen_image]
+            if dropped is not None:
+                for sop, _roi, name in raters:
+                    if image_of.get(sop) != chosen_image:
+                        label = entries[sop][1].source_label if sop in entries else sop
+                        dropped.append(
+                            f"{patient_id}: {label} / {name} left out of '{organ}' — "
+                            "drawn on a different planning image"
+                        )
+            kept[organ] = on_image
+        # Only organs with 2+ raters are valid STAPLE inputs. After manual
+        # edits, or once other images' raters are left out, a bucket can drop
+        # below 2 — exclude those here.
+        buckets = {organ: raters for organ, raters in kept.items() if len(raters) >= 2}
+        if not buckets:
+            return None
+        chosen_series = series_of.get(chosen_image)
+        if chosen_series is not None:
+            chosen_for = chosen_series.frame_of_reference_uid
+        else:
+            chosen_for = chosen_image.split(":", 1)[1]
         # Build OrganEntry list — one synthetic ROI per bucket, with a new
         # roi_number starting from 1. The organ NAME is the bucket title (its
         # representative), so the name shown in Tab 3 matches the Tab 2 bucket
@@ -1280,6 +1347,11 @@ class BuildConsensusTab(QWidget):
             organs=organs,
             is_synthetic_consensus=True,
             constituent_groups=constituent_groups,
+            # Names its image outright, so the consensus resolves to the image
+            # its raters were drawn on rather than by Frame of Reference.
+            referenced_series_uids=(
+                {chosen_series.series_instance_uid} if chosen_series is not None else set()
+            ),
         )
 
     def _mint_synthetic_uid(self, patient_id: str) -> str:
@@ -1291,9 +1363,14 @@ class BuildConsensusTab(QWidget):
         so re-running Generate replaces the existing entry in place via
         ``MetadataLibrary.register_synthetic_consensus`` rather than minting
         a sibling that leaves a stale orphan behind.
+
+        A digest rather than :func:`hash`, which Python salts per process: the
+        same patient would otherwise get a new UID in every run of the app, and
+        regenerating after a session restore would leave the restored entry
+        behind as an orphan.
         """
-        token = f"{patient_id}|consensus"
-        return f"AUTOSEG.SYNTHETIC.{abs(hash(token)) % (10**18)}"
+        token = f"{patient_id}|consensus".encode()
+        return f"AUTOSEG.SYNTHETIC.{int(hashlib.sha256(token).hexdigest(), 16) % (10**18)}"
 
     # ---- Inter-manual metrics --------------------------------------------
 
@@ -1334,12 +1411,11 @@ class BuildConsensusTab(QWidget):
         # Settings dialog — defaults from Tab 4's tolerances + all geom on.
         settings_dlg = _InterObserverSettingsDialog(
             n_groups=len(selected_pids),
-            default_sd_tau_mm=float(
-                (self._settings.get("tolerances") or {}).get("surface_dice_tau_mm", 3.0)
-            ),
-            default_apl_tau_mm=float(
-                (self._settings.get("tolerances") or {}).get("apl_tolerance_mm", 3.0)
-            ),
+            # The Compute tab may hold several tolerances; this table measures
+            # at one, so it starts from the first.
+            default_sd_tau_mm=normalise_tolerances(
+                (self._settings.get("tolerances") or {}).get("surface_dice_tau_mm")
+            )[0],
             parent=self,
         )
         if settings_dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1431,7 +1507,6 @@ class BuildConsensusTab(QWidget):
             n_groups=len(selected_pids),
             cancelled=cancelled,
             sd_tau_mm=float(config["tolerances"]["surface_dice_tau_mm"]),
-            apl_tau_mm=float(config["tolerances"]["apl_tolerance_mm"]),
             parent=self,
         )
         dlg.exec()
@@ -1495,19 +1570,18 @@ class BuildConsensusTab(QWidget):
         """
         if self._library is None:
             return []
-        # Locate the patient's reference image folder via any constituent's RTSS.
+        # Locate the patient's reference image via any constituent's RTSS.
         any_sop = next(
             (sop for ms in buckets.values() for (sop, _r, _n) in ms),
             None,
         )
         if any_sop is None:
             return []
-        folder = find_reference_image_folder(self._library, patient_id, any_sop)
-        if folder is None:
-            return []
         try:
-            ct = read_dicom_image(folder)
+            ct = load_reference_image(self._library, patient_id, any_sop)
         except Exception:  # noqa: BLE001
+            return []
+        if ct is None:
             return []
 
         # Cache rasterised masks per (sop, roi) to avoid double work when
@@ -1523,14 +1597,11 @@ class BuildConsensusTab(QWidget):
                     "hausdorff95": True,
                     "mean_surface_distance": True,
                     "surface_dice": True,
-                    "apl_mean": False,
-                    "apl_total": False,
                     "volume": True,
                     "com_offset": True,
                 },
                 "tolerances": {
                     "surface_dice_tau_mm": 3.0,
-                    "apl_tolerance_mm": 3.0,
                 },
             }
 
@@ -1766,17 +1837,14 @@ class _ObserverSelectionDialog(QDialog):
 
 
 # Display order matches the canonical results-table convention. The
-# labels for tolerance-dependent metrics (Surface Dice, APL) are computed
-# at dialog-construction time from the user-supplied τ values; the static
-# block below is the fallback when no tolerance is provided.
+# Surface Dice label is computed at dialog-construction time from the
+# user-supplied τ; the static block below is the fallback without one.
 _INTER_MANUAL_COLUMN_KEYS: tuple[str, ...] = (
     "dice",
     "surface_dice",
     "hausdorff100",
     "hausdorff95",
     "mean_surface_distance",
-    "apl_mean",
-    "apl_total",
     "volume_gt_cc",
     "volume_test_cc",
     "volume_diff_cc",
@@ -1785,14 +1853,12 @@ _INTER_MANUAL_COLUMN_KEYS: tuple[str, ...] = (
 )
 
 
-def _inter_manual_columns(
-    sd_tau_mm: float | None, apl_tau_mm: float | None
-) -> tuple[tuple[str, str], ...]:
-    """Build the (key, header) list with tolerance values baked into the labels.
+def _inter_manual_columns(sd_tau_mm: float | None) -> tuple[tuple[str, str], ...]:
+    """Build the (key, header) list with the tolerance baked into the labels.
 
-    Surface Dice and APL are tolerance-dependent — by including the τ
-    value in the header, two CSV exports computed at different
-    tolerances can be told apart at a glance in Excel.
+    Surface Dice is tolerance-dependent — by including the τ value in the
+    header, two CSV exports computed at different tolerances can be told apart
+    at a glance in Excel.
     """
     static_overrides = {
         "hausdorff100": "HD 100% (mm)",
@@ -1808,8 +1874,13 @@ def _inter_manual_columns(
     for key in _INTER_MANUAL_COLUMN_KEYS:
         if key in static_overrides:
             label = static_overrides[key]
+        elif key == "surface_dice":
+            # Computed values carry their tolerance in the key, so the column
+            # reads the key for the tolerance this table was measured at.
+            key = tolerance_key(key, 3.0 if sd_tau_mm is None else sd_tau_mm)
+            label = metric_display_label(key)
         else:
-            label = metric_display_label(key, sd_tau_mm=sd_tau_mm, apl_tau_mm=apl_tau_mm)
+            label = metric_display_label(key)
         out.append((key, label))
     return tuple(out)
 
@@ -1876,25 +1947,19 @@ class _InterManualMetricsDialog(QDialog):
         n_groups: int = 1,
         cancelled: bool = False,
         sd_tau_mm: float | None = None,
-        apl_tau_mm: float | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Inter-observer variability — {n_groups} group(s)")
         self.resize(1200, 600)
         self._n_groups = n_groups
-        # Resolve column labels with the τ values baked in so headers
-        # read e.g. "Surface Dice @ 3.00 mm" / "Mean APL @ 3.00 mm".
-        self._inter_manual_columns = _inter_manual_columns(sd_tau_mm, apl_tau_mm)
+        # Resolve column labels with the τ baked in so the header reads
+        # e.g. "Surface Dice @ 3.00 mm".
+        self._inter_manual_columns = _inter_manual_columns(sd_tau_mm)
         layout = QVBoxLayout(self)
         info_html = f"<b>Groups:</b> {n_groups}  &nbsp; <b>Comparisons:</b> {len(rows)}"
-        if sd_tau_mm is not None or apl_tau_mm is not None:
-            tol_bits = []
-            if sd_tau_mm is not None:
-                tol_bits.append(f"Surface Dice τ = {sd_tau_mm:.2f} mm")
-            if apl_tau_mm is not None:
-                tol_bits.append(f"APL τ = {apl_tau_mm:.2f} mm")
-            info_html += "  &nbsp; <b>" + " · ".join(tol_bits) + "</b>"
+        if sd_tau_mm is not None:
+            info_html += f"  &nbsp; <b>Surface Dice τ = {sd_tau_mm:.2f} mm</b>"
         if cancelled:
             info_html += (
                 "  &nbsp; <span style='color:#d96b00'><b>Cancelled — partial results</b></span>"
@@ -2030,19 +2095,16 @@ class _InterManualMetricsDialog(QDialog):
 class _InterObserverSettingsDialog(QDialog):
     """Modal pre-flight settings for the inter-observer computation.
 
-    Lets the user pick which geometric metrics to compute and override
-    the Surface Dice / APL tolerance values for this run. Defaults are
-    inherited from Tab 4's tolerances (passed in by the caller) plus
-    all geometric metrics on (except APL, which is off by default to
-    match Tab 4's geometric defaults). Returns the config dict via
-    :meth:`metric_config` after Accept.
+    Lets the user pick which 3D mask metrics to compute and override the
+    Surface Dice tolerance for this run. The tolerance defaults to the Compute
+    tab's (passed in by the caller) and every metric starts on. Returns the
+    config dict via :meth:`metric_config` after Accept.
     """
 
     def __init__(
         self,
         n_groups: int,
         default_sd_tau_mm: float = 3.0,
-        default_apl_tau_mm: float = 3.0,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2058,8 +2120,7 @@ class _InterObserverSettingsDialog(QDialog):
             )
         )
 
-        # Metric checkboxes — sensible default set (all geom on except APL,
-        # which is expensive and rarely needed for inter-observer studies).
+        # Metric checkboxes — every 3D mask metric, all on by default.
         metrics_box = QGroupBox("Metrics to compute", self)
         metrics_layout = QVBoxLayout(metrics_box)
         self._metric_boxes: dict[str, QCheckBox] = {}
@@ -2069,19 +2130,15 @@ class _InterObserverSettingsDialog(QDialog):
             "hausdorff100": True,
             "hausdorff95": True,
             "mean_surface_distance": True,
-            "apl_mean": False,
-            "apl_total": False,
             "volume": True,
             "com_offset": True,
         }
         labels = {
             "dice": "Dice",
             "surface_dice": "Surface Dice (uses τ below)",
-            "hausdorff100": "Hausdorff 100%",
-            "hausdorff95": "Hausdorff 95%",
+            "hausdorff100": "3D Hausdorff 100%",
+            "hausdorff95": "3D Hausdorff 95%",
             "mean_surface_distance": "Mean Surface Distance",
-            "apl_mean": "Mean APL (uses τ below)",
-            "apl_total": "Total APL (uses τ below)",
             "volume": "Volume + diff/ratio",
             "com_offset": "Centre-of-mass offset",
         }
@@ -2092,8 +2149,8 @@ class _InterObserverSettingsDialog(QDialog):
             self._metric_boxes[key] = cb
         layout.addWidget(metrics_box)
 
-        # Tolerance overrides — only relevant when surface_dice / apl
-        # are enabled, but we always show them so the user can pre-set.
+        # Tolerance override — only relevant when Surface Dice is enabled,
+        # but always shown so the user can pre-set it.
         tol_box = QGroupBox("Tolerances", self)
         tol_form = QFormLayout(tol_box)
         self._sd_tau_spin = QDoubleSpinBox(tol_box)
@@ -2103,13 +2160,6 @@ class _InterObserverSettingsDialog(QDialog):
         self._sd_tau_spin.setSuffix(" mm")
         self._sd_tau_spin.setValue(default_sd_tau_mm)
         tol_form.addRow("Surface Dice τ:", self._sd_tau_spin)
-        self._apl_tau_spin = QDoubleSpinBox(tol_box)
-        self._apl_tau_spin.setRange(0.0, 100.0)
-        self._apl_tau_spin.setSingleStep(0.1)
-        self._apl_tau_spin.setDecimals(2)
-        self._apl_tau_spin.setSuffix(" mm")
-        self._apl_tau_spin.setValue(default_apl_tau_mm)
-        tol_form.addRow("APL τ:", self._apl_tau_spin)
         layout.addWidget(tol_box)
 
         btns = QDialogButtonBox(
@@ -2126,6 +2176,5 @@ class _InterObserverSettingsDialog(QDialog):
             "geometric": {key: cb.isChecked() for key, cb in self._metric_boxes.items()},
             "tolerances": {
                 "surface_dice_tau_mm": float(self._sd_tau_spin.value()),
-                "apl_tolerance_mm": float(self._apl_tau_spin.value()),
             },
         }

@@ -11,7 +11,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGroupBox
 
 from autoseg_evaluator.ui.tabs.compute import ComputeTab, _parse_number_list  # noqa: E402
 from autoseg_evaluator.ui.widgets.progress_panel import ProgressPanel, _format_hms  # noqa: E402
@@ -55,36 +55,116 @@ def test_parse_number_list_accepts_decimals():
 # ---- ComputeTab -----------------------------------------------------------
 
 
-def test_compute_tab_defaults_load_from_settings(qapp):
+def _ticks(tab) -> list[str]:
+    return [
+        key
+        for checks in (tab._geom_checks, tab._poly_checks, tab._dose_checks)
+        for key, cb in checks.items()
+        if cb.isChecked()
+    ]
+
+
+def _fields(tab) -> list[str]:
+    return [
+        edit.text()
+        for edit in (
+            tab._sd_tau_edit,
+            tab._poly_tau_edit,
+            tab._d_pct_edit,
+            tab._d_cc_edit,
+            tab._v_gy_edit,
+        )
+    ]
+
+
+def test_the_tab_opens_with_nothing_selected(qapp):
+    """What a study measures is chosen for it, not inherited from the last run.
+
+    Settings in the shape earlier versions saved them must not tick anything
+    or fill any field.
+    """
     settings = {
-        "compute_geometric": {
-            "dice": True,
-            "hausdorff100": False,
-            "hausdorff95": True,
-            "mean_surface_distance": False,
-            "surface_dice": True,
-            "apl_mean": True,
-            "apl_total": False,
-        },
-        "tolerances": {"surface_dice_tau_mm": 5.0, "apl_tolerance_mm": 2.5},
+        "compute_geometric": {"dice": True, "hausdorff95": True, "surface_dice": True},
+        "compute_polygon": {"metrics": {"hd95": True}, "tolerance_mm": 5.0},
+        "tolerances": {"surface_dice_tau_mm": 5.0},
         "dvh": {
-            "include_dmean": False,
+            "include_dmean": True,
             "include_dmax": True,
-            "include_dmin": True,
             "d_at_volumes_pct": [99, 50],
             "v_at_doses_gy": [25],
         },
+        "audit": {"sidecar": True},
     }
-    tab = ComputeTab(settings=settings)
-    cfg = tab.config()
-    assert cfg["geometric"]["dice"] is True
-    assert cfg["geometric"]["hausdorff100"] is False
-    assert cfg["tolerances"]["surface_dice_tau_mm"] == pytest.approx(5.0)
-    assert cfg["tolerances"]["apl_tolerance_mm"] == pytest.approx(2.5)
-    assert cfg["dvh"]["include_dmean"] is False
-    assert cfg["dvh"]["include_dmin"] is True
-    assert cfg["dvh"]["d_at_volumes_pct"] == [99.0, 50.0]
-    assert cfg["dvh"]["v_at_doses_gy"] == [25.0]
+    for tab in (ComputeTab(), ComputeTab(settings=settings)):
+        assert _ticks(tab) == []
+        assert _fields(tab) == [""] * 5
+        tab.deleteLater()
+
+    # Not a metric: whether to keep the audit detail is still remembered.
+    assert ComputeTab(settings=settings).config()["audit"]["sidecar"] is True
+
+
+def test_the_selection_is_cleared_when_settings_are_reapplied(qapp):
+    tab = ComputeTab()
+    tab._geom_checks["dice"].setChecked(True)
+    tab._d_pct_edit.setText("95")
+
+    tab.set_settings({"compute_geometric": {"dice": True}})
+
+    assert _ticks(tab) == []
+    assert _fields(tab) == [""] * 5
+    tab.deleteLater()
+
+
+def test_compute_with_nothing_selected_is_refused(qapp):
+    """A run with no metric would produce a table of names and no numbers."""
+    tab = ComputeTab()
+    received: list[dict] = []
+    tab.computeRequested.connect(received.append)
+
+    tab._on_compute_clicked()
+
+    assert received == []
+    assert "Select at least one metric" in tab._validation_label.text()
+    tab.deleteLater()
+
+
+def test_a_dose_value_alone_counts_as_a_selection(qapp):
+    tab = ComputeTab()
+    received: list[dict] = []
+    tab.computeRequested.connect(received.append)
+    tab._v_gy_edit.setText("20")
+
+    tab._on_compute_clicked()
+
+    assert len(received) == 1
+    assert received[0]["dvh"]["v_at_doses_gy"] == [20.0]
+    tab.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("checks", "key", "edit", "message"),
+    [
+        ("_geom_checks", "surface_dice", "_sd_tau_edit", "Surface Dice tolerance"),
+        ("_poly_checks", "apl", "_poly_tau_edit", "APL tolerance"),
+        ("_poly_checks", "napl", "_poly_tau_edit", "APL tolerance"),
+    ],
+)
+def test_a_tolerance_is_asked_for_not_assumed(qapp, checks, key, edit, message):
+    """An empty field would mean 3 mm, a number nobody typed, in a column name."""
+    tab = ComputeTab()
+    received: list[dict] = []
+    tab.computeRequested.connect(received.append)
+    getattr(tab, checks)[key].setChecked(True)
+
+    tab._on_compute_clicked()
+    assert received == []
+    assert message in tab._validation_label.text()
+
+    getattr(tab, edit).setText("2")
+    tab._on_compute_clicked()
+    assert len(received) == 1
+    tab.deleteLater()
 
 
 def test_compute_tab_config_changed_signal_fires(qapp):
@@ -100,6 +180,7 @@ def test_compute_tab_compute_clicked_emits_full_config(qapp):
     tab = ComputeTab(settings={})
     received: list[dict] = []
     tab.computeRequested.connect(received.append)
+    tab._geom_checks["dice"].setChecked(True)
     tab._on_compute_clicked()
     assert len(received) == 1
     cfg = received[0]
@@ -235,3 +316,148 @@ def test_format_hms_with_minutes():
 
 def test_format_hms_with_hours():
     assert _format_hms(3725) == "1:02:05"
+
+
+# ---- The polygon stream's controls ----------------------------------------
+
+
+def test_the_two_geometry_methods_are_separate_groups(qapp):
+    """A reader has to be able to see which method produced a number.
+
+    Both groups offer a "Hausdorff (95%)" and they are not the same measurement:
+    one is a distance between rasterised surfaces, the other a distance between
+    contour segments. Putting them in one list would invite comparing them as
+    though they were.
+    """
+    tab = ComputeTab()
+    titles = {box.title() for box in tab.findChildren(QGroupBox)}
+
+    assert "3D mask metrics (rasterised)" in titles
+    assert "2D contour metrics (native RTSS polygons)" in titles
+    tab.deleteLater()
+
+
+def test_the_polygon_block_reaches_the_config(qapp):
+    tab = ComputeTab()
+    tab._poly_checks["hd95"].setChecked(True)
+    tab._poly_checks["apl"].setChecked(True)
+    tab._poly_tau_edit.setText("2.5")
+
+    polygon = tab.config()["polygon"]
+
+    assert polygon["metrics"]["hd95"] is True
+    assert polygon["metrics"]["apl"] is True
+    assert polygon["metrics"]["median"] is False
+    assert polygon["tolerance_mm"] == [2.5]
+    tab.deleteLater()
+
+
+def test_the_config_is_what_the_worker_reads(qapp):
+    """The dict Tab 5 emits has to be the dict PolygonConfig parses.
+
+    These are the two ends of one contract with no type between them, so a
+    renamed key would otherwise surface as metrics silently not running.
+    """
+    from autoseg_evaluator.core.polygon_metrics import PolygonConfig
+
+    tab = ComputeTab()
+    tab._poly_checks["mean"].setChecked(True)
+    tab._poly_tau_edit.setText("4")
+
+    config = PolygonConfig.from_dict(tab.config()["polygon"])
+
+    assert config.any_enabled()
+    assert config.metrics == {"mean"}
+    assert config.tolerances_mm == (4.0,)
+    assert "poly_mean_distance_mm" in config.columns()
+    tab.deleteLater()
+
+
+def test_several_tolerances_reach_the_worker_as_several_columns(qapp):
+    """Tolerances are typed as a list and each fills its own APL columns."""
+    from autoseg_evaluator.core.polygon_metrics import PolygonConfig
+
+    tab = ComputeTab()
+    tab._poly_checks["apl"].setChecked(True)
+    tab._poly_tau_edit.setText("3, 1, 2.5, 1.0")
+    tab._sd_tau_edit.setText("2, 1")
+
+    cfg = tab.config()
+    config = PolygonConfig.from_dict(cfg["polygon"])
+
+    # Sorted, and 1 and 1.0 are one tolerance.
+    assert config.tolerances_mm == (1.0, 2.5, 3.0)
+    assert cfg["tolerances"]["surface_dice_tau_mm"] == [1.0, 2.0]
+    assert [c for c in config.columns() if c.startswith("poly_apl_mm")] == [
+        "poly_apl_mm@1mm",
+        "poly_apl_mm@2.5mm",
+        "poly_apl_mm@3mm",
+    ]
+    tab.deleteLater()
+
+
+def test_an_unreadable_tolerance_is_refused_before_computing(qapp):
+    tab = ComputeTab()
+    tab._sd_tau_edit.setText("2, two")
+
+    with pytest.raises(ValueError, match="two"):
+        tab.config()
+    tab.deleteLater()
+
+
+def test_the_stream_stays_off_until_it_is_asked_for(qapp):
+    """Upgrading an install must not start producing a new set of columns."""
+    from autoseg_evaluator.core.polygon_metrics import PolygonConfig
+
+    tab = ComputeTab()
+    tab.set_settings({})
+
+    assert not PolygonConfig.from_dict(tab.config()["polygon"]).any_enabled()
+    tab.deleteLater()
+
+
+def test_the_tab_says_which_engine_will_produce_the_numbers(qapp):
+    """Not a choice — a statement, so a result can be traced to its engine."""
+    tab = ComputeTab()
+
+    note = tab._poly_engine_label.text()
+    assert note.startswith("Engine")
+    tab.deleteLater()
+
+
+def test_audit_detail_is_a_decision_made_before_the_run(qapp):
+    """It cannot be recovered from a finished table, so it is not an export option.
+
+    The detail is produced while metrics are computed; offering it at export
+    time would offer something that no longer exists.
+    """
+    tab = ComputeTab()
+    assert tab.config()["audit"]["sidecar"] is False
+
+    tab._audit_check.setChecked(True)
+    assert tab.config()["audit"]["sidecar"] is True
+    tab.deleteLater()
+
+
+def test_the_definitions_reference_opens_and_explains_the_plane_rule(qapp):
+    """The one thing a reader cannot infer from the checkboxes.
+
+    Which planes take part decides what the 2D distances mean, and it is also
+    why truncation moves the 3D columns and leaves the 2D ones alone.
+    """
+    from PySide6.QtWidgets import QTextBrowser
+
+    tab = ComputeTab()
+    tab._on_definitions_clicked()
+    text = tab._definitions_dialog.findChild(QTextBrowser).toPlainText()
+
+    assert "only the planes where" in text
+    assert "truncation option in the Match Contours tab applies to the 3D mask stream" in text
+    assert "weighted by arc length" in text
+    # Where the 3D numbers come from, and the one reading of loops both use.
+    assert "google-deepmind/surface-distance" in text
+    assert "Reading the contours (both streams)" in text
+    assert "even-odd and non-zero winding" in text
+    # Non-modal on purpose: read a definition while changing what it describes.
+    assert not tab._definitions_dialog.isModal()
+    tab.deleteLater()

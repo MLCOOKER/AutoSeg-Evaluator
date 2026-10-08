@@ -22,6 +22,7 @@ the same data layer as the metrics worker.
 
 from __future__ import annotations
 
+import html
 import random
 from collections.abc import Callable
 from typing import Any
@@ -64,12 +65,15 @@ from autoseg_evaluator.core.likert import (
 )
 from autoseg_evaluator.core.masks import (
     extract_mask_for_roi,
-    find_reference_image_folder,
-    read_dicom_image,
+    find_reference_image_series,
+    read_image_series,
     read_rtstruct,
 )
+from autoseg_evaluator.core.staple import StapleConfig, staple_from_structures
+from autoseg_evaluator.data.linkage import consensus_constituents
 from autoseg_evaluator.ui.widgets._palette import GT_COLOR, color_for_index
 from autoseg_evaluator.ui.widgets.multiplanar_viewer import MultiPlanarViewer, Overlay
+from autoseg_evaluator.utils.timestamps import now_local
 
 BLINDED = "blinded"
 TRANSPARENT = "transparent"
@@ -155,13 +159,23 @@ class QualitativeTab(QWidget):
         self._rater_config: dict[str, dict[str, Any]] = {}  # name -> config
         self._rater_order: dict[str, list[str]] = {}  # name -> [item_id]
         self._rater_scores: dict[str, dict[str, int]] = {}  # name -> {item_id: score}
+        # name -> {item_id: when it was scored}. Scoring can span several
+        # sessions, so each score keeps its own time.
+        self._rater_score_times: dict[str, dict[str, str]] = {}
+        # Scores restored from a session whose contour is no longer among the
+        # drawers: a drawer renamed or removed, a test row taken out, a folder
+        # that changed. Kept, saved again, and shown as rows of their own. A
+        # restore once dropped them, and the next save lost them for good.
+        self._orphaned_scores: dict[str, dict[str, int]] = {}
+        self._orphaned_times: dict[str, dict[str, str]] = {}
         self._rater_pos: dict[str, int] = {}  # name -> cursor
         self._active_rater: str | None = None
         self._started = False
         self._source_color: dict[str, int] = {}
 
+        self._settings: dict[str, Any] = {}
         # Loading caches (bounded to a couple of patients)
-        self._ct_cache: dict[str, sitk.Image] = {}
+        self._ct_cache: dict[tuple[str, str], sitk.Image] = {}
         self._mask_cache: dict[tuple[str, int], np.ndarray] = {}
         self._anim: QPropertyAnimation | None = None
 
@@ -175,6 +189,10 @@ class QualitativeTab(QWidget):
         self._mask_cache.clear()
         if not self._started:
             self._refresh_stack_summary()
+
+    def set_settings(self, settings: dict[str, Any]) -> None:
+        """The app settings, read for the STAPLE parameters a consensus is built with."""
+        self._settings = settings
 
     def set_drawers_provider(self, provider: Callable[[], list[dict[str, Any]]]) -> None:
         self._drawers_provider = provider
@@ -353,7 +371,8 @@ class QualitativeTab(QWidget):
             "<ul>"
             "<li><i>Blinded</i> — one contour at a time, source hidden.</li>"
             "<li><i>Transparent</i> — every source for the organ shown on the CT with "
-            "labels and per-source visibility toggles.</li>"
+            "labels and per-source visibility toggles. The contour being graded is "
+            "named below the viewer and in bold in the list.</li>"
             "<li><i>Include GT</i> — also rate the manual / ground-truth contour.</li>"
             "<li><i>Randomize</i> — random presentation order (kept organ-by-organ).</li>"
             "</ul></li>"
@@ -396,6 +415,9 @@ class QualitativeTab(QWidget):
             self._rater_config.pop(name, None)
             self._rater_order.pop(name, None)
             self._rater_scores.pop(name, None)
+            self._rater_score_times.pop(name, None)
+            self._orphaned_scores.pop(name, None)
+            self._orphaned_times.pop(name, None)
             self._rater_pos.pop(name, None)
         self._update_config_display()
         self._refresh_stack_summary()
@@ -462,6 +484,14 @@ class QualitativeTab(QWidget):
         self._all_items = superset
         self._items_by_id = {it.item_id: it for it in superset}
         self._assign_source_colors(superset)
+        # A score held aside at restore rejoins its grader once its contour is
+        # back among the drawers, so it is not asked for again.
+        for rater, held in list(self._orphaned_scores.items()):
+            times = self._orphaned_times.get(rater, {})
+            for item_id in [i for i in held if i in self._items_by_id]:
+                self._rater_scores.setdefault(rater, {})[item_id] = held.pop(item_id)
+                if item_id in times:
+                    self._rater_score_times.setdefault(rater, {})[item_id] = times.pop(item_id)
         selected = self._selected_rater() or (self._active_rater if self._started else None)
         if selected not in raters:
             selected = raters[0]
@@ -533,17 +563,21 @@ class QualitativeTab(QWidget):
         scores = self._rater_scores[rater]
         was_complete = len(scores) == len(self._rater_order[rater])
         scores[item.item_id] = int(score)
+        scored_at = now_local()
+        self._rater_score_times.setdefault(rater, {})[item.item_id] = scored_at
         self.qualitativeScored.emit(
             {
                 "patient_id": item.patient_id,
                 "drawer": item.organ_name,
                 "source_label": item.source_label,
+                "rtstruct_sop_uid": item.rtstruct_sop_uid,
                 "roi_name": item.roi_name,
                 "roi_number": item.roi_number,
                 "is_gt": item.is_gt,
                 "rater": rater,
                 "score": int(score),
                 "blinded": self._active_mode() == BLINDED,
+                "scored_at": scored_at,
             }
         )
         now_complete = len(scores) == len(self._rater_order[rater])
@@ -610,10 +644,21 @@ class QualitativeTab(QWidget):
             self._status_label.setText(f"Could not load contour: {exc}")
             return
         prior = self._rater_scores.get(self._active_rater or "", {}).get(item.item_id)
-        self._status_label.setText(
-            f"Patient {item.patient_id} · {item.organ_name}"
-            + (f" · previous score {prior}" if prior is not None else "")
+        status = f"Patient {item.patient_id} · {item.organ_name}" + (
+            f" · previous score {prior}" if prior is not None else ""
         )
+        if self._active_mode() == TRANSPARENT:
+            # Every outline on screen is already labelled with its source, so
+            # naming the one being graded reveals nothing new. It removes doubt
+            # about which outline the score is for: with several sources in
+            # similar colours, a score given to the wrong one could never be
+            # found afterwards. Blinded mode shows one contour and names none.
+            self._status_label.setText(
+                f"<b>Rating: {html.escape(_contour_label(item))}</b>"
+                f" &nbsp;·&nbsp; {html.escape(status)}"
+            )
+        else:
+            self._status_label.setText(status)
         if animate in ("left", "right"):
             self._swipe(animate)
 
@@ -641,10 +686,9 @@ class QualitativeTab(QWidget):
                 if it.is_gt
                 else color_for_index(self._source_color.get(it.source_label, 0))
             )
-            label = "ground truth" if it.is_gt else it.source_label
             overlays.append(
                 Overlay(
-                    label=f"{label} — {it.roi_name}",
+                    label=_contour_label(it),
                     color=color,
                     mask=mask,
                     active=it.item_id == item.item_id,
@@ -662,7 +706,11 @@ class QualitativeTab(QWidget):
         for idx, ov in enumerate(overlays):
             cb = QCheckBox(ov.label + ("  (rating)" if ov.active else ""))
             cb.setChecked(True)
-            cb.setStyleSheet(f"color: {ov.color};")
+            # The contour being graded stands out from the others in the list.
+            # Set in the widget's own style sheet, which the theme cannot
+            # override.
+            weight = " font-weight: bold;" if ov.active else ""
+            cb.setStyleSheet(f"color: {ov.color};{weight}")
             cb.toggled.connect(lambda checked, i=idx: self._viewer.set_overlay_visible(i, checked))
             self._source_panel_lay.addWidget(cb)
         self._source_panel_lay.addStretch(1)
@@ -681,30 +729,39 @@ class QualitativeTab(QWidget):
     # ---- Data loading + cache --------------------------------------------
 
     def _get_ct(self, patient_id: str, gt_sop_uid: str) -> sitk.Image | None:
-        if patient_id in self._ct_cache:
-            return self._ct_cache[patient_id]
         if self._library is None:
             return None
-        folder = find_reference_image_folder(self._library, patient_id, gt_sop_uid)
-        if folder is None:
+        series = find_reference_image_series(self._library, patient_id, gt_sop_uid)
+        if series is None:
             return None
+        # Keyed by the resolved image series, not by patient or folder: a
+        # patient with two planning CTs would otherwise have the first one shown
+        # for every structure set that followed, and a folder can hold both.
+        key = (patient_id, series.series_instance_uid)
+        if key in self._ct_cache:
+            return self._ct_cache[key]
         if len(self._ct_cache) >= 2:
             self._ct_cache.pop(next(iter(self._ct_cache)))
             self._mask_cache.clear()
-        image = read_dicom_image(folder)
-        self._ct_cache[patient_id] = image
+        image = read_image_series(series)
+        self._ct_cache[key] = image
         return image
 
     def _get_mask(self, item: QualitativeItem, ct: sitk.Image) -> np.ndarray | None:
         key = (item.rtstruct_sop_uid, item.roi_number)
         if key in self._mask_cache:
             return self._mask_cache[key]
-        path = self._rtstruct_path(item.patient_id, item.rtstruct_sop_uid)
-        if path is None:
+        entry = self._rtstruct_entry(item.patient_id, item.rtstruct_sop_uid)
+        if entry is None:
             return None
         try:
-            rtss = read_rtstruct(path)
-            mask_img = extract_mask_for_roi(ct, rtss, item.roi_number)
+            if entry.is_synthetic_consensus:
+                # A consensus ground truth has no file: built from its raters
+                # the way Compute builds it, or the rater would be shown nothing.
+                mask_img = self._consensus_mask(item.patient_id, entry, item.roi_number, ct)
+            else:
+                rtss = read_rtstruct(entry.file_path)
+                mask_img = extract_mask_for_roi(ct, rtss, item.roi_number)
         except Exception:  # noqa: BLE001
             return None
         if mask_img is None:
@@ -713,7 +770,17 @@ class QualitativeTab(QWidget):
         self._mask_cache[key] = arr
         return arr
 
-    def _rtstruct_path(self, patient_id: str, sop_uid: str) -> str | None:
+    def _consensus_mask(self, patient_id: str, entry: Any, roi_number: int, ct: sitk.Image):
+        structures = []
+        for sop, roi in consensus_constituents(self._library, patient_id, entry, roi_number):
+            path = self._rtstruct_path(patient_id, sop)
+            if path:
+                structures.append((read_rtstruct(path), roi))
+        config = StapleConfig.from_dict(self._settings.get("staple", {}) or {})
+        result = staple_from_structures(ct, structures, config)
+        return result.consensus_mask if result is not None else None
+
+    def _rtstruct_entry(self, patient_id: str, sop_uid: str) -> Any | None:
         if self._library is None:
             return None
         patient = self._library.patients.get(patient_id)
@@ -722,8 +789,12 @@ class QualitativeTab(QWidget):
         for ctx in patient.contexts:
             for rtss in ctx.rtstructs:
                 if rtss.sop_instance_uid == sop_uid:
-                    return rtss.file_path
+                    return rtss
         return None
+
+    def _rtstruct_path(self, patient_id: str, sop_uid: str) -> str | None:
+        entry = self._rtstruct_entry(patient_id, sop_uid)
+        return entry.file_path if entry is not None else None
 
     # ---- Session save / restore ------------------------------------------
 
@@ -737,12 +808,46 @@ class QualitativeTab(QWidget):
             "per_rater": {
                 r: {
                     "order": list(self._rater_order.get(r, [])),
-                    "scores": dict(self._rater_scores.get(r, {})),
+                    # Scores whose contour is no longer in the drawers are saved
+                    # again with the rest, so a later session can still use them.
+                    "scores": {
+                        **self._orphaned_scores.get(r, {}),
+                        **self._rater_scores.get(r, {}),
+                    },
+                    "scored_at": {
+                        **self._orphaned_times.get(r, {}),
+                        **self._rater_score_times.get(r, {}),
+                    },
                     "index": int(self._rater_pos.get(r, 0)),
                 }
                 for r in raters
             },
         }
+
+    def orphaned_score_count(self) -> int:
+        """Scores kept from a session whose contour is no longer in the drawers."""
+        return sum(len(scores) for scores in self._orphaned_scores.values())
+
+    def has_scores(self) -> bool:
+        return any(self._rater_scores.values()) or any(self._orphaned_scores.values())
+
+    def reset(self) -> None:
+        """Forget every grader and score, for loading a different cohort."""
+        self._rater_list.clear()
+        self._rater_config = {}
+        self._rater_order = {}
+        self._rater_scores = {}
+        self._rater_score_times = {}
+        self._orphaned_scores = {}
+        self._orphaned_times = {}
+        self._rater_pos = {}
+        self._all_items = []
+        self._items_by_id = {}
+        self._active_rater = None
+        self._started = False
+        self._stack.setCurrentIndex(0)
+        self._update_config_display()
+        self._refresh_stack_summary()
 
     def apply_session_state(self, data: dict[str, Any]) -> None:
         """Restore a saved qualitative run: graders, their fixed configs, scores.
@@ -770,24 +875,45 @@ class QualitativeTab(QWidget):
                 "seed": int(cfg.get("seed", 0) or 0),
             }
 
-        if not data.get("started"):
-            self._update_config_display()
-            self._refresh_stack_summary()
-            return
-
-        superset = build_rating_stack(self._drawers_provider() or [], include_gt=True)
-        if not superset:
-            self._update_config_display()
-            self._refresh_stack_summary()
-            return
-        self._all_items = superset
-        self._items_by_id = {it.item_id: it for it in superset}
-        self._assign_source_colors(superset)
-
         per_rater = data.get("per_rater", {}) or {}
         self._rater_order = {}
         self._rater_scores = {}
+        self._rater_score_times = {}
+        self._orphaned_scores = {}
+        self._orphaned_times = {}
         self._rater_pos = {}
+
+        superset = (
+            build_rating_stack(self._drawers_provider() or [], include_gt=True)
+            if data.get("started")
+            else []
+        )
+        self._all_items = superset
+        self._items_by_id = {it.item_id: it for it in superset}
+        self._assign_source_colors(superset)
+        # Every saved score is kept. Those whose contour is among the restored
+        # drawers resume as before; the rest are held aside rather than dropped,
+        # which is what once happened when drawers failed to restore.
+        for rater in raters:
+            rs = per_rater.get(rater, {}) or {}
+            times = {str(k): str(v) for k, v in (rs.get("scored_at", {}) or {}).items()}
+            for item_id, value in (rs.get("scores", {}) or {}).items():
+                if item_id in self._items_by_id:
+                    self._rater_scores.setdefault(rater, {})[item_id] = int(value)
+                    if item_id in times:
+                        self._rater_score_times.setdefault(rater, {})[item_id] = times[item_id]
+                else:
+                    self._orphaned_scores.setdefault(rater, {})[item_id] = int(value)
+                    if item_id in times:
+                        self._orphaned_times.setdefault(rater, {})[item_id] = times[item_id]
+
+        if not superset:
+            self._started = bool(data.get("started")) and bool(raters)
+            self._update_config_display()
+            self._refresh_stack_summary()
+            self._emit_restored_scores()
+            return
+
         for rater in raters:
             rs = per_rater.get(rater, {}) or {}
             order = [iid for iid in rs.get("order", []) if iid in self._items_by_id]
@@ -803,9 +929,7 @@ class QualitativeTab(QWidget):
                     )
                 ]
             self._rater_order[rater] = order
-            self._rater_scores[rater] = {
-                k: int(v) for k, v in (rs.get("scores", {}) or {}).items() if k in self._items_by_id
-            }
+            self._rater_scores.setdefault(rater, {})
             self._rater_pos[rater] = max(0, min(int(rs.get("index", 0) or 0), len(order) - 1))
 
         active = str(data.get("active_rater") or "")
@@ -825,6 +949,7 @@ class QualitativeTab(QWidget):
     def _emit_restored_scores(self) -> None:
         for rater, scores in self._rater_scores.items():
             blinded = self._rater_config.get(rater, {}).get("mode", BLINDED) == BLINDED
+            times = self._rater_score_times.get(rater, {})
             for item_id, score in scores.items():
                 item = self._items_by_id.get(item_id)
                 if item is None:
@@ -834,11 +959,69 @@ class QualitativeTab(QWidget):
                         "patient_id": item.patient_id,
                         "drawer": item.organ_name,
                         "source_label": item.source_label,
+                        "rtstruct_sop_uid": item.rtstruct_sop_uid,
                         "roi_name": item.roi_name,
                         "roi_number": item.roi_number,
                         "is_gt": item.is_gt,
                         "rater": rater,
                         "score": int(score),
                         "blinded": blinded,
+                        # Blank for scores saved before times were recorded.
+                        "scored_at": times.get(item_id, ""),
                     }
                 )
+        # Scores whose contour is no longer in the drawers still reach the
+        # results, as rows of their own, with what the saved identity and the
+        # loaded data can still say about the contour.
+        for rater, scores in self._orphaned_scores.items():
+            blinded = self._rater_config.get(rater, {}).get("mode", BLINDED) == BLINDED
+            times = self._orphaned_times.get(rater, {})
+            for item_id, score in scores.items():
+                patient_id, drawer, sop_uid, roi_number = _split_item_id(item_id)
+                entry = self._rtstruct_entry(patient_id, sop_uid)
+                roi_name = ""
+                if entry is not None:
+                    roi_name = next(
+                        (o.roi_name for o in entry.organs if int(o.roi_number) == roi_number), ""
+                    )
+                self.qualitativeScored.emit(
+                    {
+                        "patient_id": patient_id,
+                        "drawer": drawer,
+                        "source_label": entry.source_label if entry is not None else "",
+                        "rtstruct_sop_uid": sop_uid,
+                        "roi_name": roi_name,
+                        "roi_number": roi_number,
+                        "is_gt": False,
+                        "rater": rater,
+                        "score": int(score),
+                        "blinded": blinded,
+                        "scored_at": times.get(item_id, ""),
+                    }
+                )
+
+
+def _contour_label(item: QualitativeItem) -> str:
+    """``VendorA — Parotid_L``, or ``ground truth — Parotid_L`` for the GT.
+
+    One wording for the viewer's legend, the side panel and the transparent
+    mode's status line, so the name a grader reads is the name they see drawn.
+    """
+    source = "ground truth" if item.is_gt else item.source_label
+    return f"{source} — {item.roi_name}"
+
+
+def _split_item_id(item_id: str) -> tuple[str, str, str, int]:
+    """``patient|drawer|structure set|roi`` back into its parts.
+
+    The inverse of :attr:`QualitativeItem.item_id`. The structure set and ROI
+    are split from the right, since a drawer name is free text.
+    """
+    head, _, roi = str(item_id).rpartition("|")
+    head, _, sop = head.rpartition("|")
+    patient, _, drawer = head.partition("|")
+    try:
+        number = int(roi)
+    except ValueError:
+        number = 0
+    return patient, drawer, sop, number

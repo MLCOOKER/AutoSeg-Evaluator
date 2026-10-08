@@ -73,15 +73,45 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      # Only the validated Windows x64 library is committed. Linux builds its
+      # own from the same C++17 source, on the platform it will run on, with
+      # the flags the build script fixes (-fno-fast-math -ffp-contract=off).
+      # Leaving contraction at the compiler default would let a*b+c fuse into
+      # an FMA and move results in the last bits.
+      - name: Build the native polygon-metric library (Linux)
+        if: runner.os == 'Linux'
+        run: python src/autoseg_evaluator/vendor/tools/build_native_library.py
+
+      # A freshly compiled library has no recorded acceptance, so it gets one
+      # here. The suppliers are explicit that the build flags do not promise
+      # bitwise equality across operating systems - hypot, asinh and fma come
+      # from each platform's own math library - so this is the check that
+      # catches a platform whose results drift, and it is the only validation a
+      # CI-built library receives.
+      # Three layers, about seventy seconds: the suppliers' 150 published pairs
+      # and 44 stress cases against the vendored kernel, then the same 150 pairs
+      # driven through this application's own call path. The last one is ours to
+      # get wrong - APL is directional, and a kernel can be perfect while the
+      # code calling it swaps the two sides.
+      #
+      # Not run here: the second engine (nine minutes) and the DICOM archives
+      # (314 MB). Both belong to the release record, and
+      # docs/POLYGON_VALIDATION_REPORT.md carries their results.
+      - name: Validate the native polygon-metric library and our call path
+        run: python scripts/validate_polygon_metrics.py
+
       - name: Install equivalence-test reference packages
-        # PlatiPy backs tests/test_platipy_equivalence.py (mask rasteriser)
-        # and the APL half of tests/test_metrics_equivalence.py.
+        # PlatiPy backs tests/test_platipy_equivalence.py (the legacy mask
+        # rasteriser) and the APL half of tests/test_metrics_equivalence.py.
         # google-deepmind/surface-distance backs the surface-distance half
         # of test_metrics_equivalence.py (Dice / HD / Surface Dice / MSD).
-        # Both are kept out of the main [dev] extras so contributors aren't
+        # dcmrtstruct2nii backs tests/test_rasteriser_backends.py, which pins
+        # the DEFAULT (continuous) rasteriser against its upstream engine —
+        # it must be installed here or that gate silently importorskips away.
+        # All are kept out of the main [dev] extras so contributors aren't
         # forced into vtk + pandas; the equivalence tests pytest.importorskip
         # themselves when these packages are absent.
-        run: python -m pip install "platipy>=0.7" surface-distance
+        run: python -m pip install "platipy>=0.7" surface-distance dcmrtstruct2nii
 
       - name: Run pytest
         run: python -m pytest -q

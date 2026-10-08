@@ -2,8 +2,12 @@
 
 Provides:
 
-* a geometric-metric checkbox group (Dice, HD100/95, MSD, Surface Dice, APL)
-  plus Surface-Dice τ and APL τ tolerance spinboxes,
+* a 3D mask-metric checkbox group (Dice, precision + recall, HD100/95, MSD,
+  Surface Dice, volume, centre-of-mass) plus the Surface Dice τ spinbox,
+* a 2D contour-metric group measuring the RTSTRUCT polygons directly — APL,
+  NAPL, 2D Hausdorff, mean and median distance — with its own APL τ, a
+  separate method rather than a second list of names, so the two sit side by
+  side where a reader compares them,
 * a dosimetric-metric group (Dmean/Dmax/Dmin checkboxes, user-defined
   D@volume% list, V@dose(Gy) list, RTDOSE auto-detection note),
 * a "Compute All" button that emits a fully-populated configuration dict,
@@ -27,12 +31,16 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from autoseg_evaluator.core.tolerance_keys import normalise_tolerances
+from autoseg_evaluator.data.linkage import collect_link_issues
+from autoseg_evaluator.ui.dialogs.metric_definitions import MetricDefinitionsDialog
 from autoseg_evaluator.ui.widgets.progress_panel import ProgressPanel
 
 
@@ -57,11 +65,12 @@ class _NoScrollSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
-# STAPLE parameter defaults — aligned with MICCAI consensus-contour pipelines
-# (Asman & Landman 2011; Iglesias & Sabuncu 2015; Bakas BraTS 2018). Surfaced
-# in the UI labels so the user can recover them and used by the Reset button.
+# STAPLE parameter defaults, as in core.staple.StapleConfig (which says why).
+# Surfaced in the UI labels so the user can recover them and used by the Reset
+# button. The iteration cap is the spin box's maximum, so by default STAPLE
+# runs to convergence, as SimpleITK does on its own.
 _STAPLE_DEFAULTS = {
-    "max_iterations": 100,
+    "max_iterations": 500,
     "confidence_weight": 1.0,
     "target_fg_ratio_max": 0.50,
 }
@@ -75,14 +84,23 @@ _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
         "Biased toward larger structures (Rusanov 2025; Dice 1945).",
     ),
     (
+        "precision_recall",
+        "Precision + recall",
+        "Precision: the share of the test's volume inside the ground truth — "
+        "falls when the test over-segments. Recall: the share of the ground "
+        "truth's volume the test covers — falls when it under-segments. 0–1 "
+        "each. Dice cannot tell those two failures apart; these can. Dice is "
+        "their harmonic mean, so F1 is not reported separately.",
+    ),
+    (
         "hausdorff100",
-        "Hausdorff (100%)",
+        "3D Hausdorff (100%)",
         "Maximum closest-point surface distance between GT and test, "
         "symmetric (mm). Very sensitive to single outlier voxels.",
     ),
     (
         "hausdorff95",
-        "Hausdorff (95%)",
+        "3D Hausdorff (95%)",
         "95th-percentile of the closest-point surface distances (mm). "
         "Robust to isolated outliers; the standard reporting form.",
     ),
@@ -99,18 +117,6 @@ _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
         "Reflects the clinically acceptable editing tolerance (Nikolov 2018).",
     ),
     (
-        "apl_mean",
-        "Mean APL",
-        "Mean of per-slice Added Path Length across slices that contain "
-        "either contour (mm). PlatiPy convention; NaN when no slices contribute.",
-    ),
-    (
-        "apl_total",
-        "Total APL",
-        "Sum of per-slice Added Path Length over the whole volume (mm). "
-        "Approximates manual-editing effort (Vaassen 2020).",
-    ),
-    (
         "volume",
         "Volume (cc) + diff/ratio",
         "Absolute GT and test volumes in cubic centimetres, plus signed "
@@ -123,6 +129,85 @@ _GEOMETRIC_METRICS: tuple[tuple[str, str, str], ...] = (
         "Euclidean distance between GT and test centroids in patient "
         "coordinates (mm), with signed Δx / Δy / Δz components. Detects "
         "positional shifts that high-overlap metrics can hide.",
+    ),
+)
+
+
+def _method_note(text: str) -> QLabel:
+    """A line under a group title saying how its metrics are computed.
+
+    The two geometry groups measure the same structures and report metrics with
+    the same names; without this the split reads as an arbitrary division of one
+    list rather than as two methods.
+    """
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet("color: #6B7B85; font-size: 11px;")
+    return label
+
+
+def _polygon_engine_note() -> str:
+    """Which engine will run, stated rather than chosen.
+
+    There is nothing for a user to decide here — the compiled engine is used
+    wherever a library is packaged — but a number that cannot be traced to what
+    produced it cannot be reproduced, so the tab says which one that is.
+    """
+    try:
+        from autoseg_evaluator.core.polygon_metrics import select_engine
+
+        engine = select_engine()
+    except Exception as exc:  # noqa: BLE001 — a note, never a blocker
+        return f"Engine unavailable: {exc}"
+    if engine.name == "reference":
+        return (
+            f"Engine: {engine.label} — the portable implementation. No compiled "
+            "library is packaged for this platform, so large structures are "
+            "slower and the largest may not complete."
+        )
+    return f"Engine: {engine.label}"
+
+
+#: The polygon stream's selectable metrics. All six come out of one call and
+#: share a distance distribution, so a narrower selection buys a narrower table
+#: rather than a shorter run — the tooltips say so rather than implying a cost.
+_POLYGON_METRICS: tuple[tuple[str, str, str], ...] = (
+    (
+        "apl",
+        "Added Path Length",
+        "Length of ground-truth contour further than τ from the test contour "
+        "(mm) — the boundary someone would have to draw. Directional: the "
+        "reverse direction is reported alongside it.",
+    ),
+    (
+        "napl",
+        "Normalised APL",
+        "Added Path Length as a fraction of the total ground-truth contour "
+        "length; 0–1. Comparable between structures of different size, where "
+        "raw APL is not.",
+    ),
+    (
+        "hd100",
+        "2D Hausdorff (100%)",
+        "Largest distance from either contour to the other, measured "
+        "continuously along the segments rather than at vertices (mm).",
+    ),
+    (
+        "hd95",
+        "2D Hausdorff (95%)",
+        "95th percentile of contour-to-contour distance, weighted by arc "
+        "length rather than by vertex count (mm).",
+    ),
+    (
+        "mean",
+        "Mean contour distance",
+        "Arc-length-weighted mean distance between the contours, averaged over "
+        "the two directions (mm).",
+    ),
+    (
+        "median",
+        "Median contour distance",
+        "Arc-length-weighted median distance; the larger of the two directional medians (mm).",
     ),
 )
 
@@ -147,6 +232,7 @@ class ComputeTab(QWidget):
         self._library: Any | None = None  # populated when Tab 1 loads a folder
 
         self._geom_checks: dict[str, QCheckBox] = {}
+        self._poly_checks: dict[str, QCheckBox] = {}
         self._dose_checks: dict[str, QCheckBox] = {}
 
         self._build_ui()
@@ -167,9 +253,18 @@ class ComputeTab(QWidget):
         """Snapshot of the currently-selected metric configuration."""
         return {
             "geometric": {key: cb.isChecked() for key, cb in self._geom_checks.items()},
+            # Each is a list: every tolerance given is computed in the one run,
+            # and each fills its own column.
             "tolerances": {
-                "surface_dice_tau_mm": float(self._sd_tau_spin.value()),
-                "apl_tolerance_mm": float(self._apl_tau_spin.value()),
+                "surface_dice_tau_mm": list(
+                    normalise_tolerances(self._sd_tau_edit.text().strip() or None)
+                ),
+            },
+            "polygon": {
+                "metrics": {key: cb.isChecked() for key, cb in self._poly_checks.items()},
+                "tolerance_mm": list(
+                    normalise_tolerances(self._poly_tau_edit.text().strip() or None)
+                ),
             },
             "dvh": {
                 "include_dmean": self._dose_checks["dmean"].isChecked(),
@@ -179,6 +274,7 @@ class ComputeTab(QWidget):
                 "d_at_volumes_cc": _parse_number_list(self._d_cc_edit.text()),
                 "v_at_doses_gy": _parse_number_list(self._v_gy_edit.text()),
             },
+            "audit": {"sidecar": self._audit_check.isChecked()},
             "staple": {
                 "max_iterations": int(self._staple_max_iter_spin.value()),
                 "confidence_weight": float(self._staple_conf_spin.value()),
@@ -189,6 +285,17 @@ class ComputeTab(QWidget):
     def progress_panel(self) -> ProgressPanel:
         return self._progress
 
+    def set_running(self, running: bool) -> None:
+        """Disable Compute All while a run is in progress.
+
+        A second click used to tear the running thread down mid-computation and
+        could destroy it while still running. Cancel is the way out of a run.
+        """
+        self._compute_btn.setEnabled(not running)
+        self._compute_btn.setToolTip(
+            "A computation is running — cancel it below to stop." if running else ""
+        )
+
     # ---- UI construction --------------------------------------------------
 
     def _build_ui(self) -> None:
@@ -196,18 +303,54 @@ class ComputeTab(QWidget):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
 
-        # Two-column config row
-        config_row = QHBoxLayout()
-        config_row.setSpacing(8)
-        config_row.addWidget(self._build_geometric_group(), stretch=1)
-        config_row.addWidget(self._build_dosimetric_group(), stretch=1)
-        outer.addLayout(config_row)
+        # The two geometry methods sit side by side, because that is where a
+        # reader compares them: same structures, same tolerance, two ways of
+        # measuring. Dose runs the full width below — its D@volume / V@dose
+        # lists need the room, and it answers a different question entirely.
+        geometry_row = QHBoxLayout()
+        geometry_row.setSpacing(8)
+        geometry_row.addWidget(self._build_mask_group(), stretch=1)
+        geometry_row.addWidget(self._build_polygon_group(), stretch=1)
+        outer.addLayout(geometry_row)
+        outer.addWidget(self._build_dosimetric_group())
 
         # STAPLE settings (only meaningful when ≥1 drawer has STAPLE mode on)
         outer.addWidget(self._build_staple_group())
 
-        # Run button
+        # Not metrics, so not among them: two checks on every test contour,
+        # recorded on every run whatever is ticked above.
+        outer.addWidget(
+            _method_note(
+                "Recorded on every run, for each test contour: its overlap with the "
+                "ground truth's PTV (every structure typed PTV in the GT's structure "
+                "set), and Contour Discontinuity, whether it skips a slice."
+            )
+        )
+
+        # Run button, with the definitions alongside it. Placed on the action
+        # row rather than inside either metric group, because it describes both
+        # streams and the relationship between them — which is the part nobody
+        # can infer from a checkbox list.
         run_row = QHBoxLayout()
+        self._definitions_btn = QPushButton("Metric definitions…", self)
+        self._definitions_btn.setToolTip(
+            "How every metric on this tab is computed: what each is measured on, "
+            "how the two directions are combined, which contour planes take part, "
+            "and what each is quantised to."
+        )
+        self._definitions_btn.clicked.connect(self._on_definitions_clicked)
+        run_row.addWidget(self._definitions_btn)
+        self._audit_check = QCheckBox("Record audit detail", self)
+        self._audit_check.setToolTip(
+            "Keep the full detail behind every number — both directions of each "
+            "distance, what each was measured over, the rasteriser backend and "
+            "voxel size, and the polygon engine and its settings — so an export "
+            "can be accompanied by a .audit.json file.\n\nIt has to be "
+            "collected while computing and cannot be recovered from a finished "
+            "table, so this is decided before the run, not at export."
+        )
+        self._audit_check.toggled.connect(self._emit_config_changed)
+        run_row.addWidget(self._audit_check)
         run_row.addStretch(1)
         self._validation_label = QLabel("", self)
         self._validation_label.setStyleSheet("color: #d96b00;")
@@ -226,10 +369,16 @@ class ComputeTab(QWidget):
 
         outer.addStretch(1)
 
-    def _build_geometric_group(self) -> QGroupBox:
-        box = QGroupBox("Geometric metrics", self)
+    def _build_mask_group(self) -> QGroupBox:
+        box = QGroupBox("3D mask metrics (rasterised)", self)
         layout = QVBoxLayout(box)
         layout.setSpacing(4)
+        layout.addWidget(
+            _method_note(
+                "Contours are filled onto the CT voxel grid and the "
+                "resulting binary masks are compared in 3D."
+            )
+        )
 
         for key, label, description in _GEOMETRIC_METRICS:
             cb = QCheckBox(label, box)
@@ -243,22 +392,67 @@ class ComputeTab(QWidget):
         tol_form = QFormLayout()
         tol_form.setContentsMargins(0, 0, 0, 0)
         tol_form.setSpacing(6)
-        self._sd_tau_spin = _NoScrollSpinBox(box)
-        self._sd_tau_spin.setRange(0.0, 100.0)
-        self._sd_tau_spin.setSingleStep(0.1)
-        self._sd_tau_spin.setDecimals(2)
-        self._sd_tau_spin.setSuffix(" mm")
-        self._sd_tau_spin.valueChanged.connect(self._emit_config_changed)
-        tol_form.addRow("Surface Dice τ:", self._sd_tau_spin)
-
-        self._apl_tau_spin = _NoScrollSpinBox(box)
-        self._apl_tau_spin.setRange(0.0, 100.0)
-        self._apl_tau_spin.setSingleStep(0.1)
-        self._apl_tau_spin.setDecimals(2)
-        self._apl_tau_spin.setSuffix(" mm")
-        self._apl_tau_spin.valueChanged.connect(self._emit_config_changed)
-        tol_form.addRow("APL tolerance:", self._apl_tau_spin)
+        self._sd_tau_edit = QLineEdit(box)
+        self._sd_tau_edit.setPlaceholderText("3  or  1, 2, 3")
+        self._sd_tau_edit.setToolTip(
+            "Tolerance in mm within which surface counts as agreeing. Give several, "
+            "separated by commas, to compute Surface Dice at each in the same run: "
+            "each tolerance gets its own column, named with it. The surface "
+            "distances are computed once, so extra tolerances cost almost nothing."
+        )
+        self._sd_tau_edit.editingFinished.connect(self._emit_config_changed)
+        tol_form.addRow("Surface Dice τ (mm):", self._sd_tau_edit)
         layout.addLayout(tol_form)
+
+        layout.addStretch(1)
+        return box
+
+    def _build_polygon_group(self) -> QGroupBox:
+        """The polygon stream's controls.
+
+        No precision setting: the compiled engine's ``error_mm`` only decides
+        when an ambiguous quantile is refused, and measurement across its whole
+        useful range moves neither the cost nor the result. A spinbox for it
+        would imply a trade-off that does not exist.
+        """
+        box = QGroupBox("2D contour metrics (native RTSS polygons)", self)
+        layout = QVBoxLayout(box)
+        layout.setSpacing(4)
+        layout.addWidget(
+            _method_note(
+                "Measured on the contour line segments as stored — no voxels, no "
+                "sampling. Distances use only the planes both structures reach."
+            )
+        )
+
+        for key, label, description in _POLYGON_METRICS:
+            cb = QCheckBox(label, box)
+            cb.toggled.connect(self._emit_config_changed)
+            cb.setToolTip(description)
+            self._poly_checks[key] = cb
+            layout.addWidget(cb)
+
+        layout.addSpacing(8)
+
+        tol_form = QFormLayout()
+        tol_form.setContentsMargins(0, 0, 0, 0)
+        tol_form.setSpacing(6)
+        self._poly_tau_edit = QLineEdit(box)
+        self._poly_tau_edit.setPlaceholderText("3  or  1, 2, 3")
+        self._poly_tau_edit.setToolTip(
+            "Distance in mm beyond which ground-truth contour counts as needing to "
+            "be redrawn. Applies to Added Path Length and its normalised form; the "
+            "distance metrics do not use it. Give several, separated by commas, to "
+            "compute APL at each in the same run: each gets its own columns."
+        )
+        self._poly_tau_edit.editingFinished.connect(self._emit_config_changed)
+        tol_form.addRow("APL tolerance τ (mm):", self._poly_tau_edit)
+        layout.addLayout(tol_form)
+
+        self._poly_engine_label = QLabel(_polygon_engine_note(), box)
+        self._poly_engine_label.setWordWrap(True)
+        self._poly_engine_label.setStyleSheet("color: #6B7B85; font-size: 11px;")
+        layout.addWidget(self._poly_engine_label)
 
         layout.addStretch(1)
         return box
@@ -395,17 +589,18 @@ class ComputeTab(QWidget):
         # that per-rater specificity stays informative. Replaces the old
         # fixed-voxel padding that over-tightened large structures. Only an upper
         # target is exposed: padding can only lower the ratio, so a lower bound
-        # is not enforceable. Value from Iglesias & Sabuncu 2015; Asman 2011.
+        # is not enforceable. A heuristic; core.staple says what the crop is for.
         self._staple_fg_max_spin = _NoScrollSpinBox(box)
         self._staple_fg_max_spin.setDecimals(2)
         self._staple_fg_max_spin.setRange(0.05, 0.99)
         self._staple_fg_max_spin.setSingleStep(0.05)
         self._staple_fg_max_spin.setValue(_STAPLE_DEFAULTS["target_fg_ratio_max"])
         self._staple_fg_max_spin.setToolTip(
-            "Upper target for the adaptive bbox foreground ratio. The padder "
-            "grows the union bbox until foreground/total drops to (or below) "
-            "this value, keeping per-rater specificity informative even for "
-            "small structures."
+            "Upper target for the adaptive bbox foreground ratio. STAPLE is "
+            "estimated within the raters' union bounding box, so its specificity "
+            "and prior describe the structure's neighbourhood rather than the "
+            "scan's field of view; the padder grows that box until "
+            "foreground/total drops to (or below) this value."
         )
         self._staple_fg_max_spin.valueChanged.connect(self._emit_config_changed)
         layout.addRow(
@@ -434,59 +629,31 @@ class ComputeTab(QWidget):
     # ---- Settings round-trip ---------------------------------------------
 
     def _load_from_settings(self) -> None:
-        # Geometric metric flags
-        defaults_geom = {
-            "dice": True,
-            "hausdorff100": True,
-            "hausdorff95": True,
-            "mean_surface_distance": True,
-            "surface_dice": True,
-            "apl_mean": False,
-            "apl_total": False,
-            "volume": True,
-            "com_offset": True,
-        }
-        # Use settings if any are explicitly stored under "compute_geometric"
-        stored_geom = (self._settings.get("compute_geometric") or {}) if self._settings else {}
-        for key, cb in self._geom_checks.items():
-            cb.blockSignals(True)
-            cb.setChecked(bool(stored_geom.get(key, defaults_geom[key])))
-            cb.blockSignals(False)
+        # Nothing is measured until someone chooses it: every metric starts
+        # unticked and every value field empty, at every launch. What a study
+        # measures is decided for that study, and a selection carried over from
+        # the last run, or supplied as a default, is a decision nobody made.
+        # The placeholders still show what each field takes.
+        for checks in (self._geom_checks, self._poly_checks, self._dose_checks):
+            for cb in checks.values():
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
+        for edit in (
+            self._sd_tau_edit,
+            self._poly_tau_edit,
+            self._d_pct_edit,
+            self._d_cc_edit,
+            self._v_gy_edit,
+        ):
+            edit.blockSignals(True)
+            edit.clear()
+            edit.blockSignals(False)
 
-        # Tolerances
-        tol = (self._settings.get("tolerances") or {}) if self._settings else {}
-        self._sd_tau_spin.blockSignals(True)
-        self._sd_tau_spin.setValue(float(tol.get("surface_dice_tau_mm", 3.0)))
-        self._sd_tau_spin.blockSignals(False)
-        self._apl_tau_spin.blockSignals(True)
-        self._apl_tau_spin.setValue(float(tol.get("apl_tolerance_mm", 3.0)))
-        self._apl_tau_spin.blockSignals(False)
-
-        # DVH config
-        dvh = (self._settings.get("dvh") or {}) if self._settings else {}
-        self._dose_checks["dmean"].blockSignals(True)
-        self._dose_checks["dmean"].setChecked(bool(dvh.get("include_dmean", True)))
-        self._dose_checks["dmean"].blockSignals(False)
-        self._dose_checks["dmax"].blockSignals(True)
-        self._dose_checks["dmax"].setChecked(bool(dvh.get("include_dmax", True)))
-        self._dose_checks["dmax"].blockSignals(False)
-        self._dose_checks["dmin"].blockSignals(True)
-        self._dose_checks["dmin"].setChecked(bool(dvh.get("include_dmin", False)))
-        self._dose_checks["dmin"].blockSignals(False)
-        self._d_pct_edit.blockSignals(True)
-        self._d_pct_edit.setText(
-            ", ".join(str(v) for v in dvh.get("d_at_volumes_pct", [95, 50, 5, 2]))
-        )
-        self._d_pct_edit.blockSignals(False)
-        self._d_cc_edit.blockSignals(True)
-        # Empty default for D-at-cc — clinicians who don't use it shouldn't
-        # have to clear placeholders. D2cc, D1cc, D0.1cc are common OAR
-        # constraints and shown as placeholder text instead.
-        self._d_cc_edit.setText(", ".join(str(v) for v in dvh.get("d_at_volumes_cc", []) or []))
-        self._d_cc_edit.blockSignals(False)
-        self._v_gy_edit.blockSignals(True)
-        self._v_gy_edit.setText(", ".join(str(v) for v in dvh.get("v_at_doses_gy", [20, 30, 40])))
-        self._v_gy_edit.blockSignals(False)
+        stored_audit = (self._settings.get("audit") or {}) if self._settings else {}
+        self._audit_check.blockSignals(True)
+        self._audit_check.setChecked(bool(stored_audit.get("sidecar", False)))
+        self._audit_check.blockSignals(False)
 
         # STAPLE config
         staple = (self._settings.get("staple") or {}) if self._settings else {}
@@ -517,11 +684,33 @@ class ComputeTab(QWidget):
 
     # ---- Compute button --------------------------------------------------
 
+    def _on_definitions_clicked(self) -> None:
+        """Open the metric reference, reusing the window if it is already up.
+
+        Non-modal on purpose: the point is to read a definition while changing
+        the selection it describes, which a modal dialog would prevent.
+        """
+        existing = getattr(self, "_definitions_dialog", None)
+        if existing is None:
+            self._definitions_dialog = MetricDefinitionsDialog(self)
+        self._definitions_dialog.show()
+        self._definitions_dialog.raise_()
+        self._definitions_dialog.activateWindow()
+
     def _on_compute_clicked(self) -> None:
         try:
             cfg = self.config()
         except ValueError as exc:
             self._validation_label.setText(str(exc))
+            return
+        missing = self._selection_blocker(cfg)
+        if missing:
+            self._validation_label.setText(missing)
+            return
+        blocker = self._link_blocker(cfg)
+        if blocker:
+            self._validation_label.setText(blocker)
+            QMessageBox.warning(self, "Unresolved data links", blocker)
             return
         self._validation_label.setText("")
         # The actual worker hookup arrives in step 8. For now, just emit the
@@ -530,6 +719,46 @@ class ComputeTab(QWidget):
         # Show the progress panel armed at "Idle" — step 8 will call begin()
         # against it with a real step count.
         self._progress.setVisible(True)
+
+    def _selection_blocker(self, cfg: dict[str, Any]) -> str:
+        """Message saying what the selection still lacks, or "" if nothing.
+
+        The tab opens with nothing selected, so a run without a metric would
+        produce a table of names and no numbers. A tolerance is asked for rather
+        than assumed: an empty field would mean 3 mm, and a tolerance the user
+        never typed should not end up in a column heading.
+        """
+        geometric = cfg.get("geometric") or {}
+        polygon = (cfg.get("polygon") or {}).get("metrics") or {}
+        if not (any(geometric.values()) or any(polygon.values()) or _dose_wanted(cfg)):
+            return "Select at least one metric to compute."
+        if geometric.get("surface_dice") and not self._sd_tau_edit.text().strip():
+            return "Enter the Surface Dice tolerance τ (mm)."
+        if (polygon.get("apl") or polygon.get("napl")) and not self._poly_tau_edit.text().strip():
+            return "Enter the APL tolerance τ (mm)."
+        return ""
+
+    def _link_blocker(self, cfg: dict[str, Any]) -> str:
+        """Message describing why this run cannot start, or "" if it can.
+
+        A structure set whose image series or dose could not be decided would
+        otherwise be computed against whichever candidate happened to be found
+        first. Those choices belong to the user and are made in Tab 1, so the
+        run is refused until none are outstanding. Dose ambiguities only block
+        when a dose metric is actually switched on.
+        """
+        if self._library is None:
+            return ""
+        issues = collect_link_issues(self._library, include_dose=_dose_wanted(cfg))
+        if not issues:
+            return ""
+        first = issues[0].message
+        more = f" (and {len(issues) - 1} more)" if len(issues) > 1 else ""
+        return (
+            f"{len(issues)} data link(s) are unresolved{more}. Open Tab 1 "
+            f"and use Review Data Links to settle them before computing. "
+            f"First: {first}"
+        )
 
     def _refresh_dose_summary(self) -> None:
         if self._library is None:
@@ -553,6 +782,19 @@ class ComputeTab(QWidget):
 
 
 # ---- Helpers --------------------------------------------------------------
+
+
+def _dose_wanted(cfg: dict[str, Any]) -> bool:
+    """Whether any dose metric is switched on in this configuration."""
+    dvh = cfg.get("dvh") or {}
+    return bool(
+        dvh.get("include_dmean")
+        or dvh.get("include_dmax")
+        or dvh.get("include_dmin")
+        or dvh.get("d_at_volumes_pct")
+        or dvh.get("d_at_volumes_cc")
+        or dvh.get("v_at_doses_gy")
+    )
 
 
 def _parse_number_list(text: str) -> list[float]:

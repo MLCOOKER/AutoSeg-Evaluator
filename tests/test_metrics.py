@@ -5,17 +5,18 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 import SimpleITK as sitk
 
 from autoseg_evaluator.core.dvh import DVHConfig
 from autoseg_evaluator.core.metrics import (
-    apl_mean,
-    apl_total,
     centroid_physical,
     compute_geometric_metrics,
     dice,
     hausdorff,
+    mask_audit_detail,
     mean_surface_distance,
+    precision_recall,
     surface_dice,
     volume_and_com_metrics,
     volume_cc,
@@ -65,21 +66,60 @@ def test_surface_dice_identical_is_one():
     assert surface_dice(arr, arr, (1.0, 1.0, 1.0), tolerance_mm=0.0) == 1.0
 
 
-# ---- APL ------------------------------------------------------------------
+# ---- Precision and recall ------------------------------------------------
 
 
-def test_apl_identical_masks_is_zero():
-    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
-    assert apl_total(m, m, 0.0) == 0.0
-    assert apl_mean(m, m, 0.0) == 0.0
+def _arr(*box):
+    return sitk.GetArrayFromImage(_cube_sitk((30, 30, 30), *box))
 
 
-def test_apl_disjoint_masks_is_positive():
-    a = _cube_sitk((20, 20, 20), 0, 5, 0, 5, 0, 5)
-    b = _cube_sitk((20, 20, 20), 10, 15, 10, 15, 10, 15)
-    # With a tolerance smaller than the gap, every reference voxel is "added path"
-    total = apl_total(a, b, 1.0)
-    assert total > 0
+def test_over_segmentation_costs_precision_and_not_recall():
+    """A test that contains the ground truth and 20 % more besides."""
+    gt = _arr(5, 15, 5, 15, 5, 15)  # 1000 voxels
+    test = _arr(5, 17, 5, 15, 5, 15)  # 1200 voxels, all of gt inside
+    precision, recall = precision_recall(gt, test)
+    assert precision == pytest.approx(1000 / 1200)
+    assert recall == 1.0
+
+
+def test_under_segmentation_costs_recall_and_not_precision():
+    gt = _arr(5, 15, 5, 15, 5, 15)  # 1000 voxels
+    test = _arr(5, 13, 5, 15, 5, 15)  # 800 voxels, all inside gt
+    precision, recall = precision_recall(gt, test)
+    assert precision == 1.0
+    assert recall == pytest.approx(0.8)
+
+
+def test_dice_is_their_harmonic_mean():
+    """Why F1 is not reported: on binary masks it is Dice."""
+    gt = _arr(5, 15, 5, 15, 5, 15)
+    test = _arr(7, 19, 4, 13, 5, 16)
+    precision, recall = precision_recall(gt, test)
+    f1 = 2 * precision * recall / (precision + recall)
+    assert f1 == pytest.approx(dice(gt, test))
+
+
+def test_a_share_of_nothing_is_not_a_number():
+    """An empty test has no precision and an empty ground truth no recall.
+
+    Zero would read as a complete failure; it is an undefined share instead.
+    """
+    gt = _arr(5, 15, 5, 15, 5, 15)
+    empty = np.zeros_like(gt)
+    precision, recall = precision_recall(gt, empty)
+    assert math.isnan(precision)
+    assert recall == 0.0
+    precision, recall = precision_recall(empty, gt)
+    assert precision == 0.0
+    assert math.isnan(recall)
+
+
+def test_the_audit_record_can_recompute_the_overlap_metrics():
+    gt = _cube_sitk((30, 30, 30), 5, 15, 5, 15, 5, 15)
+    test = _cube_sitk((30, 30, 30), 7, 17, 5, 15, 5, 15)
+    detail = mask_audit_detail(gt, test)
+    assert detail["overlap_voxels"] == 800
+    assert detail["overlap_voxels"] / detail["test_voxels"] == pytest.approx(0.8)
 
 
 # ---- Volume + centre-of-mass ---------------------------------------------
@@ -153,16 +193,30 @@ def test_compute_geometric_metrics_respects_config_flags():
             "hausdorff95": False,
             "mean_surface_distance": False,
             "surface_dice": True,
-            "apl_mean": False,
-            "apl_total": False,
         },
-        "tolerances": {"surface_dice_tau_mm": 3.0, "apl_tolerance_mm": 3.0},
+        "tolerances": {"surface_dice_tau_mm": 3.0},
     }
     out = compute_geometric_metrics(m, m, config)
     assert "dice" in out
-    assert "surface_dice" in out
+    # Keyed by the tolerance it was computed at.
+    assert "surface_dice@3mm" in out
     assert "hausdorff100" not in out
-    assert "apl_total" not in out
+
+
+def test_a_configuration_still_asking_for_mask_apl_gets_none():
+    """Mask APL was removed in v3; an old configuration must not break a run.
+
+    Added path length now comes only from the 2D stream. A settings file or a
+    caller from before the removal may still switch the mask version on; it is
+    ignored rather than raising, and nothing named like it reaches a row.
+    """
+    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    config = {
+        "geometric": {"dice": True, "apl_mean": True, "apl_total": True},
+        "tolerances": {"surface_dice_tau_mm": 3.0, "apl_tolerance_mm": 3.0},
+    }
+    out = compute_geometric_metrics(m, m, config)
+    assert out == {"dice": 1.0}
 
 
 def test_compute_geometric_metrics_identical_masks_score_perfect():
@@ -170,22 +224,52 @@ def test_compute_geometric_metrics_identical_masks_score_perfect():
     config = {
         "geometric": {
             "dice": True,
+            "precision_recall": True,
             "hausdorff100": True,
             "hausdorff95": True,
             "mean_surface_distance": True,
             "surface_dice": True,
-            "apl_mean": True,
-            "apl_total": True,
         },
-        "tolerances": {"surface_dice_tau_mm": 0.0, "apl_tolerance_mm": 0.0},
+        "tolerances": {"surface_dice_tau_mm": 0.0},
     }
     out = compute_geometric_metrics(m, m, config)
     assert out["dice"] == 1.0
+    assert out["precision"] == 1.0
+    assert out["recall"] == 1.0
     assert out["hausdorff100"] == 0.0
     assert out["hausdorff95"] == 0.0
     assert out["mean_surface_distance"] == 0.0
-    assert out["surface_dice"] == 1.0
-    assert out["apl_total"] == 0.0
+    assert out["surface_dice@0mm"] == 1.0
+
+
+def test_surface_dice_at_several_tolerances_is_one_column_each():
+    """A list of tolerances gives one keyed value per tolerance, from one pass."""
+    gt = _cube_sitk((30, 30, 30), 5, 15, 5, 15, 5, 15)
+    test = _cube_sitk((30, 30, 30), 7, 17, 5, 15, 5, 15)
+    config = {
+        "geometric": {"surface_dice": True},
+        "tolerances": {"surface_dice_tau_mm": [3.0, 0.5, 1.0]},
+    }
+    out = compute_geometric_metrics(gt, test, config)
+    assert set(out) == {"surface_dice@0.5mm", "surface_dice@1mm", "surface_dice@3mm"}
+    for tau in (0.5, 1.0, 3.0):
+        alone = compute_geometric_metrics(
+            gt,
+            test,
+            {"geometric": {"surface_dice": True}, "tolerances": {"surface_dice_tau_mm": tau}},
+        )
+        assert out[f"surface_dice@{tau:g}mm"] == alone[f"surface_dice@{tau:g}mm"]
+    # A larger tolerance forgives more of the 2-voxel shift.
+    assert out["surface_dice@0.5mm"] < out["surface_dice@3mm"]
+
+
+def test_precision_and_recall_come_as_a_pair_behind_one_switch():
+    """One alone misleads: recall rewards over-drawing, precision under-drawing."""
+    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    off = compute_geometric_metrics(m, m, {"geometric": {"dice": True}})
+    on = compute_geometric_metrics(m, m, {"geometric": {"precision_recall": True}})
+    assert "precision" not in off and "recall" not in off
+    assert set(on) == {"precision", "recall"}
 
 
 # ---- DVH config ----------------------------------------------------------
@@ -255,3 +339,240 @@ def test_dvh_config_output_keys_order():
         "v20gy_cc",
         "v30gy_cc",
     ]
+
+
+# ---- One shared crop per pair: the same numbers, less work ------------------------
+
+
+def _reference_geometric_metrics(gt_mask, test_mask, config):
+    """The aggregator as it was before the shared crop, kept as the oracle.
+
+    Whole-CT copies, each metric scanning them in turn, and volume and centroid
+    through :func:`volume_and_com_metrics`.
+    """
+    from autoseg_evaluator.core.surface_distance import (
+        compute_average_surface_distance,
+        compute_robust_hausdorff,
+        compute_surface_dice_at_tolerance,
+        compute_surface_distances,
+    )
+    from autoseg_evaluator.core.tolerance_keys import normalise_tolerances, tolerance_key
+
+    geom = config["geometric"]
+    taus = normalise_tolerances(config["tolerances"]["surface_dice_tau_mm"])
+    gt_arr = sitk.GetArrayFromImage(gt_mask).astype(np.uint8)
+    test_arr = sitk.GetArrayFromImage(test_mask).astype(np.uint8)
+    sx, sy, sz = gt_mask.GetSpacing()
+    out = {"dice": dice(gt_arr, test_arr)}
+    out["precision"], out["recall"] = precision_recall(gt_arr, test_arr)
+    sd = compute_surface_distances(gt_arr, test_arr, (sz, sy, sx))
+    out["hausdorff100"] = compute_robust_hausdorff(sd, 100)
+    out["hausdorff95"] = compute_robust_hausdorff(sd, 95)
+    a, b = compute_average_surface_distance(sd)
+    out["mean_surface_distance"] = (
+        math.nan if math.isnan(a) or math.isnan(b) else float(0.5 * (a + b))
+    )
+    for tau in taus:
+        out[tolerance_key("surface_dice", tau)] = compute_surface_dice_at_tolerance(sd, tau)
+    vc = volume_and_com_metrics(gt_mask, test_mask)
+    if geom.get("volume"):
+        out.update({k: v for k, v in vc.items() if k.startswith("volume_")})
+    if geom.get("com_offset"):
+        out.update({k: v for k, v in vc.items() if k.startswith("com_")})
+    return out
+
+
+ALL_GEOMETRIC = {
+    "geometric": {
+        "dice": True,
+        "precision_recall": True,
+        "hausdorff100": True,
+        "hausdorff95": True,
+        "mean_surface_distance": True,
+        "surface_dice": True,
+        "volume": True,
+        "com_offset": True,
+    },
+    "tolerances": {"surface_dice_tau_mm": [1.0, 2.0, 3.0]},
+}
+
+
+def _placed(arr, spacing=(0.98, 0.98, 3.0), rotated=False):
+    img = sitk.GetImageFromArray(arr.astype(np.uint8))
+    img.SetSpacing(spacing)
+    img.SetOrigin((-250.0, -180.5, 1033.0))
+    if rotated:  # a non-axial acquisition, so the centroid's direction matters
+        c, s = math.cos(0.3), math.sin(0.3)
+        img.SetDirection((c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0))
+    return img
+
+
+def _blobs(rng, shape, count):
+    zz, yy, xx = np.ogrid[: shape[0], : shape[1], : shape[2]]
+    arr = np.zeros(shape, bool)
+    for _ in range(count):
+        c = [rng.uniform(0, n) for n in shape]
+        r = [rng.uniform(1.5, n / 3) for n in shape]
+        arr |= ((zz - c[0]) / r[0]) ** 2 + ((yy - c[1]) / r[1]) ** 2 + (
+            (xx - c[2]) / r[2]
+        ) ** 2 <= 1
+    return arr
+
+
+def _same(a: dict, b: dict) -> bool:
+    if list(a) != list(b):
+        return False
+    return all(
+        (isinstance(x, float) and isinstance(y, float) and math.isnan(x) and math.isnan(y))
+        or x == y
+        for x, y in zip(a.values(), b.values())
+    )
+
+
+def test_the_shared_crop_gives_every_metric_exactly_as_before():
+    """Bit for bit, over varied shapes: blobs that touch the image edge, split
+    into pieces, miss each other entirely, and anisotropic, rotated images."""
+    rng = np.random.default_rng(11)
+    shape = (18, 40, 36)
+    for trial in range(60):
+        gt = _placed(_blobs(rng, shape, 1 + trial % 3), rotated=trial % 2 == 1)
+        test = _placed(_blobs(rng, shape, 1 + (trial + 1) % 3), rotated=trial % 2 == 1)
+        new = compute_geometric_metrics(gt, test, ALL_GEOMETRIC)
+        old = _reference_geometric_metrics(gt, test, ALL_GEOMETRIC)
+        assert _same(new, old), (trial, new, old)
+
+
+@pytest.mark.parametrize("empty", ["gt", "test", "both"])
+def test_the_shared_crop_handles_empty_masks_as_before(empty):
+    shape = (10, 20, 20)
+    full = np.zeros(shape, bool)
+    full[3:7, 5:12, 6:15] = True
+    none = np.zeros(shape, bool)
+    gt = _placed(none if empty in ("gt", "both") else full)
+    test = _placed(none if empty in ("test", "both") else full)
+    new = compute_geometric_metrics(gt, test, ALL_GEOMETRIC)
+    old = _reference_geometric_metrics(gt, test, ALL_GEOMETRIC)
+    assert _same(new, old), (new, old)
+
+
+def test_volume_alone_computes_no_centroid(monkeypatch):
+    """A centroid lists every foreground voxel's index; volume needs a count."""
+    import autoseg_evaluator.core.metrics as metrics_module
+
+    def refuse(*_args):
+        raise AssertionError("a centroid was computed for volume alone")
+
+    monkeypatch.setattr(metrics_module, "_cropped_centroid", refuse)
+    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    out = compute_geometric_metrics(
+        m, m, {"geometric": {"volume": True}, "tolerances": {"surface_dice_tau_mm": 3.0}}
+    )
+    assert out["volume_gt_cc"] == pytest.approx(1.0)
+    assert "com_offset_mm" not in out
+
+
+def test_masks_are_read_in_place_not_copied(monkeypatch):
+    """The whole CT is no longer copied per pair."""
+    import autoseg_evaluator.core.metrics as metrics_module
+
+    def refuse(*_args):
+        raise AssertionError("a mask was copied")
+
+    monkeypatch.setattr(metrics_module.sitk, "GetArrayFromImage", refuse)
+    m = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    assert compute_geometric_metrics(m, m, ALL_GEOMETRIC)["dice"] == 1.0
+
+
+# ---- The audit record from the metrics' own pass -------------------------------------
+
+
+def _reference_mask_audit_detail(gt_mask, test_mask):
+    """The audit record as it was computed on its own, kept as the oracle."""
+    from autoseg_evaluator.core.masks import default_rasteriser_name
+    from autoseg_evaluator.core.surface_distance import compute_surface_distances
+
+    gt_arr = sitk.GetArrayFromImage(gt_mask).astype(bool)
+    test_arr = sitk.GetArrayFromImage(test_mask).astype(bool)
+    spacing_xyz = tuple(float(v) for v in gt_mask.GetSpacing())
+    detail = {
+        "rasteriser_backend": str(default_rasteriser_name()),
+        "voxel_spacing_mm": list(spacing_xyz),
+        "voxel_volume_mm3": float(np.prod(spacing_xyz)),
+        "gt_voxels": int(gt_arr.sum()),
+        "test_voxels": int(test_arr.sum()),
+        "overlap_voxels": int((gt_arr & test_arr).sum()),
+        "gt_slices_touched": int((gt_arr.sum(axis=(1, 2)) > 0).sum()),
+        "test_slices_touched": int((test_arr.sum(axis=(1, 2)) > 0).sum()),
+        "measure": "surface area of each surface element, mm^2",
+        "quantisation": "distances are quantised to the voxel lattice above",
+    }
+    if not gt_arr.any() or not test_arr.any():
+        detail["note"] = "one mask is empty; no surface distances to report"
+        return detail
+    sd = compute_surface_distances(gt_arr, test_arr, spacing_xyz[::-1])
+    for label, distances, areas in (
+        ("gt_to_test", sd["distances_gt_to_pred"], sd["surfel_areas_gt"]),
+        ("test_to_gt", sd["distances_pred_to_gt"], sd["surfel_areas_pred"]),
+    ):
+        if len(distances) == 0 or float(np.sum(areas)) == 0.0:
+            detail[label] = {"surfels": 0}
+            continue
+        cumulative = np.cumsum(areas) / np.sum(areas)
+        index = min(int(np.searchsorted(cumulative, 0.95)), len(distances) - 1)
+        detail[label] = {
+            "max_mm": float(distances.max()),
+            "hd95_mm": float(distances[index]),
+            "mean_mm": float(np.sum(distances * areas) / np.sum(areas)),
+            "surfels": int(len(distances)),
+            "surface_area_mm2": float(np.sum(areas)),
+        }
+    return detail
+
+
+def _audit_pairs():
+    rng = np.random.default_rng(23)
+    shape = (16, 36, 32)
+    for trial in range(30):
+        yield (
+            _placed(_blobs(rng, shape, 1 + trial % 3), rotated=trial % 2 == 1),
+            _placed(_blobs(rng, shape, 1 + (trial + 1) % 3), rotated=trial % 2 == 1),
+        )
+    full = np.zeros((10, 20, 20), bool)
+    full[3:7, 5:12, 6:15] = True
+    none = np.zeros_like(full)
+    for gt, test in ((none, full), (full, none), (none, none)):
+        yield _placed(gt), _placed(test)
+
+
+def test_the_audit_record_is_exactly_as_when_computed_on_its_own():
+    from autoseg_evaluator.core.metrics import geometric_metrics_with_audit
+
+    for gt, test in _audit_pairs():
+        want = _reference_mask_audit_detail(gt, test)
+        assert mask_audit_detail(gt, test) == want
+        metrics, detail = geometric_metrics_with_audit(gt, test, ALL_GEOMETRIC)
+        assert list(detail) == list(want)
+        assert detail == want
+        assert _same(metrics, compute_geometric_metrics(gt, test, ALL_GEOMETRIC))
+
+
+@pytest.mark.parametrize("surface_metrics", [True, False])
+def test_metrics_and_audit_share_one_surface_distance_pass(monkeypatch, surface_metrics):
+    """The audit used to compute the distance transforms a second time."""
+    import autoseg_evaluator.core.metrics as metrics_module
+    from autoseg_evaluator.core.metrics import geometric_metrics_with_audit
+
+    calls = []
+    real = metrics_module.compute_surface_distances
+
+    def counted(*args):
+        calls.append(1)
+        return real(*args)
+
+    monkeypatch.setattr(metrics_module, "compute_surface_distances", counted)
+    config = ALL_GEOMETRIC if surface_metrics else {"geometric": {"dice": True}}
+    a = _cube_sitk((20, 20, 20), 5, 15, 5, 15, 5, 15)
+    b = _cube_sitk((20, 20, 20), 6, 16, 5, 15, 5, 15)
+    _metrics, detail = geometric_metrics_with_audit(a, b, config)
+    assert len(calls) == 1
+    assert detail["gt_to_test"]["max_mm"] == 1.0

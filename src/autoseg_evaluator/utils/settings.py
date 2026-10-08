@@ -23,27 +23,16 @@ _DEFAULTS: dict[str, Any] = {
     },
     "active_tab": 0,
     "theme": "light_blue.xml",
+    # Tolerances are lists: every value is computed in one run, each in its
+    # own column. A single number, as older settings files hold, still reads.
     "tolerances": {
-        "surface_dice_tau_mm": 3.0,
-        "apl_tolerance_mm": 3.0,
+        "surface_dice_tau_mm": [3.0],
         "similarity_threshold": 0.6,
     },
-    "dvh": {
-        "d_at_volumes_pct": [95, 50, 5, 2],
-        "v_at_doses_gy": [20, 30, 40],
-        "include_dmean": True,
-        "include_dmax": True,
-        "include_dmin": False,
-    },
-    "compute_geometric": {
-        "dice": True,
-        "hausdorff100": True,
-        "hausdorff95": True,
-        "mean_surface_distance": True,
-        "surface_dice": True,
-        "apl_mean": False,
-        "apl_total": False,
-    },
+    # Keep the full detail behind every number for a .audit.json beside an
+    # export. Off by default: it is only useful if someone intends to audit
+    # or reproduce a run, and it has to be collected while computing.
+    "audit": {"sidecar": False},
     "custom_source_labels": {},  # keyed by SOP Instance UID
     # Source labels designated as manual observers for the Build Consensus GT
     # tab (v2.4). Each patient's RTSSes carrying one of these labels are
@@ -51,11 +40,10 @@ _DEFAULTS: dict[str, Any] = {
     "consensus_observer_labels": [],  # list[str]
     # User-defined Find→Replace rules applied to organ names before matching
     "replacement_rules": [],  # list of {"find": str, "replace": str}
-    # Last-used auto-match template (organ list + GT identifier criteria)
+    # Last-used auto-match template (organ list + GT source-label criterion)
     "last_template": {
         "organs": [],
         "gt_manufacturer": "",  # substring to look for in Manufacturer tag
-        "gt_filename": "",  # substring to look for in RTSTRUCT filename
         "similarity_threshold": 0.6,
     },
 }
@@ -79,7 +67,33 @@ def load_settings() -> dict[str, Any]:
             user = json.load(f)
     except (OSError, json.JSONDecodeError):
         return default_settings()
-    return _merge(default_settings(), user)
+    return _merge(default_settings(), _drop_retired(user))
+
+
+#: Settings that named something the application no longer has. They are
+#: dropped on load, so the next save leaves them out, instead of travelling on
+#: forever and suggesting to anyone reading the file that they still do
+#: something. Mask APL and its tolerance were removed in v3 (spec D3); the
+#: template's filename criterion for the GT RTSS was removed in October 2026.
+_RETIRED: dict[str, tuple[str, ...]] = {
+    "tolerances": ("apl_tolerance_mm",),
+    "last_template": ("gt_filename",),
+}
+
+#: Whole sections dropped for the same reason. The metric selection is no longer
+#: remembered between launches: the Compute tab opens with nothing selected.
+_RETIRED_SECTIONS: tuple[str, ...] = ("compute_geometric", "compute_polygon", "dvh")
+
+
+def _drop_retired(user: dict[str, Any]) -> dict[str, Any]:
+    for section in _RETIRED_SECTIONS:
+        user.pop(section, None)
+    for section, keys in _RETIRED.items():
+        block = user.get(section)
+        if isinstance(block, dict):
+            for key in keys:
+                block.pop(key, None)
+    return user
 
 
 def save_settings(settings: dict[str, Any]) -> None:
