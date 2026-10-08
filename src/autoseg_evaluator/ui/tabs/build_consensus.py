@@ -1,37 +1,48 @@
 """Tab 2 — Build Consensus GT (Optional).
 
-This tab lets the user combine 2+ RTSSes that share a source label (e.g. multiple
-manual contours from different clinicians, or repeat exports from the same TPS)
-into a single STAPLE-derived synthetic ground truth, *before* the GT/test
-matching workflow on the Match Contours tab.
+Combines several manual observers' contours into a STAPLE consensus that the
+Match Contours tab (Tab 3) can then use as the ground truth.
 
-The tab is greyed out unless the library contains at least one patient with
-two or more RTSSes sharing a source label. When active, the user:
+**Observers are source labels.** Each manual observer is identified by a
+distinct source label, assigned in Tab 1, and the user picks which labels are
+observers with **Manual observers…** (persisted as
+``consensus_observer_labels``). The consensus unit is the patient: a patient
+is eligible when two or more of its structure sets carry observer labels. An
+observer with more than one structure set for a patient is a labelling error:
+the first is used and a warning names the rest, rather than letting one rater
+count twice. Synthetic consensus entries never take part, so no consensus is
+built from another.
 
-1. Selects an eligible group (patient + source-label combination) from the
-   left panel.
-2. Reviews the auto-matched organ drawers on the right. Each drawer lists
-   the 2+ contributing ROIs (one from each RTSS in the group), grouped by
-   the existing Levenshtein+cosine matcher + TG-263 dictionary.
-3. Edits the drawers if the auto-match got something wrong (drag-drop and
-   per-row remove buttons, same UX as Match Contours).
-4. Clicks **Generate Consensus GT** — a synthetic RTSS entry is registered
-   in the library with manufacturer ``STAPLE Consensus``. The Match
-   Contours tab can then designate this synthetic entry as the GT just
-   like any other RTSS.
+For each eligible patient, the observers' ROIs are grouped into organs by the
+same matcher Match Contours uses (Levenshtein + cosine similarity, TG-263
+synonyms), with a per-patient similarity threshold. ROIs that did not cluster
+wait in an unmatched tray, from which they can be assigned by hand; a patient
+edited by hand keeps its grouping until reset. An organ needs at least two
+raters, and every rater must have contoured the same planning image, since
+STAPLE fuses voxels; raters on another image are left out and named.
 
-Single-rater organs (only one of the RTSSes contains them) are excluded
-silently per the spec — STAPLE requires at least 2 raters per organ.
+**Generate STAPLE for selected patients / for all patients** registers one
+synthetic structure set per patient, labelled ``STAPLE Consensus``
+(:data:`~autoseg_evaluator.core.staple.MULTI_OBSERVER_LABEL`), which Match
+Contours designates as the ground truth like any other. "All patients" first
+removes every earlier consensus entry; "selected" replaces only those
+patients'. Nothing is fused yet: STAPLE runs per organ when a computation needs
+the consensus, from the raters' masks, so the entry has no contours of its own
+and the 2D contour metrics cannot be measured against it. Before generating, **Compute
+inter-observer variability** reports pairwise geometric metrics between every
+pair of observers.
 
-The tab does not replace Tab 3's existing per-drawer "vs STAPLE" mode — the
-two features answer different questions:
+This is not Tab 3's per-drawer "vs STAPLE" mode, which answers a different
+question:
 
-* This tab: "Build a consensus ground truth from N manual contours."
-* Tab 3 STAPLE: "Treat all contours (GT + tests) as raters and report each
-  against the resulting consensus."
+* This tab: "Build a ground truth from N manual observers, apart from the
+  contours being evaluated."
+* Tab 3 "vs STAPLE": "Treat the contours in one drawer (optionally including
+  the ground truth) as raters, and report each against their consensus,"
+  labelled ``STAPLE (drawer pool)``. The contours scored helped build it.
 
-Both can co-exist in different drawers; only mixing them on the same drawer
-is disallowed (handled by Match Contours).
+The two can be used in different drawers of one analysis, but not in the same
+drawer (Match Contours prevents it).
 """
 
 from __future__ import annotations
