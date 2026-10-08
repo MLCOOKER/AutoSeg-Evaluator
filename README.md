@@ -121,15 +121,31 @@ command-line or coding expertise.
 
 ### For end users — portable bundle (recommended)
 
+**Windows 10 / 11 (64-bit)**
+
 1. Download the latest `AutoSegEvaluator-v*.zip` from the
    [Releases](https://github.com/MLCOOKER/AutoSeg-Evaluator/releases) page.
 2. Extract it anywhere — local folder, USB stick, or shared drive.
 3. Double-click `Run AutoSeg Evaluator.bat`.
 
-The bundle ships a self-contained CPython 3.11 runtime and every dependency
-as inspectable files under `python\Lib\site-packages\`. No Python install,
-no admin rights, no registry writes, no internet access required at runtime —
-suited to locked-down clinical Windows environments.
+**Linux (x86-64)**
+
+1. Download the latest `AutoSegEvaluator-v*-linux-x86_64.tar.gz` from the
+   same page.
+2. Extract it somewhere you can write to: `tar -xzf AutoSegEvaluator-v*-linux-x86_64.tar.gz`.
+3. Run `./run-autoseg-evaluator.sh` inside it. Optionally,
+   `./add-to-applications-menu.sh` adds it, with its icon, to your
+   applications menu.
+
+The `README.txt` inside states the oldest glibc the bundle needs, which comes
+from the PySide6 release it was built with (glibc 2.34 for PySide6 6.12:
+Ubuntu 22.04, Debian 12, RHEL / Rocky / AlmaLinux 9 or later).
+
+Each bundle ships a self-contained CPython 3.11 runtime and every dependency
+as inspectable files under `site-packages`. No Python install, no admin
+rights, no registry writes, no internet access required at runtime — suited
+to locked-down clinical environments. Both include the validated compiled
+engine for the 2D contour metrics.
 
 ### From source (Windows)
 
@@ -197,9 +213,11 @@ sudo pacman -S python git qt6-base libxkbcommon-x11
 The full test suite is exercised on `windows-latest` and `ubuntu-latest` in CI
 on every push — macOS is not in CI, but the same PySide6 / SimpleITK / pydicom
 stack ships official wheels for macOS so the app is expected to run identically
-there. The 2D contour metrics' compiled engine ships for Windows and is built
-and validated in CI for Linux; on any other platform the portable reference
-engine runs instead, and the Compute tab says which.
+there. The 2D contour metrics' compiled engine ships for Windows and Linux
+x86-64, validated with the suppliers' acceptance suites (the Linux record is in
+[`third_party/native_contour_metrics/builds/linux-x86_64/`](third_party/native_contour_metrics/builds/linux-x86_64/));
+on any other platform the portable reference engine runs instead, and the
+Compute tab says which.
 
 ### Building the portable bundle locally
 
@@ -207,9 +225,14 @@ engine runs instead, and the Compute tab says which.
 python scripts/build_portable.py
 ```
 
-Produces `dist/AutoSegEvaluator-v{version}/` and a matching `.zip`. The same
-script runs on a `windows-latest` GitHub Actions runner whenever a `v*` tag
-is pushed (see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
+Builds for the platform it runs on. On Windows it produces
+`dist/AutoSegEvaluator-v{version}/` and a matching `.zip`; on Linux,
+`dist/AutoSegEvaluator-v{version}-linux-x86_64/` and a matching `.tar.gz`. The
+same script runs on `windows-latest` and `ubuntu-22.04` GitHub Actions runners
+whenever a `v*` tag is pushed, and each bundle is started and checked before it
+is attached to the release (see
+[`.github/workflows/release.yml`](.github/workflows/release.yml) and
+[`scripts/smoke_test_bundle.py`](scripts/smoke_test_bundle.py)).
 
 ## Workflow overview
 

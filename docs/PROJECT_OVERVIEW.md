@@ -1652,23 +1652,36 @@ no registry writes; no admin rights; no AV false positives.
 — per-user, survives folder replacement on update. Matches what every
 mainstream clinical app does.
 
-**Build pipeline** (added v2.1):
-[`scripts/build_portable.py`](../scripts/build_portable.py) downloads
-the official CPython 3.11 embeddable distribution, patches the `._pth`
-file to enable site-packages, bootstraps pip via the upstream
-`get-pip.py`, installs the runtime dependencies from
-`requirements.txt` into the bundle's `Lib/site-packages/`, copies the
-project source into `app/autoseg_evaluator/`, and writes the `.bat`
-launcher + bundle-local `README.txt`. Output:
+**Build pipeline** (added v2.1; Linux added v3.0):
+[`scripts/build_portable.py`](../scripts/build_portable.py) builds for
+the platform it runs on. On Windows it downloads the official CPython 3.11
+embeddable distribution, patches the `._pth` file to enable site-packages,
+bootstraps pip via the upstream `get-pip.py`, installs the runtime
+dependencies from `requirements.txt` into the bundle's `Lib/site-packages/`,
+copies the project source into `app/autoseg_evaluator/`, and writes the
+`.bat` launcher + bundle-local `README.txt`. Output:
 `dist/AutoSegEvaluator-v{version}/` plus a matching `.zip` of the same.
+On Linux the runtime is python-build-standalone's relocatable CPython
+3.11.9, pinned by release and checksum; a `.pth` file puts `app/` on its
+path, and a `run-autoseg-evaluator.sh` launcher and an
+`add-to-applications-menu.sh` helper take the `.bat` and `.vbs`'s places.
+The build reads the oldest glibc its wheels support and writes it into the
+bundle's `README.txt`. Output: `dist/AutoSegEvaluator-v{version}-linux-x86_64/`
+plus a `.tar.gz`, which keeps the launchers executable. Each bundle carries
+only its own platform's polygon-metric library.
 
 **Release workflow**
 ([`.github/workflows/release.yml`](../.github/workflows/release.yml)):
-on every `v*` tag push, builds the portable bundle on a
-`windows-latest` runner, attaches the resulting `.zip` to a GitHub
-Release (with auto-generated release notes), and also uploads it as a
-30-day workflow artifact. The release body links the README and notes
-that no Python install is required at the end user.
+on every `v*` tag push, builds the Windows bundle on `windows-latest` and
+the Linux bundle on `ubuntu-22.04` (the oldest runner, so pip can only pick
+wheels that run there). Each is started with its own interpreter by
+[`scripts/smoke_test_bundle.py`](../scripts/smoke_test_bundle.py): every
+module imports, the main window opens off-screen, and the 2D metrics run on
+the compiled engine, whose library must be byte-identical to the committed
+one. The Linux bundle is checked that way after extraction on Ubuntu 22.04
+and 24.04. Only then are both attached to one GitHub Release (with
+auto-generated release notes); both are also kept as 30-day workflow
+artifacts. Run by hand, the workflow builds and checks without publishing.
 
 **CI workflow**
 ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)): ruff

@@ -2,10 +2,10 @@
 #
 # Install a freedesktop .desktop launcher for AutoSeg Evaluator (Linux).
 #
-# The portable .zip bundle is Windows-only; on Linux you run from source
-# (pip install -e .). This registers an application-menu entry with the app
-# icon so AutoSeg Evaluator shows up like a native app (and its window gets
-# the icon in the taskbar/dock).
+# For a source install (pip install -e .); the portable Linux bundle carries
+# its own add-to-applications-menu.sh. This registers an application-menu
+# entry with the app icon so AutoSeg Evaluator shows up like a native app (and
+# its window gets the icon in the taskbar/dock).
 #
 # Run it from the Python environment where autoseg-evaluator is installed
 # (e.g. your activated venv). Override the interpreter with:

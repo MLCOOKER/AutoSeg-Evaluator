@@ -6,6 +6,33 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — Linux: the compiled 2D engine and a portable download, October 2026
+- **The 2D contour metrics' compiled engine ships for Linux x86-64.** It was
+  built once by a new workflow (`.github/workflows/linux-library.yml`) with
+  the supplier's build script, for glibc 2.28, and validated with the
+  supplier's acceptance suites and our own call path on glibc 2.28, Ubuntu
+  22.04 and Ubuntu 24.04 — the same result as the Windows library on all
+  three (largest distance error 4.86e-10 mm). It is committed and pinned by
+  hash like the Windows one; the record is in
+  `third_party/native_contour_metrics/builds/linux-x86_64/`. A Linux install
+  no longer needs a compiler to get the fast engine, and CI validates the
+  committed library on every run instead of building its own.
+- **A portable Linux bundle on the Releases page**,
+  `AutoSegEvaluator-v…-linux-x86_64.tar.gz`, beside the Windows one: a
+  self-contained CPython 3.11 with every dependency as plain files, a
+  `run-autoseg-evaluator.sh` launcher and an `add-to-applications-menu.sh`
+  helper. Its `README.txt` states the oldest glibc it needs, read from the
+  wheels it was built with.
+- **Both bundles are started before they are released.**
+  `scripts/smoke_test_bundle.py` runs each with its own interpreter: every
+  module imports, the main window opens off-screen, and the 2D metrics run on
+  the compiled engine with the committed library.
+
+### Fixed — the portable bundle, October 2026
+- **shapely is installed.** The bundles install from `requirements.txt`,
+  which lacked it, so a v3 bundle would have failed on the first contour read.
+  A test now keeps `requirements.txt` and `pyproject.toml` in step.
+
 ### Fixed — TG-263 laterality errors in the synonym dictionary, October 2026
 - **The TG-263 worksheet's own left/right errors are overridden.** The
   2017-08-15 worksheet describes 13 structures as the opposite side to their
