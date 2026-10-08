@@ -1,6 +1,6 @@
 # Runtime dependencies — see pyproject.toml for canonical version constraints.
 # This file is provided for users who prefer `pip install -r requirements.txt`.
-PySide6>=6.6,<7
+PySide6>=6.6,<6.12
 qt-material>=2.14,<3
 pydicom>=2.4,<3
 SimpleITK>=2.3,<3

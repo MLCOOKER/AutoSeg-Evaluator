@@ -37,7 +37,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
 dependencies = [
-    "PySide6>=6.6",
+    # Below 6.12: 6.12.0 releases Python's None more often than it takes it,
+    # which aborts the process on Python 3.11 and older ("none_dealloc"), where
+    # None is reference-counted - the bundles ship 3.11. Lift once fixed.
+    "PySide6>=6.6,<6.12",
     "qt-material>=2.14",
     "pydicom>=2.4",
     "SimpleITK>=2.3",

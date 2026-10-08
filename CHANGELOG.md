@@ -29,6 +29,12 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
   the compiled engine with the committed library.
 
 ### Fixed — the portable bundle, October 2026
+- **PySide6 is held below 6.12.** PySide6 6.12.0 (released 2026-10-08)
+  releases Python's `None` more often than it takes it. On Python 3.11 and
+  older, where `None` is reference-counted, that eventually aborts the process
+  ("Fatal Python error: none_dealloc"); CI's test runs crashed at exit from
+  the day it was released. Both bundles ship Python 3.11, so a long session
+  could have crashed the same way.
 - **shapely is installed.** The bundles install from `requirements.txt`,
   which lacked it, so a v3 bundle would have failed on the first contour read.
   A test now keeps `requirements.txt` and `pyproject.toml` in step.

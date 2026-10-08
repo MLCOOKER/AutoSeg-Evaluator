@@ -138,7 +138,7 @@ command-line or coding expertise.
    applications menu.
 
 The `README.txt` inside states the oldest glibc the bundle needs, which comes
-from the PySide6 release it was built with (glibc 2.34 for PySide6 6.12:
+from the PySide6 release it was built with (glibc 2.34 for PySide6 6.11:
 Ubuntu 22.04, Debian 12, RHEL / Rocky / AlmaLinux 9 or later).
 
 Each bundle ships a self-contained CPython 3.11 runtime and every dependency
