@@ -53,8 +53,10 @@ third_party/native_contour_metrics/*/validation_runs/
 
 # Compiled metric libraries built locally for a platform we do not ship a
 # validated binary for. The Windows and Linux x86-64 libraries are committed,
-# and pinned by hash in tests/test_vendor_integrity.py.
+# and pinned by hash in tests/test_vendor_integrity.py; the Linux one is
+# re-included past the *.so rule above.
 src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/macos-*/
+!src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/linux-x86_64/libfast_native.so
 
 # Intermediate objects from a local native-library build, and the build
 # script's record of it.
