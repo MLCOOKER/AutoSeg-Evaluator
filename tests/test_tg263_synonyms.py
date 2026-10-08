@@ -334,10 +334,10 @@ def test_colliding_canonicals_are_known():
 def test_laterality_inverted_variants_are_refiled():
     """A variant naming the opposite side belongs to the opposite canonical.
 
-    The shipped dictionary swaps the left and right variant lists wholesale for
-    two organs. Read literally, "Left_Femur Neck" resolves to the *right*
-    femoral neck, and which of the pair wins otherwise depends on dictionary
-    ordering rather than on anything meaningful.
+    The shipped dictionary once swapped the left and right variant lists for
+    two organs, from TG-263's own descriptions; it is now corrected at build,
+    but a dictionary edited by hand can make the same error. Read literally,
+    "Left_Femur Neck" resolves to the *right* femoral neck.
     """
     flat = flatten_synonyms(
         {
@@ -358,11 +358,7 @@ def test_an_inverted_variant_with_no_sibling_is_dropped():
 
 
 def test_shipped_dictionary_has_no_surviving_laterality_inversion():
-    """Guards the real data, not only the rule.
-
-    24 inverted variants ship in the dictionary today, covering Femur_Neck and
-    V_Iliac. None may survive flattening.
-    """
+    """Guards the real data, not only the rule: none may survive flattening."""
     from autoseg_evaluator.core.organ_groups import extract_laterality
 
     raw = load_synonyms(str(files("autoseg_evaluator.resources").joinpath("synonyms.json")))
@@ -387,3 +383,162 @@ def test_the_two_known_inverted_organs_resolve_correctly():
     for spelling, expected in cases.items():
         key = spelling.lower().replace(" ", "").replace("_", "").replace("-", "")
         assert flat[key] == expected, f"{spelling} -> {flat[key]}"
+
+
+# ---- The TG-263 worksheet's own laterality errors, corrected at build ---------
+
+
+def _shipped_raw() -> dict:
+    import json
+
+    path = files("autoseg_evaluator.resources").joinpath("synonyms.json")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_every_shipped_variant_is_listed_under_its_own_side():
+    """Corrected at the source, not only re-filed on load.
+
+    The worksheet describes 13 structures as the opposite side to their own
+    names; built from those descriptions, the femoral necks and common iliac
+    veins listed every right-sided spelling under the left structure.
+    """
+    from autoseg_evaluator.core.organ_groups import extract_laterality
+
+    raw = load_synonyms(str(files("autoseg_evaluator.resources").joinpath("synonyms.json")))
+    for canonical, variants in raw.items():
+        side = extract_laterality(canonical)[1]
+        for variant in variants:
+            other = extract_laterality(variant)[1]
+            assert not (side and other and side != other), f"{variant!r} under {canonical!r}"
+
+
+def test_the_dictionary_says_which_worksheet_descriptions_were_overridden():
+    corrections = _shipped_raw()["_tg263_corrections"]
+    assert "overridden" in corrections[0]
+    named = {line.split(":")[0] for line in corrections[1:]}
+    assert named == {
+        "Femur_Neck_L",
+        "Femur_Neck_R",
+        "LN_Ax_Central_R",
+        "LN_Neck_II_R",
+        "Lobe_Frontal_R",
+        "Musc_Sclmast_R",
+        "Proc_Condyloid_L",
+        "Proc_Condyloid_R",
+        "Spc_Retrosty_R",
+        "V_Iliac_L",
+        "V_Iliac_R",
+        "V_Jugular_Int_L",
+        "V_Jugular_Int_R",
+    }
+    # Documentation, never data.
+    raw = load_synonyms(str(files("autoseg_evaluator.resources").joinpath("synonyms.json")))
+    assert "_tg263_corrections" not in raw
+
+
+def _generator():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "build_synonyms.py"
+    spec = importlib.util.spec_from_file_location("build_synonyms", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _row(module, primary: str, description: str):
+    return module.CSVRow(
+        {
+            "Target Type": "Anatomic",
+            "TG263-Primary Name": primary,
+            "TG-263-Reverse Order Name": "",
+            "Description": description,
+        }
+    )
+
+
+def test_the_generator_overrides_a_known_worksheet_error():
+    from collections import defaultdict
+
+    module = _generator()
+    row = _row(module, "Femur_Neck_L", "Femur Neck Right")
+    conflicts = defaultdict(list)
+    module.correct_descriptions([row], conflicts)
+    assert row.description == "Femur Neck Left"
+    assert "overridden" in conflicts["description_side_corrected"][0]
+
+
+def test_the_generator_leaves_a_changed_worksheet_row_alone_and_says_so():
+    """A later worksheet that fixed or reworded the row is not overwritten."""
+    from collections import defaultdict
+
+    module = _generator()
+    row = _row(module, "Femur_Neck_L", "Neck of left femur")
+    conflicts = defaultdict(list)
+    module.correct_descriptions([row], conflicts)
+    assert row.description == "Neck of left femur"
+    assert conflicts["description_side_correction_not_applied"]
+
+
+def test_the_generator_reports_an_error_it_has_no_correction_for():
+    from collections import defaultdict
+
+    module = _generator()
+    row = _row(module, "Kidney_L", "Kidney Right")
+    conflicts = defaultdict(list)
+    module.correct_descriptions([row], conflicts)
+    assert row.description == "Kidney Right"
+    assert "Kidney_L" in conflicts["description_side_uncorrected"][0]
+
+
+def test_every_shipped_variant_resolves_to_the_name_it_is_listed_under():
+    """No spelling is claimed by two entries, nor by the wrong side.
+
+    TG-263 lists both Elbow_L and Joint_Elbow_L; prefix-dropping once gave
+    Joint_Elbow_L the elbow's spellings too, so "Elbow_L" resolved to Elbow_L
+    and "Elbow Left" to Joint_Elbow_L.
+    """
+    raw = load_synonyms(str(files("autoseg_evaluator.resources").joinpath("synonyms.json")))
+    flat = flatten_synonyms(raw)
+    for canonical, variants in raw.items():
+        for variant in variants:
+            assert flat[_norm(variant)] == canonical, f"{variant!r}: {flat[_norm(variant)]}"
+
+
+def test_elbow_spellings_resolve_to_one_structure(synonyms_flat):
+    for spelling in ("Elbow_L", "Elbow Left", "Elbow LT", "Left Elbow", "ElbowL"):
+        assert synonyms_flat[_norm(spelling)] == "Elbow_L", spelling
+    for spelling in ("Joint_Elbow_L", "L_Elbow_Joint"):
+        assert synonyms_flat[_norm(spelling)] == "Joint_Elbow_L", spelling
+    assert synonyms_flat[_norm("Bowel")] == "Bowel"
+
+
+def test_small_and_large_alone_name_no_structure(synonyms_flat):
+    """Stripping "Bowel_" left bare adjectives; the bowel spellings remain."""
+    assert "small" not in synonyms_flat
+    assert "large" not in synonyms_flat
+    assert synonyms_flat[_norm("Small Bowel")] == "Bowel_Small"
+    assert synonyms_flat[_norm("Large_Bowel")] == "Bowel_Large"
+
+
+def test_shortened_names_that_name_nothing_are_not_offered(synonyms_flat):
+    """Dropping a prefix must not leave a letter, a numeral or a qualifier."""
+    for spelling in (
+        "R",
+        "C",
+        "VII",
+        "VII_L",
+        "Right VII",
+        "LV",
+        "Base",
+        "Base_R",
+        "Common",
+        "TM_L",
+    ):
+        assert _norm(spelling) not in synonyms_flat, spelling
+    assert synonyms_flat[_norm("CN_VII_L")] == "CN_VII_L"
+    assert synonyms_flat[_norm("Tongue_Base")] == "Tongue_Base"
+    # Vertebra codes are how vertebrae are named, so they stay.
+    assert synonyms_flat[_norm("C1")] == "VB_C1"
+    assert synonyms_flat[_norm("T12")] == "VB_T12"

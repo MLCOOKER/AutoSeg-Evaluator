@@ -21,9 +21,15 @@ Four expansion rules are applied (see brainstorm in the PR description):
   is one half of a proven ``_L`` / ``_R`` pair (kills VB_L = "Lumbar" cases).
 * **Rule 3** — Category-prefix collapse (``Bone_Mandible`` → also accepts
   ``Mandible``) is applied **only** when stripping creates no collision
-  with another canonical's naked form.
+  with another canonical's naked form, the naked form is not a TG-263
+  name in its own right, and it names something on its own (not ``R``,
+  ``VII`` or ``Base``; see :func:`_names_nothing`).
 * **Rule 4** — Bare-suffix laterality (``ParotidL`` / ``ParotidR``) is
   generated from Rule-2 paired stems only.
+
+Before any rule, 13 worksheet descriptions that name the opposite side to their
+own structure are corrected (:data:`DESCRIPTION_CORRECTIONS`). The worksheet is
+followed everywhere else.
 
 Run from the repository root::
 
@@ -74,7 +80,8 @@ CATEGORY_PREFIXES: tuple[str, ...] = (
     "Cavity_",
     "Canal_",
     "BileDuct_",
-    "Bowel_",
+    # Not "Bowel_": it is not a category. Stripped, Bowel_Small and Bowel_Large
+    # left "Small" and "Large", which name no structure.
     "Valve_",
     "Tongue_",
     "VB_",
@@ -113,6 +120,94 @@ def read_csv(path: Path) -> list[CSVRow]:
         return [CSVRow(row) for row in reader if (row.get("TG263-Primary Name") or "").strip()]
 
 
+# ---- Corrections to the worksheet ----------------------------------------
+
+#: Rows of the TG-263 Nomenclature Worksheet (2017-08-15) whose Description
+#: names the opposite side to the structure itself, as ``{primary name:
+#: (description in the worksheet, description used)}``. The primary and
+#: reverse-order names agree with each other and with how every other
+#: lateralised row is described, so the description is the error, and it is
+#: overridden here before any variant is made from it.
+#:
+#: Uncorrected, the femoral neck and common iliac vein rows filed every
+#: right-sided spelling under the left structure and every left-sided one under
+#: the right ("Femur Neck Right" became variants of Femur_Neck_L). The others
+#: proposed one side's spelling for both sides, which dropped it from both.
+#: Two PRV rows (OpticNrv_PRVxx_L/R) carry the same error but are not anatomic,
+#: so Rule 0 never reads them. Each correction is listed in
+#: ``synonyms_conflicts.md`` and in the dictionary's ``_tg263_corrections``.
+DESCRIPTION_CORRECTIONS: dict[str, tuple[str, str]] = {
+    "Femur_Neck_L": ("Femur Neck Right", "Femur Neck Left"),
+    "Femur_Neck_R": ("Femur Neck Left", "Femur Neck Right"),
+    "LN_Ax_Central_R": (
+        "Axillary lymphatic chain - Central Left",
+        "Axillary lymphatic chain - Central Right",
+    ),
+    "LN_Neck_II_R": (
+        "Level IIA & IIB (Upper Jugular) neck nodes Left",
+        "Level IIA & IIB (Upper Jugular) neck nodes Right",
+    ),
+    "Lobe_Frontal_R": ("Frontal Lobe Left", "Frontal Lobe Right"),
+    "Musc_Sclmast_R": ("Sternocleidomastoid Left", "Sternocleidomastoid Right"),
+    "Proc_Condyloid_L": (
+        "Condyloid process of mandible - Right",
+        "Condyloid process of mandible - Left",
+    ),
+    "Proc_Condyloid_R": (
+        "Condyloid process of mandible - Left",
+        "Condyloid process of mandible - Right",
+    ),
+    "Spc_Retrosty_R": ("Retrostyloid space -Left", "Retrostyloid space -Right"),
+    "V_Iliac_L": ("Common iliac vein Right", "Common iliac vein Left"),
+    "V_Iliac_R": ("Common iliac vein Left", "Common iliac vein Right"),
+    "V_Jugular_Int_L": ("Internal jugular vein Right", "Internal jugular vein Left"),
+    "V_Jugular_Int_R": ("Internal jugular vein Left", "Internal jugular vein Right"),
+}
+
+_SIDE_WORDS = {"left": "L", "lt": "L", "right": "R", "rt": "R"}
+
+
+def _description_side(description: str) -> str:
+    """``L`` or ``R`` when a description names exactly one side, else ``""``."""
+    sides = {
+        _SIDE_WORDS[word]
+        for word in re.findall(r"[A-Za-z]+", description.lower())
+        if word in _SIDE_WORDS
+    }
+    return next(iter(sides)) if len(sides) == 1 else ""
+
+
+def correct_descriptions(rows: list[CSVRow], conflicts: dict[str, list[str]]) -> None:
+    """Apply :data:`DESCRIPTION_CORRECTIONS`, and report any other side clash.
+
+    A correction is applied only to the exact worksheet text it was written
+    for, so a later worksheet that fixed or changed a row is reported rather
+    than overwritten. Any other anatomic row whose description names the
+    opposite side to its name is reported, not corrected.
+    """
+    for r in rows:
+        correction = DESCRIPTION_CORRECTIONS.get(r.primary)
+        if correction is not None:
+            found, corrected = correction
+            if r.description == found:
+                r.description = corrected
+                conflicts["description_side_corrected"].append(
+                    f'`{r.primary}`: worksheet description "{found}" names the opposite '
+                    f'side; overridden to "{corrected}".'
+                )
+            else:
+                conflicts["description_side_correction_not_applied"].append(
+                    f'`{r.primary}`: expected "{found}" but the worksheet has '
+                    f'"{r.description}"; correction not applied.'
+                )
+            continue
+        split = _laterality_split(r.primary)
+        if r.is_anatomic() and split and _description_side(r.description) not in ("", split[1]):
+            conflicts["description_side_uncorrected"].append(
+                f'`{r.primary}`: description "{r.description}" names the opposite side.'
+            )
+
+
 # ---- Expansion engine ----------------------------------------------------
 
 
@@ -125,6 +220,30 @@ def _laterality_split(canonical: str) -> tuple[str, str] | None:
     if not m:
         return None
     return canonical[: m.start()], m.group(1)
+
+
+_ROMAN_NUMERAL_RE = re.compile(r"^[IVX]+$")
+
+#: Naked forms that only qualify the prefix they lost: "Base" is the base of
+#: the tongue only next to "Tongue", "Common" the common bile duct only next to
+#: "BileDuct". "TM" is an abbreviation that needs "Joint" to mean the
+#: temporomandibular joint.
+_QUALIFYING_WORDS: frozenset[str] = frozenset(
+    {"All", "Anal", "Base", "Common", "Oral", "Pelvic", "Surface", "TM"}
+)
+
+
+def _names_nothing(naked: str) -> bool:
+    """True when a Rule 3 naked form names no structure on its own.
+
+    That is, after any ``_L``/``_R``: a single letter (``LN_R`` → ``R``,
+    ``VB_C`` → ``C``), a Roman numeral (``CN_VII`` → ``VII``, which also reads
+    as neck level VII) or one of :data:`_QUALIFYING_WORDS`. Vertebra codes
+    (``C1``, ``L5``, ``T12``) are kept: that is how vertebrae are named.
+    """
+    split = _laterality_split(naked)
+    stem = split[0] if split else naked
+    return len(stem) == 1 or bool(_ROMAN_NUMERAL_RE.match(stem)) or stem in _QUALIFYING_WORDS
 
 
 def _category_strip(canonical: str) -> tuple[str, str] | None:
@@ -285,6 +404,9 @@ def build_synonyms(
     conflicts
         ``{kind: [message, …]}`` — feeds the conflicts log.
     """
+    conflicts: dict[str, list[str]] = defaultdict(list)
+    correct_descriptions(rows, conflicts)
+
     # Rule 0 — filter to anatomic rows
     anatomic = [r for r in rows if r.is_anatomic()]
     canonical_set = {r.primary for r in anatomic if r.primary}
@@ -310,7 +432,6 @@ def build_synonyms(
             naked_owners[naked].append(canonical)
 
     sources: dict[str, dict[str, list[str]]] = {}
-    conflicts: dict[str, list[str]] = defaultdict(list)
     variants_per_canonical: dict[str, set[str]] = defaultdict(set)
 
     # Pass 1 — Rule 1: Primary + Reverse for every anatomic row
@@ -355,6 +476,23 @@ def build_synonyms(
         if not stripped:
             continue
         _prefix, naked = stripped
+        # TG-263 sometimes has both: Joint_Elbow_L and Elbow_L, Spc_Bowel and
+        # Bowel. The naked form is then another structure's own name, and its
+        # laterality spellings ("Elbow Left") would be listed under both; the
+        # later entry in the file would take them, while "Elbow_L" itself
+        # resolved to Elbow_L. The naked form is left to its own entry.
+        if naked in canonical_set:
+            conflicts["naked_is_canonical"].append(
+                f"`{naked}` (from `{canonical}`) is a TG-263 name in its own right "
+                "— naked variant and its laterality spellings left to that entry."
+            )
+            continue
+        if _names_nothing(naked):
+            conflicts["naked_names_nothing"].append(
+                f"`{naked}` (from `{canonical}`) names no structure on its own "
+                "— naked variant and its laterality spellings skipped."
+            )
+            continue
         owners = naked_owners.get(naked, [])
         if len(owners) > 1:
             conflicts["naked_conflict"].append(
@@ -469,7 +607,9 @@ def build_synonyms(
 # ---- Audit writers -------------------------------------------------------
 
 
-def write_synonyms_json(synonyms: dict[str, list[str]], out_path: Path) -> None:
+def write_synonyms_json(
+    synonyms: dict[str, list[str]], out_path: Path, corrections: Iterable[str] = ()
+) -> None:
     payload: dict[str, object] = {
         "_comment": (
             "TG-263-derived organ synonym dictionary. Generated by "
@@ -479,6 +619,15 @@ def write_synonyms_json(synonyms: dict[str, list[str]], out_path: Path) -> None:
             "next to the .exe."
         )
     }
+    corrections = sorted(corrections)
+    if corrections:
+        # Keys starting with an underscore are documentation, ignored on load.
+        payload["_tg263_corrections"] = [
+            "The TG-263 Nomenclature Worksheet (2017-08-15) describes these "
+            "structures as the opposite side to their own names. The descriptions "
+            "were overridden to match the names before variants were generated:",
+            *[c.replace("`", "") for c in corrections],
+        ]
     for canonical in sorted(synonyms.keys()):
         payload[canonical] = synonyms[canonical]
     with out_path.open("w", encoding="utf-8") as f:
@@ -552,7 +701,27 @@ def write_conflicts(conflicts: dict[str, list[str]], out_path: Path) -> None:
     lines.append("")
 
     sections = (
+        (
+            "description_side_corrected",
+            "Worksheet descriptions naming the opposite side to their structure — overridden",
+        ),
+        (
+            "description_side_correction_not_applied",
+            "Corrections not applied — the worksheet text differs from what they were written for",
+        ),
+        (
+            "description_side_uncorrected",
+            "Descriptions naming the opposite side with no correction — check these",
+        ),
         ("naked_conflict", "Rule 3 conflicts (naked variant skipped to avoid ambiguity)"),
+        (
+            "naked_is_canonical",
+            "Rule 3 skipped — the naked form is a TG-263 name in its own right",
+        ),
+        (
+            "naked_names_nothing",
+            "Rule 3 skipped — the naked form names no structure on its own",
+        ),
         (
             "laterality_skipped_unpaired",
             "Rule 2 skipped — canonical ends in `_L`/`_R` but no twin in TG-263",
@@ -722,7 +891,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     rows = read_csv(args.csv)
     synonyms, sources, conflicts = build_synonyms(rows)
 
-    write_synonyms_json(synonyms, args.out / "synonyms.json")
+    write_synonyms_json(
+        synonyms, args.out / "synonyms.json", conflicts.get("description_side_corrected", [])
+    )
     write_audit(synonyms, sources, args.out / "synonyms_audit.md")
     write_conflicts(conflicts, args.out / "synonyms_conflicts.md")
 

@@ -6,6 +6,39 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — TG-263 laterality errors in the synonym dictionary, October 2026
+- **The TG-263 worksheet's own left/right errors are overridden.** The
+  2017-08-15 worksheet describes 13 structures as the opposite side to their
+  names — the femoral necks, common iliac and internal jugular veins, condyloid
+  processes, and the right axillary central nodes, level II nodes, frontal lobe,
+  sternocleidomastoid and retrostyloid space. `scripts/build_synonyms.py` now
+  corrects those descriptions before generating variants, and reports any
+  other row that contradicts its name. In the dictionary, 24 spellings of the
+  femoral necks and common iliac veins that sat under the opposite side are now
+  under their own (the matcher had been re-filing them on load), and 14
+  sternocleidomastoid and retrostyloid spellings, previously dropped for both
+  sides, are restored. The corrections are listed in the dictionary under
+  `_tg263_corrections`.
+- **Elbow spellings resolve to one structure.** TG-263 lists both `Elbow_L` and
+  `Joint_Elbow_L` (and `Bowel` and `Spc_Bowel`). Dropping the prefix from
+  `Joint_Elbow_L` gave it `Elbow_L`'s spellings too, so "Elbow_L" resolved to
+  Elbow_L but "Elbow Left" to Joint_Elbow_L. A shortened name that is a TG-263
+  name in its own right is now left to that name: 63 duplicate listings go, no
+  spelling stops being recognised, and ten elbow spellings now resolve to
+  Elbow_L or Elbow_R. Every variant in the dictionary now resolves to the
+  name it is listed under.
+- **"Small" and "Large" no longer stand for small and large bowel.** The
+  generator treated `Bowel_` as a category prefix and stripped it, leaving bare
+  adjectives as synonyms. "Small Bowel", "Large Bowel" and the rest still
+  resolve.
+- **Other shortened names that name nothing on their own are gone.** Dropping
+  the category prefix also gave single letters ("R" for LN_R, "C", "S" and
+  "T" for the vertebral regions), bare Roman numerals ("VII" for CN_VII, which
+  also reads as neck level VII) and qualifying words ("Base", "All", "Oral" for
+  the tongue; "Common", "Anal", "Pelvic", "Surface", "TM"), each with its
+  left/right spellings. The full names still resolve, and so do vertebra codes
+  such as "C1" and "T12".
+
 ### Added — Contour Discontinuity, October 2026
 - **Contour discontinuity**, a check recorded on every run (no checkbox: it is
   not a metric), adds a yes/no column, *Contour Discontinuity*: yes when the test
