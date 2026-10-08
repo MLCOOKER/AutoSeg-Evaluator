@@ -38,6 +38,18 @@ WINDOWS_LIBRARY_SHA256 = "037c2f0352aa05e03c1bccab569a1746c7acf958cd533db57704db
 #: Ours, not the suppliers', so no manifest covers them.
 OUR_OWN = {"__init__.py", "README.md"}
 
+#: What the supplier's build script writes when CI builds the library for a
+#: platform we ship no binary for: the library, its intermediate objects and
+#: its build record. CI validates that library before the tests run
+#: (scripts/validate_polygon_metrics.py); all three are git-ignored, so none is
+#: ever shipped.
+BUILD_OUTPUTS = (
+    "build/",
+    "evidence/builds/",
+    "native_contour_metrics_fast/bin/linux-",
+    "native_contour_metrics_fast/bin/macos-",
+)
+
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -93,7 +105,7 @@ def test_nothing_unaccounted_for_sits_in_the_vendor_tree():
         covered |= set(_manifest(name))
 
     present = {p.relative_to(VENDOR).as_posix() for p in VENDOR.rglob("*") if p.is_file()}
-    present -= {p for p in present if "__pycache__" in p}
+    present -= {p for p in present if "__pycache__" in p or p.startswith(BUILD_OUTPUTS)}
 
     assert present - covered - OUR_OWN == set(), (
         "Files in the vendor tree that no supplier manifest covers: "

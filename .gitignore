@@ -57,8 +57,10 @@ third_party/native_contour_metrics/*/validation_runs/
 src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/linux-*/
 src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/macos-*/
 
-# Intermediate objects from a local native-library build.
+# Intermediate objects from a local native-library build, and the build
+# script's record of it.
 src/autoseg_evaluator/vendor/build/
+src/autoseg_evaluator/vendor/evidence/
 
 # Validation runs keep their results here, to rewrite reports without recomputing
 .validation_cache/

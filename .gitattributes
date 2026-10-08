@@ -10,3 +10,8 @@
 *.ico binary
 *.icns binary
 *.zip binary
+
+# Vendored kernels are pinned by SHA-256 to the supplier's bytes, line endings
+# included, and the supplier's files mix LF and CRLF. Normalising them made a
+# fresh checkout fail tests/test_vendor_integrity.py on every platform.
+src/autoseg_evaluator/vendor/** -text

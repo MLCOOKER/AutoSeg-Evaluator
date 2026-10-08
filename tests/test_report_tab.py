@@ -2312,7 +2312,7 @@ def _laid_out(tab, tmp_path, body_height):
 
 
 def test_the_pdf_never_splits_a_group_a_heading_or_a_figure(tab, tmp_path):
-    """Pages short enough to break inside every table.
+    """Pages shorter than the tallest table, so at least that one breaks.
 
     An organ's rows sit on one page, so none starts a page unlabelled; each
     part of a table is closed off on its own page; a heading is on the page of
@@ -2320,8 +2320,20 @@ def test_the_pdf_never_splits_a_group_a_heading_or_a_figure(tab, tmp_path):
     """
     from PySide6.QtGui import QTextTable
 
+    def tables(document):
+        return [
+            f
+            for f in document.rootFrame().childFrames()
+            if isinstance(f, QTextTable) and f.format().headerRowCount()
+        ]
+
     _select(tab, ORGANS)
-    height = 700
+    # The page is sized from the tables rather than fixed: rows print shorter
+    # with Linux's fonts, and there a fixed 700 px page held every table whole,
+    # so nothing below was tested.
+    whole, _writer = _laid_out(tab, tmp_path, 100_000)
+    tallest = max(whole.documentLayout().frameBoundingRect(t).height() for t in tables(whole))
+    height = int(0.65 * tallest)
     document, _writer = _laid_out(tab, tmp_path, height)
     layout = document.documentLayout()
 
@@ -2346,7 +2358,7 @@ def test_the_pdf_never_splits_a_group_a_heading_or_a_figure(tab, tmp_path):
                 assert page(cell.firstCursorPosition().block()) == page(last)
             elif index + 1 < len(frames) and frames[index + 1].format().headerRowCount():
                 assert page(cell.firstCursorPosition().block()) == page(first(frames[index + 1], 1))
-    assert parts > 3  # the short page did split the tables
+    assert parts > len(tables(whole))  # the short page did split the tables
     assert document.pageCount() > 3
 
 
