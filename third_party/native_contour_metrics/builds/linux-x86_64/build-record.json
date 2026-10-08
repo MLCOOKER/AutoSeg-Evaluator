@@ -1,0 +1,23 @@
+{
+  "target": "linux-x86_64",
+  "host_platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.28",
+  "python": "3.11.17 (main, Oct  3 2026, 07:17:15) [GCC 14.2.1 20250110 (Red Hat 14.2.1-11)]",
+  "command": [
+    "/opt/rh/gcc-toolset-14/root/usr/bin/c++",
+    "-std=c++17",
+    "-O2",
+    "-fPIC",
+    "-fno-fast-math",
+    "-ffp-contract=off",
+    "-shared",
+    "-march=x86-64",
+    "-mtune=generic",
+    "/__w/AutoSeg-Evaluator/AutoSeg-Evaluator/src/autoseg_evaluator/vendor/cpp/fast_native.cpp",
+    "-o",
+    "/__w/AutoSeg-Evaluator/AutoSeg-Evaluator/src/autoseg_evaluator/vendor/native_contour_metrics_fast/bin/linux-x86_64/libfast_native.so"
+  ],
+  "compiler_version": "c++ (GCC) 14.2.1 20250110 (Red Hat 14.2.1-11)\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+  "source_sha256": "5e723e0ea8852ff26d7eb562b7d30bf2d50dee7037883dedc30dc2e3a7b2b45b",
+  "binary_sha256": "cbc3d6afb2ce1e4dcaa1900a011bad77a877c2a5bc34e165750f9620023bc895",
+  "status": "built; numerical validation still required"
+}

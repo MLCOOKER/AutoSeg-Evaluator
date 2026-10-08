@@ -36,6 +36,9 @@ v0.2/
   scripts/validate_stress.py    44 geometric stress cases
   data/                         compact synthetic fixtures + golden values
   validation/                   the independent distance oracle those scripts use
+builds/
+  linux-x86_64/                 ours: how the committed Linux library was built
+                                and validated, on three glibc versions
 ```
 
 The C++ source and the build script are **not** here. They live beside the
@@ -67,7 +70,9 @@ They exit non-zero on failure. The 150-pair run takes about 30 seconds.
 
 Only needed for a platform with no library packaged. It must be built **on**
 that platform — the script refuses a cross-host build before it starts a
-compiler.
+compiler. Windows and Linux x86-64 have one; the Linux one is rebuilt, if the
+C++ ever changes, by running `.github/workflows/linux-library.yml` from the
+Actions tab, which builds for glibc 2.28 and validates on three systems.
 
 ```bash
 python src/autoseg_evaluator/vendor/tools/build_native_library.py

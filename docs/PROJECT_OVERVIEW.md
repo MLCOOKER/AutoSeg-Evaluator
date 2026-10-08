@@ -1570,7 +1570,7 @@ The STAPLE reference library (`SimpleITK`) is a core dependency, so its
 equivalence test runs in CI with no extra install, and the DVH tests need no
 reference library at all, because they test against answers known exactly; `surface-distance` and `platipy` are installed explicitly in the CI
 workflow for the mask/metric equivalence tests. The 2D engines' own acceptance
-scripts run in CI too, on a compiled library built on the runner for Linux.
+scripts run in CI too, on the committed Windows and Linux libraries.
 
 **Bit-for-bit PlatiPy parity for mask rasterisation** (v2.3.1):
 [`test_platipy_equivalence.py`](../tests/test_platipy_equivalence.py)
@@ -1702,8 +1702,8 @@ bumping `pyproject.toml` updates the window title bar and every other
   image is trimmed by the 3D fill but refuses the 2D metrics, and a contour up
   to half a slice off-plane is filled in 3D but must lie within 0.001 mm of its
   plane for the 2D metrics.
-- The 2D compiled engine ships for Windows and is built in CI for Linux;
-  macOS runs the slower reference engine.
+- The 2D compiled engine ships for Windows and Linux x86-64; macOS and ARM
+  Linux run the slower reference engine.
 - DVH for the STAPLE consensus uses the thresholded binary mask, not
   the probabilistic mask (which would require a different DVH
   formulation entirely).

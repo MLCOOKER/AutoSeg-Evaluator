@@ -20,9 +20,11 @@ manifest, and the pinned hashes move with it.
 | `native_contour_metrics` | 0.1.0 | Pure-Python reference engine. Audit trail, differential cross-check, and the fallback on any platform with no compiled library. |
 | `native_contour_metrics_fast` | 0.2.0.dev2 | Compiled continuous-envelope engine. The default, and roughly 60–150× faster. |
 
-`bin/<platform>/` holds the compiled library. Only the validated Windows x64
-build is committed; other platforms are built and validated in CI and are
-gitignored. When none matches the running process, the loader raises and the
+`bin/<platform>/` holds the compiled library. Two are committed: the
+supplier's validated Windows x64 build, and a Linux x86-64 build of ours,
+validated with the supplier's acceptance suites (record in
+`third_party/native_contour_metrics/builds/linux-x86_64/`). Both are pinned by
+hash. When none matches the running process, the loader raises and the
 application falls back to the reference engine rather than loading anything
 else — it never searches the system for a library.
 

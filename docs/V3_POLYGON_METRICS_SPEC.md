@@ -14,7 +14,11 @@ multi-vendor sample cohort, Tab 5 offers them, and the results table, Report tab
 and audit sidecar all carry them. Phase 7 landed 2026-09-24: mask APL is
 removed, and added path length now comes only from this stream.
 
-**Revision 3, 2026-09-20.** Updated for `0.2.0.dev2`, which answers the
+**Revision 4, 2026-10-08.** D6 revised: the Linux x86-64 library is built once,
+validated on three glibc versions and committed beside the Windows one, so a
+Linux checkout or the Linux download gets the compiled engine with no compiler.
+
+*Revision 3 (2026-09-20)* updated for `0.2.0.dev2`, which answers the
 portability review: a platform-aware loader, explicit floating-point build
 flags, platform wheels and refreshed manifests. The numerical kernel is
 unchanged. D6 is rewritten — the packaging half is delivered, the binaries half
@@ -315,15 +319,30 @@ x86-64, and the README says "this is not a delivery of four validated binaries".
 Their selection tests for those targets mock the OS, which is explicitly not the
 same as running the algorithm on it.
 
-So:
+So, as of revision 4:
 
 | Target | Binary from | Validated by |
 |---|---|---|
-| Windows x86-64 | supplier, vendored | supplier + reproduced here |
-| Linux x86-64 | **built in CI** on `ubuntu-latest` | their validation scripts, per push |
+| Windows x86-64 | supplier, vendored | supplier + reproduced here, and in CI per push |
+| Linux x86-64 | **built by us** once, committed | their validation scripts on glibc 2.28, 2.35 and 2.39, and in CI per push |
 | macOS arm64 / x86-64 | none | — falls back to the reference engine |
 
-**Linux is built in CI rather than requested from the supplier.** `ubuntu-latest`
+**Revised 2026-10-08 (user decision): the Linux library is committed.** Building
+on every CI run left a Linux user with no compiled engine unless they had a
+compiler, and gave the Linux download nothing to ship. The library is now built
+once by `.github/workflows/linux-library.yml` — the supplier's build script,
+unmodified, in the `manylinux_2_28` image (glibc 2.28), so it loads on any
+x86-64 distribution from that era on — and validated there and on Ubuntu 22.04
+and 24.04. All three gave the Windows library's recorded maxima exactly
+(distance 4.86e-10 mm). It is pinned by hash on the same terms as the Windows
+library: *this is the file whose acceptance is recorded*, not *this build is
+reproducible*. The record is in `third_party/native_contour_metrics/builds/linux-x86_64/`.
+What the original reasoning below valued is kept: CI still runs their
+acceptance scripts on every push, now against the committed bytes, so a runner
+whose maths library drifts is still caught.
+
+*The original decision (2026-09-20):* **Linux is built in CI rather than
+requested from the supplier.** `ubuntu-latest`
 ships g++; `tools/build_native_library.py` is one command and refuses cross-host
 builds, which is correct on a native runner; `scripts/validate_public.py` and
 `validate_stress.py` are one command each and run in well under a minute. That is
@@ -438,7 +457,7 @@ src/autoseg_evaluator/vendor/          __init__.py + README.md are ours; the res
   native_contour_metrics/                v0.1 reference engine, 10 files
   native_contour_metrics_fast/           v0.2.0.dev2 default engine
     bin/windows-x86_64/fast_native.dll     vendored, pinned by hash
-    bin/linux-x86_64/libfast_native.so     built in CI, gitignored
+    bin/linux-x86_64/libfast_native.so     built by us, pinned by hash (rev. 4)
   cpp/fast_native.cpp                    the library's source, 219 lines
   tools/build_native_library.py          rebuilds it, per platform
 third_party/native_contour_metrics/    manifests, notices, acceptance data, scripts

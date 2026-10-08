@@ -35,18 +35,26 @@ MANIFESTS = REPO_ROOT / "third_party" / "native_contour_metrics"
 WINDOWS_LIBRARY = "native_contour_metrics_fast/bin/windows-x86_64/fast_native.dll"
 WINDOWS_LIBRARY_SHA256 = "037c2f0352aa05e03c1bccab569a1746c7acf958cd533db57704dbe18ae6e1ca"
 
+#: Ours, not the suppliers': built from the vendored C++ by
+#: ``.github/workflows/linux-library.yml`` in manylinux_2_28, and validated there
+#: (glibc 2.28) and on Ubuntu 22.04 and 24.04 with the same result as the
+#: Windows library. The record is in
+#: ``third_party/native_contour_metrics/builds/linux-x86_64/``.
+LINUX_LIBRARY = "native_contour_metrics_fast/bin/linux-x86_64/libfast_native.so"
+LINUX_LIBRARY_SHA256 = "cbc3d6afb2ce1e4dcaa1900a011bad77a877c2a5bc34e165750f9620023bc895"
+LINUX_RECORD = MANIFESTS / "builds" / "linux-x86_64" / "build-record.json"
+
 #: Ours, not the suppliers', so no manifest covers them.
 OUR_OWN = {"__init__.py", "README.md"}
 
-#: What the supplier's build script writes when CI builds the library for a
-#: platform we ship no binary for: the library, its intermediate objects and
-#: its build record. CI validates that library before the tests run
-#: (scripts/validate_polygon_metrics.py); all three are git-ignored, so none is
-#: ever shipped.
+#: What the supplier's build script writes when someone builds a library
+#: locally: its intermediate objects, its build record, and a library for a
+#: platform we ship none for. All git-ignored, so none is ever shipped. A local
+#: Linux build overwrites the committed library instead, and the pin below
+#: fails, as it should.
 BUILD_OUTPUTS = (
     "build/",
     "evidence/builds/",
-    "native_contour_metrics_fast/bin/linux-",
     "native_contour_metrics_fast/bin/macos-",
 )
 
@@ -100,7 +108,7 @@ def test_nothing_unaccounted_for_sits_in_the_vendor_tree():
     Checked in the other direction from the manifest comparison above, which
     can only see files it already knows about.
     """
-    covered = set()
+    covered = {LINUX_LIBRARY}  # pinned below rather than by a supplier manifest
     for name in ("v0.1/MANIFEST.sha256.json", "v0.2/MANIFEST.sha256.json"):
         covered |= set(_manifest(name))
 
@@ -128,6 +136,25 @@ def test_the_compiled_library_is_the_one_that_was_validated():
         "The compiled library is not the validated build. A rebuild produces "
         "different bytes and needs its own acceptance run before the pin moves."
     )
+
+
+def test_the_linux_library_is_the_one_that_was_validated():
+    """Built by us rather than supplied, and pinned on the same terms."""
+    library = VENDOR / LINUX_LIBRARY
+    assert library.is_file(), "the validated Linux library is missing"
+    assert _digest(library) == LINUX_LIBRARY_SHA256, (
+        "The Linux library is not the validated build. A rebuild produces "
+        "different bytes and needs its own acceptance run before the pin moves."
+    )
+
+
+def test_the_linux_record_is_of_this_library_built_from_this_source():
+    """The build record ties the pinned file to the vendored C++."""
+    record = json.loads(LINUX_RECORD.read_text(encoding="utf-8"))
+    assert record["target"] == "linux-x86_64"
+    assert record["binary_sha256"] == LINUX_LIBRARY_SHA256
+    source = _manifest("v0.2/MANIFEST.sha256.json")["cpp/fast_native.cpp"]
+    assert record["source_sha256"] == source
 
 
 def test_the_build_script_still_resolves_the_source_and_the_package():
