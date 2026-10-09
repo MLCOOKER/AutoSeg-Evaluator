@@ -125,7 +125,11 @@ command-line or coding expertise.
 
 1. Download the latest `AutoSegEvaluator-v*.zip` from the
    [Releases](https://github.com/MLCOOKER/AutoSeg-Evaluator/releases) page.
-2. Extract it anywhere — local folder, USB stick, or shared drive.
+2. Extract it to a folder with a short path, such as `C:\AutoSegEvaluator`
+   — on a local disk, a USB stick or a shared drive. Windows limits a file's
+   full path to 260 characters and the bundle's files sit deep inside it, so
+   from a deeper folder the app cannot start (it says so); the `README.txt`
+   inside gives the longest folder path that works.
 3. Double-click `Run AutoSeg Evaluator.bat`.
 
 **Linux (x86-64)**

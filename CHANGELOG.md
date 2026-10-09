@@ -6,6 +6,29 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+## [3.0.1] — 2026-10-09
+
+Fixes the Windows download closing without a word when it is extracted to a
+deep folder. No result changes: everything 3.0.0 computes, 3.0.1 computes
+identically.
+
+### Fixed — the Windows download from a deep folder
+- **A failed start is reported.** v3.0.0, extracted to a 170-character folder,
+  showed its splash screen and closed: Windows refused a library whose full
+  path passed its 260-character limit, and the launcher has no console to show
+  the error. AutoSeg Evaluator now writes `startup-error.log` next to the
+  launcher and shows a message box. When the bundle's files are past the
+  limit, it says so, counts them, and says to move the folder somewhere short,
+  such as `C:\AutoSegEvaluator`. This covers a failure before Qt starts too.
+- **The download says where to put it.** Its `README.txt` gives the longest
+  folder path that works, worked out from its deepest file at build time (82
+  characters for 3.0.0's contents); the README and the release notes say to
+  extract it to a short path.
+- **Each release is started from a deep folder first.** The release workflow
+  starts the Windows download from a folder deeper than the one that failed,
+  with long paths off, and does not publish unless the download explains the
+  problem.
+
 ## [3.0.0] — 2026-10-08
 
 A second, contour-based metric stream, a statistical Report tab, data linking by

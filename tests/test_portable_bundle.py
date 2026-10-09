@@ -152,3 +152,27 @@ def test_every_listed_distribution_ships_at_least_its_glibc():
     """Each example list is chosen for the smallest floor at or above a requirement."""
     assert bp.glibc_examples((2, 33)) == bp.GLIBC_EXAMPLES[(2, 34)]
     assert bp.glibc_examples((2, 99)) == ""
+
+
+def test_the_windows_folder_limit_matches_what_failed_in_v3_0_0():
+    """176-character paths inside, a 170-character folder: 347 characters, refused."""
+    assert bp.windows_folder_limit(176) == 82
+    assert bp.WINDOWS_MAX_PATH - 1 == 82 + 1 + 176
+
+
+def test_the_deepest_path_is_measured_inside_the_bundle(tmp_path):
+    deep = tmp_path / "python" / "Lib" / "site-packages" / "pkg"
+    deep.mkdir(parents=True)
+    (deep / "module.py").write_text("")
+    (tmp_path / "LICENSE").write_text("")
+    expected = len(os.path.join("python", "Lib", "site-packages", "pkg", "module.py"))
+    assert bp.deepest_relative_path(tmp_path) == expected
+
+
+def test_the_windows_readme_says_how_long_the_folder_path_may_be(tmp_path):
+    bp._write_readme(tmp_path, "3.0.1", 176)
+    readme = (tmp_path / "README.txt").read_text(encoding="ascii")
+    assert "C:\\AutoSegEvaluator" in readme
+    assert "up to 176 characters inside it" in readme
+    assert "82 characters or fewer" in readme
+    assert "startup-error.log" in readme

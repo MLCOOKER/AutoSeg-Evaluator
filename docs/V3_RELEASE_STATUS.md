@@ -5,7 +5,8 @@ version, because several of them move numbers and shipping them separately
 would produce three releases whose results cannot be compared with each other.
 
 **Released as v3.0.0 on 2026-10-08**, from `main`, with portable downloads for
-Windows and Linux. This file records where each item stood, so the scope of
+Windows and Linux; **v3.0.1** (2026-10-09) fixes the Windows download closing
+silently when extracted to a deep folder, and changes no result. This file records where each item stood, so the scope of
 v3.0.0 is legible from the repository rather than from memory.
 
 **Checkpoint: 2026-09-26**, with #7 done and the external audit's findings

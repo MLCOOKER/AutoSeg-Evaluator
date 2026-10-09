@@ -56,6 +56,42 @@ jobs:
           & "$($bundle.FullName)\python\python.exe" "$env:GITHUB_WORKSPACE\scripts\smoke_test_bundle.py"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # v3.0.0, extracted to a 170-character folder, showed its splash screen
+      # and vanished: one library's full path passed Windows' 260-character
+      # limit, and the launcher has no console. Started from a deeper folder,
+      # with long paths off as on most clinical machines, the bundle must say
+      # why it cannot start - startup-error.log, then a message box - not
+      # disappear. If it starts instead, this check no longer tests anything.
+      - name: Start the bundle from a too-deep folder
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 0
+          $bundle = Get-ChildItem -Path dist -Directory -Filter "AutoSegEvaluator-v*" | Select-Object -First 1
+          $root = Join-Path (Join-Path $env:RUNNER_TEMP ("deep-folder-" * 15)) $bundle.Name
+          robocopy $bundle.FullName $root /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+          if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
+          Write-Host "Folder path: $($root.Length) characters"
+          $log = Join-Path $root "startup-error.log"
+          $process = Start-Process -FilePath (Join-Path $root "python\pythonw.exe") `
+            -ArgumentList "-m", "autoseg_evaluator" -WorkingDirectory $root -PassThru
+          $deadline = (Get-Date).AddSeconds(180)
+          while (-not (Test-Path -LiteralPath $log) -and -not $process.HasExited -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 2
+          }
+          Start-Sleep -Seconds 2
+          $running = -not $process.HasExited
+          if ($running) { Stop-Process -Id $process.Id -Force }
+          if (-not (Test-Path -LiteralPath $log)) {
+            if ($running) { throw "The bundle started from a $($root.Length)-character folder; the check reproduced nothing." }
+            throw "The bundle stopped without writing startup-error.log."
+          }
+          Get-Content -LiteralPath $log -TotalCount 14
+          if (-not (Select-String -LiteralPath $log -SimpleMatch "C:\AutoSegEvaluator" -Quiet)) {
+            throw "startup-error.log does not explain that the folder path is too long."
+          }
+          $global:LASTEXITCODE = 0
+
       - name: Locate built artifact
         id: artifact
         run: |
@@ -184,8 +220,9 @@ jobs:
           No Python install required; nothing is installed.
 
           **Windows 10 / 11 (64-bit):** download `AutoSegEvaluator-v….zip`,
-          extract it anywhere (including a USB stick), and double-click
-          `Run AutoSeg Evaluator.bat`.
+          extract it to a folder with a short path, such as
+          `C:\AutoSegEvaluator` (the `README.txt` inside gives the longest
+          that works), and double-click `Run AutoSeg Evaluator.bat`.
 
           **Linux (x86-64):** download `AutoSegEvaluator-v…-linux-x86_64.tar.gz`,
           extract it (`tar -xzf …`), and run `./run-autoseg-evaluator.sh`.

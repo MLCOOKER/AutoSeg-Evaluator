@@ -90,6 +90,11 @@ LINUX_PYTHON_SHA256 = "9a332ba354f3b4e8a96a15db6b2805a7a31dcc1b6b9c1b7b93e524694
 #: The polygon-metric library each bundle carries; the others are left out.
 LIBRARY_FOLDERS = {"windows": "windows-x86_64", "linux": "linux-x86_64"}
 
+#: Windows' limit on a full path, terminating null included, unless long paths
+#: are enabled machine-wide - which needs an administrator, so a bundle cannot
+#: rely on it.
+WINDOWS_MAX_PATH = 260
+
 #: For the Linux README: distributions that ship at least each glibc.
 GLIBC_EXAMPLES = {
     (2, 28): "Debian 10, RHEL / Rocky / AlmaLinux 8, Ubuntu 20.04",
@@ -238,14 +243,46 @@ def _write_shortcut_vbs(bundle: Path) -> None:
     )
 
 
-def _write_readme(bundle: Path, version: str) -> None:
+def deepest_relative_path(bundle: Path) -> int:
+    """The length of the longest file path inside ``bundle``, separators included."""
+    base = os.path.abspath(bundle)
+    # The extended-length prefix lets this walk a tree that is already too deep.
+    walk_root = "\\\\?\\" + base if sys.platform == "win32" else base
+    deepest = 0
+    for dirpath, _dirs, files in os.walk(walk_root):
+        for name in files:
+            deepest = max(deepest, len(os.path.relpath(os.path.join(dirpath, name), walk_root)))
+    return deepest
+
+
+def windows_folder_limit(deepest: int) -> int:
+    """The longest folder path from which every file stays within Windows' limit.
+
+    A full path is the folder, a separator and the file's path inside it, and
+    may run to ``WINDOWS_MAX_PATH - 1`` characters. v3.0.0 was extracted to a
+    170-character folder; with 176-character paths inside it, Windows refused
+    a library and the app could not start.
+    """
+    return WINDOWS_MAX_PATH - 2 - deepest
+
+
+def _write_readme(bundle: Path, version: str, deepest: int) -> None:
     """Write the bundle-local README.txt the user sees after extracting."""
+    limit = windows_folder_limit(deepest)
     text = (
         f"AutoSeg Evaluator v{version} - portable bundle\r\n"
         "===============================================\r\n"
         "\r\n"
         "To launch the application:\r\n"
         '  Double-click "Run AutoSeg Evaluator.bat".\r\n'
+        "\r\n"
+        "Where to put this folder:\r\n"
+        "  Somewhere with a short path, such as C:\\AutoSegEvaluator.\r\n"
+        f"  Windows limits a file's full path to {WINDOWS_MAX_PATH} characters, and\r\n"
+        f"  this bundle's files sit up to {deepest} characters inside it, so the\r\n"
+        f"  folder's own path must be {limit} characters or fewer. Any deeper,\r\n"
+        "  and AutoSeg Evaluator cannot load all its files: it says so when\r\n"
+        "  started, and writes startup-error.log in this folder.\r\n"
         "\r\n"
         "Optional - put an icon on your Desktop:\r\n"
         '  Double-click "Create Desktop Shortcut.vbs". It adds an\r\n'
@@ -277,8 +314,8 @@ def _write_readme(bundle: Path, version: str) -> None:
         "\r\n"
         "USB / network-share deployment:\r\n"
         "  This bundle is portable. You can extract it to a USB stick\r\n"
-        "  or shared drive and launch it from there. No installation\r\n"
-        "  is performed.\r\n"
+        "  or shared drive and launch it from there, keeping its path\r\n"
+        "  short (see above). No installation is performed.\r\n"
         "\r\n"
         "Documentation, source, and citation:\r\n"
         "  https://github.com/MLCOOKER/AutoSeg-Evaluator\r\n"
@@ -575,7 +612,7 @@ def build(out_dir: Path, *, make_zip: bool, keep_cache: bool) -> Path:
         print("[6/6] launcher + shortcut helper + README + LICENSE")
         _write_launcher(bundle)
         _write_shortcut_vbs(bundle)
-        _write_readme(bundle, version)
+        _write_readme(bundle, version, deepest_relative_path(bundle))
     else:
         glibc = glibc_requirement(_site_packages(bundle))
         print(

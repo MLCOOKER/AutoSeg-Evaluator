@@ -10,6 +10,7 @@ from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
 from autoseg_evaluator import __version__
+from autoseg_evaluator.startup import report_failure
 from autoseg_evaluator.utils.settings import load_settings
 
 _ASSETS = Path(__file__).resolve().parent / "assets"
@@ -51,7 +52,7 @@ def _set_windows_app_id() -> None:
 def main() -> int:
     _set_windows_app_id()
 
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("AutoSeg Evaluator")
     app.setApplicationVersion(__version__)
     app.setOrganizationName("AutoSeg Evaluator")
@@ -75,14 +76,22 @@ def main() -> int:
     )
     app.processEvents()
 
-    # Deferred so the splash is already on screen while these load.
-    from autoseg_evaluator.ui.main_window import MainWindow
-    from autoseg_evaluator.ui.theme import apply_theme
+    # Deferred so the splash is already on screen while these load. A failure
+    # from here on is shown, not swallowed: the Windows launcher has no
+    # console, so v3.0.0 simply vanished after the splash when a library would
+    # not load.
+    try:
+        from autoseg_evaluator.ui.main_window import MainWindow
+        from autoseg_evaluator.ui.theme import apply_theme
 
-    settings = load_settings()
-    apply_theme(app, theme=settings.get("theme", "light_blue.xml"))
+        settings = load_settings()
+        apply_theme(app, theme=settings.get("theme", "light_blue.xml"))
 
-    window = MainWindow(settings=settings)
+        window = MainWindow(settings=settings)
+    except Exception as exc:  # noqa: BLE001 - reported, then the app exits
+        splash.close()
+        report_failure(exc)
+        return 1
     window.show()
     splash.finish(window)
     return app.exec()
