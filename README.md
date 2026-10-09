@@ -22,99 +22,52 @@ command-line or coding expertise.
 
 ## Features
 
-- **Two ways of measuring geometry, side by side**:
-  - *3D mask metrics* — Dice, precision and recall, 3D Hausdorff 100% / 95%,
-    Mean Surface Distance, Surface Dice (at one or several tolerances), centre-of-mass
-    offset, signed volume difference and volume ratio, computed on binary masks;
-    the surface metrics with Google DeepMind's
-    [`surface-distance`](https://github.com/google-deepmind/surface-distance).
-  - *2D contour metrics* — Added Path Length and normalised APL (both
-    directions), 2D Hausdorff 100% / 95%, mean and median contour distance,
-    measured on the RTSTRUCT outlines themselves with no rasterisation, to the
-    definitions of Boukerroui et al. (2023). A metric that cannot be defined is
-    reported with its reason, never as a zero.
-- **One reading of every contour**: both streams read a structure's loops into
-  regions by the same rules — holes, islands and touching loops as drawn,
-  declared `CLOSEDPLANAR_XOR` as declared — and refuse, with a stated reason,
-  the loops that have no single reading. A difference between a 2D and a 3D
-  number is therefore a difference in measurement, never in what the contour
-  was taken to be.
-- **Dosimetric metrics**: each structure's DVH, with the RT Dose integrated
-  over the contours themselves — read by the same rules as the geometric
-  metrics, with exact partial areas, sampled every 0.25 mm (coarser only for
-  the largest targets, and once per voxel for a body contour) — giving Dmin / Dmean / Dmax plus user-defined
-  `D{X}_gy` (dose to the hottest X%), `D{X}cc_gy` and `V{X}gy_cc` (volume
-  receiving ≥ X Gy) points.
-- **STAPLE consensus**: Simultaneous Truth and Performance Level Estimation
-  (Warfield 2004) with per-rater sensitivity / specificity plus consensus
-  uncertainty metrics (uncertain-band volume, mean entropy, rater
-  disagreement, rater volume range), surfaced in the results table as a
-  dedicated **STAPLE Details** row. Results are tagged by mode —
-  *Multi-observer STAPLE* (Tab 2 consensus), *Generic STAPLE with GT* and
-  *Generic STAPLE no GT* (Tab 3 per-drawer) — and every test contour scored
-  against a consensus GT also carries its own sensitivity / specificity.
-- **Multi-observer consensus ground truth**: assign each manual observer a
-  distinct source label in Tab 1, select which labels are observers, and
-  build a per-patient STAPLE consensus from them. The consensus is written
-  back as a synthetic RTSS and flows into the evaluation pipeline as the
-  designated ground truth — editable organ groupings, an unmatched tray for
-  manual re-assignment, and an independent fuzzy-match threshold per patient.
-- **Inter-observer variability**: pairwise 3D mask metrics (Dice, Hausdorff,
-  surface distances, volume, centre of mass) over the selected observers, with
-  configurable metric selection and tolerance override.
-- **Qualitative (Likert) assessment**: score each contour on the 5-point
-  MD Anderson scale through a fast review UI — a multiplanar viewer (axial /
-  coronal / sagittal, zoom, window/level, contour opacity + thickness),
-  per-grader configuration (blinded vs transparent,
-  include-GT, randomize), multiple graders, and session resume. Scores land in
-  per-grader `Likert` columns in the Results table.
-- **Contour visualiser**: Match Contours opens any patient's ground truth and
-  matched contours in the same multiplanar viewer as the Qualitative tab, and
-  when an RT Dose is loaded it can overlay the planned dose as a colour wash
-  (jet, Gy) with an opacity control and scale.
-- **Statistics and report**: the Report tab compares sources organ by organ on
-  paired cases — Wilcoxon signed-rank with an exact p-value, a Hodges–Lehmann
-  estimate with its confidence set, and the rank-biserial effect size — with
-  forest, paired and distribution figures, an acquisition summary built from an
-  allowlist of non-identifying tags, and export to a PDF report. Every design
-  decision is recorded, with worked examples, in
-  [`docs/V3_REPORT_STATISTICS_REGISTER.md`](docs/V3_REPORT_STATISTICS_REGISTER.md).
-- **Canonical organ grouping**: the many spellings of one organ are grouped so
-  statistics can pool them, without ever pooling two organs — laterality is
-  extracted rather than fuzzy-matched, and a fuzzy match is only a proposal.
-- **Audit record**: optionally, an export is accompanied by a `.audit.json`
-  holding the detail behind every number — both directions of each distance,
-  what each stream measured over, how each contour was read, the rasteriser and
-  the 2D engine with their settings.
-- **Smart auto-matching**: hybrid Levenshtein + cosine matcher backed by a
-  TG-263 synonym dictionary (~17 000 variants from the official worksheet),
-  user-defined replacement rules, and template-driven batch selection.
-- **Robust DICOM linking**: resolves each structure set to the image series it
-  was contoured on and to its dose from the explicit UID references inside the
-  DICOM files (`ReferencedFrameOfReferenceSequence` → `RTReferencedSeriesSequence`,
-  and the dose's own `ReferencedStructureSetSequence`), falling back to
-  `FrameOfReferenceUID` only when those are absent. No RTPLAN required. Where
-  two candidates are equally good — a re-irradiation course, a replan, a
-  composite dose — the ambiguity is reported and settled by the user in Tab 1
-  rather than silently guessed.
-- **Source identification**: cascading fallback (Manufacturer →
-  StructureSetLabel → SoftwareVersions → filename) handles in-house models
-  that lack metadata, with a manual override dialog persisted in
-  `settings.json`. Six raw DICOM identification columns plus assisted
-  propagation let you disambiguate two RTSSes from the same vendor — e.g.
-  giving each manual observer a distinct label for consensus building.
-- **Modern UI**: 7-tab workflow with accordion organ drawers, colourblind-safe
-  similarity indicators, banded results table, dark / light themes, full undo
-  stack on Match Contours.
-- **Save / load sessions**: resume curated multi-patient evaluations across
-  sittings; session schema is versioned and forward-compatible.
-- **Portable**: ships as a hospital-IT-friendly Python bundle (see below) —
-  every dependency is a normal `.py` / `.pyd` file, no PyInstaller blob.
+**Two views of contour geometry** — 3D metrics on binary masks (Dice,
+Hausdorff, surface Dice, precision and recall) beside 2D metrics measured on
+the contours as stored, including added path length.
+
+**Dose metrics** — DVH points such as D95%, D2cc and V20Gy, integrated over
+each structure's own contours.
+
+**Automatic matching** — contours from every vendor and observer are paired by
+organ, using a TG-263 synonym dictionary of about 17,000 spellings plus your
+own rules.
+
+**STAPLE consensus** — build a ground truth from several observers, score
+contours against a consensus of the whole pool, and measure inter-observer
+variability.
+
+**Statistics and a PDF report** — paired comparisons organ by organ, with
+forest, paired and distribution plots, exported as a PDF report.
+
+**Qualitative review** — blinded or transparent Likert grading by several
+graders, in a multiplanar viewer.
+
+**Contour checks** — every run flags test contours that reach into the PTV
+where the ground truth does not, and contours that skip a slice.
+
+**DICOM linking without an RT Plan** — images, structure sets and dose are
+matched by their own references; anything ambiguous is flagged, not guessed.
+
+**Validated** — each metric is checked against reference software or analytical
+shapes; the reports are in [`docs/validation`](docs/validation/).
+
+**Portable** — download, extract and run on Windows or Linux, with no
+installation and no administrator rights.
+
+Every metric, setting and design decision is described in
+[`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md).
 
 <p align="center">
-  <img src="docs/images/screenshot.png" alt="AutoSeg Evaluator — Match Contours tab with the organ-template dialog and auto-matched accordion drawers" width="900">
+  <img src="docs/images/screenshot.png" alt="AutoSeg Evaluator — Match Contours tab with the auto-match template dialog and matched organ drawers" width="900">
   <br>
   <em>Match Contours: define an organ template and replacement rules, then auto-match contours into per-organ drawers.</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/report.png" alt="Pages of an exported AutoSeg Evaluator report: coverage, descriptive statistics, distributions and a forest plot" width="900">
+  <br>
+  <em>An exported report: coverage, descriptive statistics, distributions and a forest plot for one metric.</em>
 </p>
 
 ## Quick start
