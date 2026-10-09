@@ -20,6 +20,11 @@ commissioning, ongoing QA, comparative evaluation of auto-contouring systems,
 or inter-observer variability studies in radiotherapy — without requiring
 command-line or coding expertise.
 
+**New to AutoSeg Evaluator?** Start with the
+[**User Manual (PDF)**](docs/AutoSeg_Evaluator_User_Manual.pdf): installing,
+the end-to-end workflow for 3D, 2D and dose metrics, STAPLE consensus, and
+qualitative (Likert) review, step by step.
+
 ## Features
 
 **Two views of contour geometry** — 3D metrics on binary masks (Dice,
@@ -73,6 +78,9 @@ Every metric, setting and design decision is described in
 ## Quick start
 
 ### For end users — portable bundle (recommended)
+
+Step-by-step instructions, with screenshots, are in the
+[User Manual](docs/AutoSeg_Evaluator_User_Manual.pdf).
 
 **Windows 10 / 11 (64-bit)**
 
