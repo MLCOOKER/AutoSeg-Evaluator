@@ -54,6 +54,7 @@ from autoseg_evaluator.core.acquisition import (
     FieldSummary,
     summarise,
 )
+from autoseg_evaluator.core.readable import is_likert
 from autoseg_evaluator.core.staple import DRAWER_POOL_LABEL, LEGACY_DRAWER_POOL_LABEL
 from autoseg_evaluator.core.statistics import (
     ConfidenceSet,
@@ -74,6 +75,7 @@ FAMILY_DOSIMETRIC = "Dosimetric"
 FAMILY_OTHER = "Other"
 FAMILY_STAPLE = "Consensus"
 FAMILY_PTV = "PTV overlap"
+FAMILY_QUALITATIVE = "Qualitative (Likert)"
 
 #: The PTV overlap columns the report analyses. The ground truth's own overlap
 #: is the same for every source, so it is a diagnostic, not one of these.
@@ -184,6 +186,8 @@ def metric_family(metric: str) -> str:
     """
     # A tolerance in the key (``surface_dice@3mm``) does not change the family.
     lower = base_metric(str(metric).strip()).lower()
+    if is_likert(lower):
+        return FAMILY_QUALITATIVE
     # Checked first: several polygon keys would otherwise be swallowed by the
     # geometric set or by the dose suffix rules.
     if lower.startswith("poly_"):
@@ -205,6 +209,7 @@ FAMILY_ORDER: tuple[str, ...] = (
     FAMILY_POLYGON,
     FAMILY_PTV,
     FAMILY_DOSIMETRIC,
+    FAMILY_QUALITATIVE,
     FAMILY_OTHER,
 )
 
@@ -262,7 +267,7 @@ DIAGNOSTIC_COLUMNS = frozenset(
 def metric_direction(metric: str) -> int:
     """``+1`` higher is better, ``-1`` lower is better, ``0`` no direction."""
     name = base_metric(metric).lower()
-    if name in HIGHER_IS_BETTER:
+    if name in HIGHER_IS_BETTER or is_likert(name):
         return 1
     if name in LOWER_IS_BETTER:
         return -1
@@ -501,7 +506,9 @@ class ReportModel:
         by_source, by_organ = self._by_reference.get(reference, ({}, {}))
         return ReportModel(
             observations={
-                key: value for key, value in self.observations.items() if key[5] == reference
+                key: value
+                for key, value in self.observations.items()
+                if key[5] == reference or (not key[5] and is_likert(key[2]))
             },
             reference_sources=set(self.reference_sources),
             duplicates_collapsed=self.duplicates_collapsed,
@@ -977,13 +984,15 @@ def collect_acquisition(library: Any) -> AcquisitionReport:
 
 #: Comparison modes that are not a contour-versus-contour comparison at all.
 #: ``STAPLE Details`` rows describe how a consensus was built — one row per
-#: organ, not per source — and qualitative rows carry Likert scores.
+#: organ, not per source. Qualitative rows, which hold the Likert scores of
+#: contours no metric was computed for, are read for those scores alone.
 #:
 #: Consensus *comparisons* are deliberately not here. Measuring every source
 #: against a multi-observer consensus is a real analysis, and the reason it
 #: once collided with the manual-ground-truth rows was that the reference was
 #: missing from the observation key, not that the rows were unwanted.
-_SKIP_MODES = {"staple details", "qualitative"}
+_SKIP_MODES = {"staple details"}
+_QUALITATIVE_MODE = "qualitative"
 
 
 def _finite(value: Any) -> bool:
@@ -1010,6 +1019,7 @@ def build_report_model(
         mode = str(row.get("comparison_mode") or "").strip().lower()
         if mode in _SKIP_MODES:
             continue
+        scores_only = mode == _QUALITATIVE_MODE
 
         reference = str(row.get("gt_source_label") or "").strip()
         if reference == LEGACY_DRAWER_POOL_LABEL:
@@ -1031,7 +1041,10 @@ def build_report_model(
 
         model._patients_by_source[source].add(patient)
         model._patients_by_organ[organ].add(patient)
-        model._truncation[(organ, reference)].add(bool(row.get("truncated", False)))
+        if not scores_only:
+            # A scored contour was never cut to anything; recording it would
+            # make a truncated organ read as mixed.
+            model._truncation[(organ, reference)].add(bool(row.get("truncated", False)))
         per_source, per_organ = model._by_reference.setdefault(
             reference, (defaultdict(set), defaultdict(set))
         )
@@ -1051,6 +1064,9 @@ def build_report_model(
         for metric, value in metrics.items():
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue
+            likert = is_likert(metric)
+            if scores_only and not likert:
+                continue
             if metric_family(metric) is FAMILY_STAPLE:
                 # Describes the consensus construction, not a contour
                 # comparison, so it has no place among the paired tests.
@@ -1061,7 +1077,12 @@ def build_report_model(
             # has no magnitude to analyse. It is kept as *metric invalid*, like
             # NaN, so the coverage table still counts the case.
             observed = float(value) if math.isfinite(value) else math.nan
-            key = (organ, source, str(metric), patient, linkage, reference)
+            # A Likert score describes the contour, not a comparison. Filed
+            # under no ground truth, it shows once in every ground-truth view,
+            # however many references the contour was measured against.
+            key = (organ, source, str(metric), patient, linkage, "" if likert else reference)
+            if likert and model.observations.get(key) == observed:
+                continue
             if key in model.observations:
                 # A second row for the same contour adds no information, and
                 # letting it through would give one case two votes in a paired
@@ -1087,6 +1108,7 @@ __all__ = [
     "FAMILY_ORDER",
     "FAMILY_OTHER",
     "FAMILY_POLYGON",
+    "FAMILY_QUALITATIVE",
     "FAMILY_STAPLE",
     "GEOMETRIC_METRICS",
     "HIGHER_IS_BETTER",

@@ -607,10 +607,13 @@ no patient identifiers beyond those already in the table.
 
 **File:** [`src/autoseg_evaluator/ui/tabs/report.py`](../src/autoseg_evaluator/ui/tabs/report.py)
 
-Per-organ comparison of sources on the computed results. Pick the ground truth
-(a consensus is preferred where one exists), a metric — grouped into 3D mask,
-2D contour, dosimetric and other families so a reader never slides between two
-Hausdorffs unnoticed — and a comparison; the tab shows paired statistics,
+Per-organ comparison of sources on the computed results and the Likert
+scores. Pick the ground truth (a consensus is preferred where one exists), a
+metric — grouped into 3D mask, 2D contour, dosimetric, qualitative (Likert)
+and other families so a reader never slides between two Hausdorffs unnoticed —
+and a comparison. A Likert score describes the contour rather than a
+comparison, so it shows under every ground truth, including for contours that
+were scored but never computed; the tab shows paired statistics,
 forest, paired and distribution figures, a coverage table, and an acquisition
 summary. **Export PDF** writes the page as a clinical report. See
 [Organ grouping and the Report tab](#organ-grouping-and-the-report-tab).

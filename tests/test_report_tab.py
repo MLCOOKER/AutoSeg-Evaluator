@@ -936,7 +936,7 @@ def test_switching_axis_reshapes_the_controls(tab):
     tab._axis_combo.setCurrentIndex(0)
     assert tab._organ_list.selectionMode() is QAbstractItemView.SelectionMode.MultiSelection
     assert tab._challenger_combo.isEnabled()
-    assert "correction family" in tab._organ_list_label.text()
+    assert "Organs to compare" in tab._organ_list_label.text()
 
 
 def test_the_comparison_table_is_keyed_by_source(tab):

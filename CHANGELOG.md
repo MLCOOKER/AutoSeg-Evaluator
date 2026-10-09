@@ -6,6 +6,27 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+## [3.0.2] — 2026-10-09
+
+Likert scores reach the Report, and two misleading labels are corrected. No
+geometric or dose result changes.
+
+### Fixed — the Report and Compute tabs
+- **Likert scores are analysed in the Report, scored-only contours included.**
+  A study that only graded contours never reached the Report, and scores
+  reached it only for contours that were also computed. Every grader's scores
+  now appear in the Metric list under *Qualitative (Likert)*, whether or not
+  the contours were computed, and once in every ground-truth view: a score
+  describes the contour, not a comparison.
+- **A higher Likert score is better.** Comparisons now say which source the
+  difference favours. Figures name the score ("Likert score — *grader*") and
+  draw it on its 1–5 scale.
+- **"Organs to compare"**, not "Organs in the correction family": per-organ
+  p-values have not been corrected across organs since before v3.0.0.
+- **The STAPLE settings on the Compute tab** are described as applying wherever
+  STAPLE runs, including the multi-observer consensus from the Build Consensus
+  GT tab, not only to drawers using *vs STAPLE*.
+
 ## [3.0.1] — 2026-10-09
 
 Fixes the Windows download closing without a word when it is extracted to a

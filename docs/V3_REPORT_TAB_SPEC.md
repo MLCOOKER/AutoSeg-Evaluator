@@ -112,6 +112,11 @@ report includes only rows with a test source and at least one computed metric.
 The exact predicate must be read off `data/results.py` at implementation time
 rather than assumed here.
 
+*Revised for v3.0.2:* qualitative-only rows are read for their Likert scores,
+so a study that only scored contours reaches the report. A Likert score is
+filed under no ground truth, appears once in every ground-truth view, and
+higher is better.
+
 ### 3.2 Unit of analysis
 
 One observation is **(patient, canonical organ, source) → metric value**.

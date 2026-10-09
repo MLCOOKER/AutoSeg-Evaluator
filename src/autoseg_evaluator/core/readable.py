@@ -64,6 +64,16 @@ METRIC_PROSE: dict[str, str] = {
 #: from the ground truth (test minus ground truth): ``d2cc_gy_diff``.
 DIFFERENCE_SUFFIX = "_diff"
 
+#: A grader's Likert score column, ``likert_<grader>``: 1 (unusable) to 5 (use
+#: as is) on the MD Anderson scale.
+LIKERT_PREFIX = "likert_"
+
+
+def is_likert(metric: str) -> bool:
+    """Whether ``metric`` is a grader's Likert score."""
+    return base_metric(str(metric).strip()).lower().startswith(LIKERT_PREFIX)
+
+
 #: Metric key -> unit, for the axis.
 METRIC_UNITS: dict[str, str] = {
     "hausdorff95": "mm",
@@ -141,6 +151,7 @@ SCALE_BOUNDED_UNIT = "bounded01"
 SCALE_NON_NEGATIVE = "nonnegative"
 SCALE_SIGNED = "signed"
 SCALE_FREE = "free"
+SCALE_LIKERT = "likert"
 
 
 def metric_scale(metric: str) -> str:
@@ -152,6 +163,8 @@ def metric_scale(metric: str) -> str:
     a small difference between four good contours.
     """
     key = base_metric(str(metric).strip().lower())
+    if is_likert(key):
+        return SCALE_LIKERT
     if key in BOUNDED_UNIT_METRICS:
         return SCALE_BOUNDED_UNIT
     # Differences are tested before anything else, because a difference of a
@@ -173,6 +186,8 @@ def readable_metric(metric: str) -> str:
     subtitle, through :func:`tolerance_note`.
     """
     key = base_metric(str(metric).strip())
+    if is_likert(key):
+        return f"Likert score — {key[len(LIKERT_PREFIX) :]}"
     prose = METRIC_PROSE.get(key.lower())
     if prose:
         return prose

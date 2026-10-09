@@ -545,9 +545,11 @@ class ComputeTab(QWidget):
     def _build_staple_group(self) -> QGroupBox:
         box = QGroupBox("STAPLE consensus parameters", self)
         box.setToolTip(
-            "Only relevant when one or more drawers have STAPLE consensus mode "
-            "enabled. STAPLE (Warfield, Zou & Wells 2002) estimates a probabilistic "
-            "ground truth from N rater segmentations via expectation-maximisation."
+            "Used wherever STAPLE runs: a drawer's vs STAPLE consensus, and a "
+            "multi-observer consensus from the Build Consensus GT tab when it is "
+            "the ground truth. STAPLE (Warfield, Zou & Wells 2002) estimates a "
+            "probabilistic ground truth from N rater segmentations via "
+            "expectation-maximisation."
         )
         layout = QFormLayout(box)
         layout.setContentsMargins(8, 6, 8, 6)

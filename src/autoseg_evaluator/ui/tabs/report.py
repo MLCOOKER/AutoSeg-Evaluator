@@ -595,8 +595,8 @@ class ReportTab(QWidget):
         self._axis_combo.addItem("Sources — one organ", FamilyAxis.SOURCES)
         self._axis_combo.setToolTip(
             _tip(
-                "What the correction family varies. Both ask a real question and "
-                "neither contains the other.",
+                "What the comparison varies. Both ask a real question and neither "
+                "contains the other.",
                 "<b>Organs</b> — one challenger against the reference, across the "
                 "organs you select. <i>Where does this vendor differ from the one "
                 "we use?</i>",
@@ -641,7 +641,7 @@ class ReportTab(QWidget):
         form.addLayout(left, stretch=1)
 
         right = QVBoxLayout()
-        self._organ_list_label = QLabel("Organs in the correction family", self)
+        self._organ_list_label = QLabel("Organs to compare", self)
         right.addWidget(self._organ_list_label)
         self._organ_list = QListWidget(self)
         self._organ_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
@@ -952,9 +952,7 @@ class ReportTab(QWidget):
         self._organ_list.blockSignals(False)
 
         self._organ_list_label.setText(
-            "Organ to compare every source on"
-            if across_sources
-            else "Organs in the correction family"
+            "Organ to compare every source on" if across_sources else "Organs to compare"
         )
         self._challenger_combo.setEnabled(not across_sources)
         self._challenger_row_label.setEnabled(not across_sources)
@@ -1434,7 +1432,7 @@ class ReportTab(QWidget):
                     item = QTableWidgetItem(cell_text)
                     item.setToolTip(
                         _tip(
-                            f"<b>{organ}</b> was included in the correction family but "
+                            f"<b>{organ}</b> was selected, but "
                             "no patient had a contour from both sources, so no "
                             "comparison could be made.",
                             "The row is kept so the question it represents stays "

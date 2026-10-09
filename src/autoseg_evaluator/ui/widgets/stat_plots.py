@@ -28,6 +28,7 @@ from PySide6.QtWidgets import QFrame, QScrollArea, QSizePolicy, QWidget
 
 from autoseg_evaluator.core.readable import (
     SCALE_BOUNDED_UNIT,
+    SCALE_LIKERT,
     SCALE_NON_NEGATIVE,
     SCALE_SIGNED,
     metric_scale,
@@ -121,6 +122,11 @@ def _apply_scale(axes, metric: str, values: list[float]) -> None:
     scale = metric_scale(metric)
     if scale == SCALE_BOUNDED_UNIT:
         axes.set_ylim(-0.02, 1.02)
+        return
+    if scale == SCALE_LIKERT:
+        # The whole scale, ticked at its five points: a score of 4.5 is not one.
+        axes.set_ylim(0.6, 5.4)
+        axes.set_yticks([1, 2, 3, 4, 5])
         return
     if not finite:
         return
