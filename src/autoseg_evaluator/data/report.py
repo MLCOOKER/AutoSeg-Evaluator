@@ -449,6 +449,12 @@ class ReportModel:
 
     Recorded for every case where both overlaps were measured, so a count has
     its denominator."""
+    _gt_only: dict[tuple[str, str, str], dict[tuple[str, str], bool]] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
+    """``(organ, source, reference) -> {case: the GT overlaps the PTV, the test does not}``.
+
+    The reverse of :attr:`_ptv_only`, over the same cases."""
     _discontinuity: dict[tuple[str, str, str], dict[tuple[str, str], bool]] = field(
         default_factory=lambda: defaultdict(dict)
     )
@@ -524,6 +530,10 @@ class ReportModel:
                 dict,
                 {key: dict(cases) for key, cases in self._ptv_only.items() if key[2] == reference},
             ),
+            _gt_only=defaultdict(
+                dict,
+                {key: dict(cases) for key, cases in self._gt_only.items() if key[2] == reference},
+            ),
             _discontinuity=defaultdict(
                 dict,
                 {
@@ -581,13 +591,26 @@ class ReportModel:
         """``(k, n)``: of ``n`` cases with both overlaps measured, ``k`` where the
         test contour overlaps the PTV and the ground truth does not.
 
-        ``None`` when no case of this organ and source was measured. Only that
-        one case is counted (D9): a test missing an overlap the ground truth has
-        shows in the difference, not here.
+        ``None`` when no case of this organ and source was measured. The
+        reverse case is :meth:`gt_only_overlap`.
         """
+        return self._count(self._ptv_only, organ, source)
+
+    def gt_only_overlap(self, organ: str, source: str) -> tuple[int, int] | None:
+        """``(k, n)``: of ``n`` cases with both overlaps measured, ``k`` where the
+        ground truth overlaps the PTV and the test contour does not.
+
+        ``None`` when no case of this organ and source was measured.
+        """
+        return self._count(self._gt_only, organ, source)
+
+    @staticmethod
+    def _count(
+        table: dict[tuple[str, str, str], dict[tuple[str, str], bool]], organ: str, source: str
+    ) -> tuple[int, int] | None:
         flags = [
             flag
-            for (name, label, _reference), cases in self._ptv_only.items()
+            for (name, label, _reference), cases in table.items()
             if name == organ and label == source
             for flag in cases.values()
         ]
@@ -1060,6 +1083,9 @@ def build_report_model(
         if _finite(test_ptv) and _finite(gt_ptv):
             model._ptv_only[(organ, source, reference)][(patient, linkage)] = bool(
                 test_ptv > 0 and gt_ptv == 0
+            )
+            model._gt_only[(organ, source, reference)][(patient, linkage)] = bool(
+                gt_ptv > 0 and test_ptv == 0
             )
         for metric, value in metrics.items():
             if not isinstance(value, (int, float)) or isinstance(value, bool):

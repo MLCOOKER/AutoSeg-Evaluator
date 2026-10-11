@@ -80,6 +80,7 @@ truncated; it defines the extent.
 | `test_ptv_overlap_cc` | Test overlap with PTV (cc) | The test contour's volume inside the PTV; 0 = no overlap |
 | `ptv_overlap_diff_cc` | PTV overlap difference (cc) | Test − GT (D2) |
 | `test_only_ptv_overlap` | Test-only PTV overlap | True: the test overlaps the PTV and the ground truth does not (D9) |
+| `gt_only_ptv_overlap` | GT-only PTV overlap | True: the ground truth overlaps the PTV and the test does not (D9, v3.0.3) |
 
 Volumes rather than yes/no flags: with no threshold (D1), "overlaps" is
 "above zero", so a volume carries the yes/no and the amount together, and the
@@ -107,6 +108,13 @@ does not**: test overlap above zero and ground-truth overlap zero. Shown as
 "k of n", n being the cases where both were measured. Only that case is
 counted. A test contour that misses an overlap the ground truth has is visible
 in the difference column, but is not flagged here.
+
+*Revised for v3.0.3 (user decision, 2026-10-11):* the reverse case is flagged
+too. A `gt_only_ptv_overlap` column is true when the ground truth overlaps the
+PTV and the test contour does not, and a second coverage column, "GT-only PTV
+overlap", counts it as "k of n" over the same cases. A test contour that stays
+out of a PTV the ground truth enters understates the conflict a plan has to
+resolve, which is as worth finding as the opposite.
 
 ## 3. Which structures count as a PTV
 
@@ -175,9 +183,10 @@ Counting the overlap only inside the PTV's bounding box keeps the cost to about
 
 ## 8. Report tab and PDF
 
-- The D9 column in the coverage table, on the tab and in the PDF, headed
-  "Test-only PTV overlap". It is hidden when no case had its overlap measured,
-  and reads "—" for an organ and source with none measured.
+- The D9 columns in the coverage table, on the tab and in the PDF, headed
+  "Test-only PTV overlap" and (from v3.0.3) "GT-only PTV overlap". They are
+  hidden when no case had its overlap measured, and read "—" for an organ and
+  source with none measured.
 - `test_ptv_overlap_cc` and `ptv_overlap_diff_cc` join the metric selector as a
   family of their own. Neither has a better direction: the target is the
   ground truth's overlap, not more or less. So they are treated like the

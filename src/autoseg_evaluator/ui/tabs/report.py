@@ -223,6 +223,10 @@ class _CompactTable(QTableWidget):
             width += self.verticalScrollBar().sizeHint().width()
         self._fitted = QSize(width, height)
         self.updateGeometry()
+        # The scroll range is otherwise brought up to date only when Qt next
+        # lays the table out, so columns hidden just before this still count:
+        # the table grew by a scroll bar it had no need of.
+        self.updateGeometries()
         self._apply_height()
 
     def sizeHint(self) -> QSize:  # noqa: N802 — Qt override
@@ -283,7 +287,15 @@ COVERAGE_COLUMNS: list[tuple[str, str]] = [
         "Test-only PTV overlap",
         _tip(
             "How many of this source's contours of this organ overlap the PTV where the ground truth's does not, out of the cases where both overlaps were measured.",
-            "Any overlap counts. The PTV is every structure typed PTV in the ground truth's structure set, combined. A test contour that misses an overlap the ground truth has is not counted here; the PTV overlap difference shows it.",
+            "Any overlap counts. The PTV is every structure typed PTV in the ground truth's structure set, combined. The reverse case is the next column.",
+            "Shown only when PTV overlap was computed. <b>—</b>: not measured for this organ and source, as with a consensus ground truth.",
+        ),
+    ),
+    (
+        "GT-only PTV overlap",
+        _tip(
+            "How many of this source's contours of this organ stay out of the PTV where the ground truth's reaches into it, out of the cases where both overlaps were measured.",
+            "Any overlap counts. The PTV is every structure typed PTV in the ground truth's structure set, combined.",
             "Shown only when PTV overlap was computed. <b>—</b>: not measured for this organ and source, as with a consensus ground truth.",
         ),
     ),
@@ -297,9 +309,12 @@ COVERAGE_COLUMNS: list[tuple[str, str]] = [
     ),
 ]
 
-#: Where the coverage table holds its two counts, each hidden when nothing fed it.
+#: Where the coverage table holds its counts, each hidden when nothing fed it.
 COVERAGE_PTV_COLUMN = [title for title, _tip_text in COVERAGE_COLUMNS].index(
     "Test-only PTV overlap"
+)
+COVERAGE_GT_ONLY_COLUMN = [title for title, _tip_text in COVERAGE_COLUMNS].index(
+    "GT-only PTV overlap"
 )
 COVERAGE_DISCONTINUITY_COLUMN = [title for title, _tip_text in COVERAGE_COLUMNS].index(
     "Contour Discontinuity"
@@ -1297,10 +1312,12 @@ class ReportTab(QWidget):
                 cut = _TRUNCATION_TEXT[self._model.truncation(organ)] if first else ""
                 counted = self._model.ptv_only_overlap(organ, source)
                 ptv = f"{counted[0]} of {counted[1]}" if counted else "—"
+                missed = self._model.gt_only_overlap(organ, source)
+                gt_only = f"{missed[0]} of {missed[1]}" if missed else "—"
                 broken = self._model.discontinuity(organ, source)
                 gaps = f"{broken[0]} of {broken[1]}" if broken else "—"
                 for column, text in enumerate(
-                    [organ if first else "", source, cell.summary(), cut, ptv, gaps]
+                    [organ if first else "", source, cell.summary(), cut, ptv, gt_only, gaps]
                 ):
                     item = QTableWidgetItem(text)
                     item.setData(ORGAN_ROLE, organ)
@@ -1314,7 +1331,9 @@ class ReportTab(QWidget):
                     table.setItem(row, column, item)
         # Only where the overlap was computed: a column of dashes would suggest
         # a measurement that was never asked for.
-        table.setColumnHidden(COVERAGE_PTV_COLUMN, not self._model.measured_ptv_overlap())
+        measured = self._model.measured_ptv_overlap()
+        table.setColumnHidden(COVERAGE_PTV_COLUMN, not measured)
+        table.setColumnHidden(COVERAGE_GT_ONLY_COLUMN, not measured)
         table.setColumnHidden(
             COVERAGE_DISCONTINUITY_COLUMN, not self._model.checked_discontinuity()
         )

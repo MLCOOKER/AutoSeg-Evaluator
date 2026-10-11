@@ -166,6 +166,7 @@ def test_the_three_columns_are_measured_against_the_combined_ptvs():
     assert row["metrics"]["test_ptv_overlap_cc"] == pytest.approx(TEST_IN_PTV_CC)
     assert row["metrics"]["ptv_overlap_diff_cc"] == pytest.approx(TEST_IN_PTV_CC - GT_IN_PTV_CC)
     assert row["metrics"]["test_only_ptv_overlap"] is False  # the GT overlaps too
+    assert row["metrics"]["gt_only_ptv_overlap"] is False  # and so does the test
     # Typed PTV, whatever the name; named PTV but typed otherwise, never.
     assert basis["structures"] == ["Boost", "PTV_56"]
     assert row["audit"]["ptv"] == {"status": PTV_STATUS_MEASURED, "structures": ["Boost", "PTV_56"]}
@@ -268,10 +269,12 @@ def test_both_checks_are_recorded_whatever_is_ticked(qapp, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("gt_voxels", "test_voxels", "flagged"),
-    [(0, 5, True), (5, 5, False), (5, 0, False), (0, 0, False)],
+    ("gt_voxels", "test_voxels", "test_only", "gt_only"),
+    [(0, 5, True, False), (5, 5, False, False), (5, 0, False, True), (0, 0, False, False)],
 )
-def test_test_only_overlap_is_yes_only_where_the_gt_has_none(gt_voxels, test_voxels, flagged):
+def test_each_one_sided_overlap_is_yes_only_where_the_other_has_none(
+    gt_voxels, test_voxels, test_only, gt_only
+):
     worker = _worker()
     region = np.ones((1, 1, 10), bool)
     filled = np.zeros((1, 1, 10), np.uint8)
@@ -285,7 +288,8 @@ def test_test_only_overlap_is_yes_only_where_the_gt_has_none(gt_voxels, test_vox
     }
     row = {"metrics": {}}
     worker._ptv_into_row(row, basis, test_mask)
-    assert row["metrics"]["test_only_ptv_overlap"] is flagged
+    assert row["metrics"]["test_only_ptv_overlap"] is test_only
+    assert row["metrics"]["gt_only_ptv_overlap"] is gt_only
 
 
 # ---- Table, report and audit ----------------------------------------------------
@@ -300,6 +304,7 @@ def test_the_columns_have_their_names_and_sit_with_the_checks():
         "test_ptv_overlap_cc": "Test overlap with PTV (cc)",
         "ptv_overlap_diff_cc": "PTV overlap difference (cc)",
         "test_only_ptv_overlap": "Test-only PTV overlap",
+        "gt_only_ptv_overlap": "GT-only PTV overlap",
     }
     for key, label in labels.items():
         assert key in CANONICAL_METRIC_COLUMNS
@@ -338,7 +343,8 @@ def _report_row(patient, test_cc, gt_cc, organ="Parotid (L)", source="VendorA"):
     }
 
 
-#: Only P01 overlaps where the ground truth does not. P05 was not measured.
+#: Only P01 overlaps where the ground truth does not, and only P04 misses an
+#: overlap the ground truth has. P05 was not measured.
 COUNTED_ROWS = [
     _report_row("P01", 0.2, 0.0),
     _report_row("P02", 0.2, 0.1),
@@ -353,6 +359,8 @@ def test_only_test_overlap_where_the_gt_has_none_is_counted():
     assert model.measured_ptv_overlap()
     assert model.ptv_only_overlap("Parotid (L)", "VendorA") == (1, 4)
     assert model.ptv_only_overlap("Parotid (L)", "VendorB") is None
+    assert model.gt_only_overlap("Parotid (L)", "VendorA") == (1, 4)
+    assert model.gt_only_overlap("Parotid (L)", "VendorB") is None
     assert not build_report_model([_report_row("P01", None, None)]).measured_ptv_overlap()
 
 
@@ -370,26 +378,34 @@ def _report_tab(rows):
 
 
 def test_the_coverage_table_counts_test_only_overlaps(qapp, tmp_path):
-    from autoseg_evaluator.ui.tabs.report import COVERAGE_PTV_COLUMN
+    from autoseg_evaluator.ui.tabs.report import COVERAGE_GT_ONLY_COLUMN, COVERAGE_PTV_COLUMN
 
     tab = _report_tab(COUNTED_ROWS + [_report_row(p, 0.0, 0.0, source="VendorB") for p in "AB"])
     table = tab._coverage_table
     assert not table.isColumnHidden(COVERAGE_PTV_COLUMN)
     said = {table.item(r, 1).text(): table.item(r, COVERAGE_PTV_COLUMN).text() for r in range(2)}
     assert said == {"VendorA": "1 of 4", "VendorB": "0 of 2"}
+    assert not table.isColumnHidden(COVERAGE_GT_ONLY_COLUMN)
+    missed = {
+        table.item(r, 1).text(): table.item(r, COVERAGE_GT_ONLY_COLUMN).text() for r in range(2)
+    }
+    assert missed == {"VendorA": "1 of 4", "VendorB": "0 of 2"}
 
     html = tab._pdf_html(Path(tmp_path))
     assert ">Test-only PTV overlap</th>" in html
+    assert ">GT-only PTV overlap</th>" in html
     assert ">1 of 4</td>" in html
     tab.deleteLater()
 
 
 def test_the_count_is_hidden_where_no_overlap_was_measured(qapp, tmp_path):
-    from autoseg_evaluator.ui.tabs.report import COVERAGE_PTV_COLUMN
+    from autoseg_evaluator.ui.tabs.report import COVERAGE_GT_ONLY_COLUMN, COVERAGE_PTV_COLUMN
 
     tab = _report_tab([_report_row(f"P0{p}", None, None) for p in range(3)])
     assert tab._coverage_table.isColumnHidden(COVERAGE_PTV_COLUMN)
-    assert "Test-only PTV overlap" not in tab._pdf_html(Path(tmp_path))
+    assert tab._coverage_table.isColumnHidden(COVERAGE_GT_ONLY_COLUMN)
+    html = tab._pdf_html(Path(tmp_path))
+    assert "Test-only PTV overlap" not in html and "GT-only PTV overlap" not in html
     tab.deleteLater()
 
 

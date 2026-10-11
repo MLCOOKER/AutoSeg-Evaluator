@@ -191,6 +191,7 @@ def test_coverage_separates_a_declined_organ_from_an_unrun_patient(tab):
         "Coverage",
         "Truncated",
         "Test-only PTV overlap",
+        "GT-only PTV overlap",
         "Contour Discontinuity",
     ]
 

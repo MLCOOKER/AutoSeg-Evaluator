@@ -6,6 +6,24 @@ All notable changes to AutoSeg Evaluator are documented here. The format follows
 
 ## [Unreleased]
 
+## [3.0.3] — 2026-10-11
+
+Flags the reverse PTV overlap: a ground truth that reaches into the PTV where
+the test contour does not. No existing result changes.
+
+### Added — GT-only PTV overlap
+- **A GT-only PTV overlap column** in Results: yes when the ground truth
+  overlaps the PTV and the test contour does not, the reverse of Test-only PTV
+  overlap. Until now this case showed only as a negative PTV overlap
+  difference.
+- **The Report's coverage table counts it**, as "k of n" beside the test-only
+  count, on the tab and in the PDF.
+
+### Fixed
+- **Report tables no longer grow by a scroll bar they don't show.** A table's
+  scroll range was brought up to date only at Qt's next layout, so columns
+  hidden just before it was sized still counted towards its width.
+
 ## [3.0.2] — 2026-10-09
 
 Likert scores reach the Report, and two misleading labels are corrected. No

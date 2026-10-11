@@ -478,10 +478,11 @@ tolerance field is not taken to mean 3 mm.
   takes a list — "1, 2, 3" — and each tolerance fills its own column; the
   surface distances are computed once.
 - **Recorded on every run**, whatever is ticked, because they are checks rather
-  than metrics (a note on the tab says so). **PTV overlap** adds four columns:
+  than metrics (a note on the tab says so). **PTV overlap** adds five columns:
   the ground truth's and the test contour's volume inside the PTV (cc), the
-  difference, test − GT, and *Test-only PTV overlap*, true when the test
-  overlaps the PTV and the ground truth does not. The PTV is every structure typed PTV in the ground
+  difference, test − GT, *Test-only PTV overlap*, true when the test
+  overlaps the PTV and the ground truth does not, and *GT-only PTV overlap*,
+  true in the reverse case. The PTV is every structure typed PTV in the ground
   truth's own structure set, combined; names are not read. Blank for a
   consensus ground truth and for a structure set with no structure typed PTV;
   [`V3_PTV_OVERLAP_SPEC.md`](V3_PTV_OVERLAP_SPEC.md) has the decisions.
